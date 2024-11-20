@@ -68,7 +68,7 @@ class TensorNetwork:
         reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
         return reduced_tensor.tensor
 
-    def decompose(self, target, initial_learning_rate=1, epochs=1000):
+    def decompose(self, target, initial_learning_rate=0.05, epochs=1000):
         optimizer = torch.optim.Adam([node.tensor for node in self.nodes], lr=initial_learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=100, verbose=True)
 
