@@ -6,6 +6,8 @@ import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
 
+from torch import Tensor
+
 
 tn.set_default_backend("pytorch")
 
@@ -16,18 +18,18 @@ def letter_range(n):
 
 
 class TensorNetwork:
-    def __init__(self, adj_matrix, cores=None) -> None:
+    def __init__(self, adj_matrix: Tensor, cores=None) -> None:
         # TODO What about ranks?
-        self.adj_matrix = np.maximum(adj_matrix, adj_matrix.T)  # Ensures symmetric adjacency matrix
-        self.modes = np.diag(self.adj_matrix)  # Save ranks
-        self.adj_matrix = self.adj_matrix - np.diag(np.diag(self.adj_matrix))
+        self.adj_matrix = torch.maximum(adj_matrix, adj_matrix.T).to(dtype=torch.int )  # Ensures symmetric adjacency matrix
+        self.modes = torch.diag(self.adj_matrix).tolist()  # Save ranks
+        self.adj_matrix = self.adj_matrix - torch.diag(torch.diag(self.adj_matrix))
         self.shape = self.adj_matrix.shape
 
         assert self.shape[0] == self.shape[1], 'adj_matrix must be a square matrix.'
         
         self.dim = self.shape[0]
 
-        self.G = nx.from_numpy_array(self.adj_matrix)
+        self.G = nx.from_numpy_array(np.array(self.adj_matrix))
         self.nodes = []
         self.output_order = []  
         if cores is None:
@@ -68,11 +70,14 @@ class TensorNetwork:
         reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
         return reduced_tensor.tensor
 
-    def decompose(self, target, initial_learning_rate=0.05, epochs=1000):
-        optimizer = torch.optim.Adam([node.tensor for node in self.nodes], lr=initial_learning_rate)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=100, verbose=True)
+    def decompose(self, target, initial_learning_rate=0.01, max_epochs=100, tol=0.0001):
+        # optimizer = torch.optim.Adam([node.tensor for node in self.nodes], lr=initial_learning_rate, betas=(0.85, 0.98))
+        optimizer = torch.optim.SGD([node.tensor for node in self.nodes], lr=initial_learning_rate, momentum=0.9 )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.75, patience=1000, verbose=True)
 
-        for epoch in range(epochs):
+        loss = float("inf")
+        epoch = 0 
+        while loss > tol:
             optimizer.zero_grad()
             nodes_cp, edges_cp = tn.copy(self.nodes)
             output_order = [edges_cp[e] for e in self.output_order]
@@ -80,6 +85,7 @@ class TensorNetwork:
             loss = torch.norm(target - contracted_t)
             loss.backward()
             optimizer.step()
+            epoch += 1
 
             scheduler.step(loss)
             if epoch % 50 == 0:
@@ -87,18 +93,36 @@ class TensorNetwork:
 
         print(f"Final relative error: {loss/torch.norm(target):0.4f}")
 
-if __name__=="__main__":
-    B = np.array([
-        [4, 2, 0, 2],
-        [2, 3, 2, 0],
-        [0, 2, 5, 2],
-        [2, 0, 2, 4]
-    ])
-    cores = [torch.randn((k, 2, 2)) for k in [4, 3, 5, 4]]
-    ntwrk = TensorNetwork(B, cores=cores)
-    target = ntwrk.contract_network()
+    def numel(self):
+        return sum(node.tensor.numel() for node in self.nodes)
+        
 
+def sim_tensor_from_adj(A):
+    A = A.to(dtype=torch.int)
+    ranks = torch.diag(A)
+    adj = torch.max(A, A.T) - torch.diag(ranks)
+    ranks = ranks.tolist()
+    cores = []
+    for i, a in enumerate(adj.unbind()):
+        shape = [ranks[i]] + a[a.nonzero().squeeze()].tolist()
+        cores.append(torch.randn(shape))
+    
+    ntwrk = TensorNetwork(adj, cores=cores)
+    return ntwrk.contract_network()
+    
+
+
+if __name__=="__main__":
+    torch.manual_seed(2)
+    B = torch.tensor([
+        [4, 2, 2, 2],
+        [2, 3, 2, 2],
+        [2, 2, 5, 2],
+        [2, 2, 2, 4]
+    ])
+    
+    target = sim_tensor_from_adj(B)
+
+    # torch.manual_seed(1)
     ntwrk_ = TensorNetwork(B)
     ntwrk_.decompose(target)
-
-
