@@ -135,39 +135,14 @@ class BOSS(object):
         assert (torch.diagonal(A) == self.t_shape.to(A)).all()
 
         # Perform contraction  # TODO This is a constrained problem --> It may fail and need to be handled separately
-        return self.evaluate_y(A)
-
-    def _parallel_eval(self, A, id, event, y_dict):
-        while event.is_set():
-            tgt = self.target.clone()
-            t_ntwrk = TensorNetwork(A)
-            tn_exist = t_ntwrk.decompose(tgt)
-            if tn_exist:
-                y_dict[id] = t_ntwrk.numel() / self.target.numel()
-                event.clear()
-            break
-
-    def evaluate_y(self, A):
-        manager = mp.Manager()
-        y_dict = manager.dict()
-        event = manager.Event()
-        event.set()
-        processes = []
-        for i in range(self.tn_runs):
-            process = mp.Process(
-                target=self._parallel_eval, args=(A, i, event, y_dict)
-            )
-            processes.append(process)
-            process.start()
-
-        for process in processes:
-            process.join()
-
-        if y_dict:
-            return min(y_dict.values())
-
-        return self.y_upper * 2
-
+        tgt = self.target.clone()
+        t_ntwrk = TensorNetwork(A)
+        tn_exist = t_ntwrk.decompose(tgt)
+        if tn_exist:
+            return t_ntwrk.numel() / self.target.numel()
+        else:
+            return self.y_upper * 2
+        
 
 if __name__=="__main__":
     torch.manual_seed(5)
