@@ -5,13 +5,13 @@ from multiprocessing import Pool
 from torch import Tensor
 
 from botorch.models.transforms import Round, Normalize, Standardize, ChainedInputTransform
-from botorch.models import SingleTaskGP
+from botorch.models import SingleTaskGP, ModelListGP
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
 from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, ConstrainedExpectedImprovement
 from botorch.optim import optimize_acqf
 
-from gpytorch.kernels import RBFKernel, MaternKernel
+from gpytorch.kernels import RBFKernel, MaternKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
 from botorch.fit import fit_gpytorch_mll
@@ -27,7 +27,8 @@ class BOSS(object):
             budget = 100, 
             n_init = 10,
             tn_eval_attempts = 4,
-            n_workers = 4
+            n_workers = 4,
+            verbose=True
         ) -> None:
         self.target = target
         self.t_shape = torch.tensor(target.shape)
@@ -42,11 +43,10 @@ class BOSS(object):
         self.n_init = n_init
         self.y_upper = ((self.t_shape.max()**self.N)*self.N/self.target.numel()).to(torch.float64)
         self.n_workers = n_workers
-         
-        # self.bounds =   # TODO: Replace this with user input 
         self.bounds = torch.ones((2, self.D))  # What should be proper bounds
         self.bounds[1] *= max(self.t_shape) # Max rank for each node  # TODO is it better for each node's rank to be its own max? 
 
+        self.verbose = verbose
 
     def _get_tf(self, init=False):
         if init:
@@ -71,12 +71,12 @@ class BOSS(object):
             approximate=False
         )
 
-        tfs["normalize_tf"] = Normalize(
-            d=init_bounds.shape[1],
-            bounds=init_bounds,
-            transform_on_train=False,
-            transform_on_fantasize=False,
-        )
+        # tfs["normalize_tf"] = Normalize(
+        #     d=init_bounds.shape[1],
+        #     bounds=init_bounds,
+        #     transform_on_train=False,
+        #     transform_on_fantasize=False,
+        # )
         
         tf = ChainedInputTransform(**tfs)
         tf.eval()
@@ -94,37 +94,48 @@ class BOSS(object):
         return X_init, y_init
 
     def _get_model(self, X, y):
-        kernel = RBFKernel(ard_num_dims=self.D) 
-        
+        kernel = ScaleKernel(base_kernel=RBFKernel(ard_num_dims=self.D))
+        # in_tf = self._get_tf()
         likelihood = GaussianLikelihood()  # TODO Impose no noise? 
         gp = SingleTaskGP(
             X, y.unsqueeze(1),
-            input_transform=Round(integer_indices=[i for i in range(self.D)]), 
             likelihood=likelihood,
             outcome_transform=Standardize(m=1),
-            covar_module=kernel
+            covar_module=kernel,
+            # input_transform=in_tf
         )
         mll = ExactMarginalLogLikelihood(model=gp, likelihood=gp.likelihood)
-        fit_gpytorch_mll(mll)
+        fit_gpytorch_mll(mll) 
         return gp
 
     def forward(self):
-        X, y = self._initial_points()
-        
+        X, Y = self._initial_points()
+        best_Y = Y.min()
         b = 0 
         while b < self.budget:
-            model = self._get_model(X, y)
+            gp = self._get_model(X, Y)
+            model = ModelListGP(gp, gp)
             logEI = LogConstrainedExpectedImprovement(
                 model=model,
+                objective_index=1,
                 constraints={0: [0, self.y_upper]},
-                maximize=False
+                maximize=False,
+                best_f=best_Y
             )
-            cand = optimize_acqf(logEI, bounds=self.bounds, num_restarts=5, q=1)
+            cand, acqf_x = optimize_acqf(
+                acq_function=logEI, 
+                bounds=self.bounds, 
+                q=1,
+                num_restarts=20,
+                raw_samples=512
+            )
+            y = self.f(cand)
+            X = torch.concat([X, x])
+            Y = torch.concat([Y, y])
 
     def f(self, raw_x: Tensor):
         x = unnormalize(raw_x, bounds=self.bounds).to(torch.int)
 
-        assert x.shape[0] == self.D
         # Make adjancy matrix from x 
         A = torch.zeros((self.N, self.N))
         A[torch.triu_indices(self.N, self.N, offset=1).unbind()] = x.to(A)
@@ -134,15 +145,57 @@ class BOSS(object):
         # Asset diagonal elements are equal to target cores
         assert (torch.diagonal(A) == self.t_shape.to(A)).all()
 
-        # Perform contraction  # TODO This is a constrained problem --> It may fail and need to be handled separately
-        tgt = self.target.clone()
-        t_ntwrk = TensorNetwork(A)
-        tn_exist = t_ntwrk.decompose(tgt)
-        if tn_exist:
-            return t_ntwrk.numel() / self.target.numel()
-        else:
-            return self.y_upper * 2
+        # Perform contraction 
+        i = 0
+        tn_exist = False
+        while i < self.tn_runs:
+            t_ntwrk = TensorNetwork(A)
+            tn_exist = t_ntwrk.decompose(self.target)
+            if tn_exist:
+                return t_ntwrk.numel() / self.target.numel()
+            i += 1 
+            del t_ntwrk
+        return self.y_upper * 2
         
+        # return self.evaluate_y(A)
+
+    def _log(self, type, value):
+        if type == "acqf":
+            if self.verbose:
+                print(f"New objective value: {value}")
+
+    
+    # def _parallel_eval(self, A, id, event=None, y_dict=None):
+    #     while event.is_set():
+    #         tgt = self.target.clone()
+    #         t_ntwrk = TensorNetwork(A)
+    #         tn_exist = t_ntwrk.decompose(tgt)
+    #         if tn_exist:
+    #             y_dict[id] = t_ntwrk.numel() / self.target.numel()
+    #             event.clear()
+    #         break
+
+    # def evaluate_y(self, A):
+    #     manager = mp.Manager()
+    #     y_dict = manager.dict()
+    #     event = manager.Event()
+    #     event.set()
+    #     processes = []
+    #     for i in range(self.tn_runs):
+    #         process = mp.Process(
+    #             target=self._parallel_eval, args=(A, i, event, y_dict)
+    #         )
+    #         processes.append(process)
+    #         process.start()
+
+    #     for process in processes:
+    #         process.join()
+
+    #     if y_dict:
+    #         return min(y_dict.values())
+
+    #     return self.y_upper * 2
+
 
 if __name__=="__main__":
     torch.manual_seed(5)
@@ -165,7 +218,11 @@ if __name__=="__main__":
 
     X = sim_tensor_from_adj(A)
 
-    bo = BOSS(X)
+    bo = BOSS(
+        X,
+        n_init=15,
+        tn_eval_attempts=1
+        )
     bo.forward()
 
     print("You got this")

@@ -67,7 +67,7 @@ class TensorNetwork:
         reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
         return reduced_tensor.tensor
 
-    def decompose(self, target, tol=0.0001, init_lr=0.01, patience=2500, max_epochs=100000):
+    def decompose(self, target, tol=0.001, init_lr=0.1, patience=2500, max_epochs=75000):
         # adam = torch.optim.SGD([node.tensor for node in self.nodes], lr=init_lr, momentum=0.9)
         adam = torch.optim.Adam([node.tensor for node in self.nodes], lr=init_lr, betas=(0.85, 0.98))
 
@@ -116,9 +116,9 @@ class TensorNetwork:
                     patience *= 2
 
             scheduler.step(loss)
-            # if epoch % 100 == 0:
-            #     sys.stdout.flush()
-            #     print(f'\rEpoch {epoch}, Loss: {loss.item()}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
+            if epoch % 100 == 0:
+                sys.stdout.flush()
+                print(f'\rEpoch {epoch}, Loss: {loss.item()}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
 
         return True
 
