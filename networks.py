@@ -67,10 +67,10 @@ class TensorNetwork:
         reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
         return reduced_tensor.tensor
 
-    def decompose(self, target, tol=0.001, init_lr=0.1, patience=2500, max_epochs=75000):
-        # adam = torch.optim.SGD([node.tensor for node in self.nodes], lr=init_lr, momentum=0.9)
-        adam = torch.optim.Adam([node.tensor for node in self.nodes], lr=init_lr, betas=(0.85, 0.98))
-
+    def decompose(self, target, tol=0.01, init_lr=0.05, patience=5000, max_epochs=100000):
+        adam = torch.optim.SGD([node.tensor for node in self.nodes], lr=init_lr, momentum=0.75)
+        # adam = torch.optim.Adam([node.tensor for node in self.nodes], lr=init_lr, betas=(0.85, 0.98))
+        
         loss = float("inf")
         best_loss = loss
         wait = 0 
@@ -80,7 +80,7 @@ class TensorNetwork:
         optimizer = adam
         switched = False
         
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1/torch.e, patience=1000, verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1/torch.e, patience=1000)
 
         while loss > tol:
             optimizer.zero_grad()
@@ -98,29 +98,29 @@ class TensorNetwork:
             if loss.item() < best_loss - min_delta:
                 best_loss = loss.item()
                 wait = 0
-                min_delta = best_loss/100
+                min_delta = best_loss/10
             else:
                 wait += 1
             
             if wait >= patience:
-                if switched:
-                    # print(f"TN Failed")
-                    return False
-                else:
-                    wait = 0
-                    switched = True
-                    lr_ = optimizer.param_groups[0]["lr"] * torch.e**2
-                    optimizer = torch.optim.SGD([node.tensor for node in self.nodes], lr=lr_, momentum=0.9)
-                    # optimizer = torch.optim.Adam([node.tensor for node in self.nodes], lr=lr_, betas=(0.85, 0.98))
-                    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1/torch.e, patience=1000, verbose=True)
-                    patience *= 2
+                return loss
+            #     if switched:
+            #         return loss
+            #     else:
+            #         wait = 0
+            #         switched = True
+            #         lr_ = optimizer.param_groups[0]["lr"] * torch.e**2
+            #         optimizer = torch.optim.SGD([node.tensor for node in self.nodes], lr=lr_, momentum=0.9)
+            #         # optimizer = torch.optim.Adam([node.tensor for node in self.nodes], lr=lr_, betas=(0.85, 0.98))
+            #         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1/torch.e, patience=1000)
+            #         patience *= 2
 
             scheduler.step(loss)
-            if epoch % 100 == 0:
-                sys.stdout.flush()
-                print(f'\rEpoch {epoch}, Loss: {loss.item()}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
+            # if epoch % 100 == 0:
+            #     sys.stdout.flush()
+            #     print(f'\rEpoch {epoch}, Loss: {loss.item()}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
 
-        return True
+        return loss
 
     def numel(self):
         return torch.tensor(sum(node.tensor.numel() for node in self.nodes))
