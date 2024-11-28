@@ -37,7 +37,7 @@ class TensorNetwork:
                 core = torch.nn.init.normal_(
                     torch.nn.Parameter(torch.empty(*core_shape)), 
                     mean=0.0, 
-                    std=1.0
+                    std=0.1
                 )  # initialize the core tensor as a PyTorch parameter
                 node = tn.Node(core, name=name)
                 self.nodes.append(node)
@@ -63,14 +63,17 @@ class TensorNetwork:
         nx.draw(self.G, with_labels=True)
         plt.show()
         
-    def contract_network(self):
-        reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
+    def contract_network(self, ignore_order=False):
+        if ignore_order:
+            reduced_tensor = tn.contractors.greedy(self.nodes, ignore_edge_order=True)
+        else:
+            reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
         return reduced_tensor.tensor
 
-    def decompose(self, target, tol=0.0001, init_lr=0.01, patience=2500, max_epochs=100000):
-        # adam = torch.optim.SGD([node.tensor for node in self.nodes], lr=init_lr, momentum=0.9)
-        adam = torch.optim.Adam([node.tensor for node in self.nodes], lr=init_lr, betas=(0.85, 0.98))
-
+    def decompose(self, target, tol=0.01, init_lr=0.05, patience=5000, max_epochs=100000):
+        adam = torch.optim.SGD([node.tensor for node in self.nodes], lr=init_lr, momentum=0.75)
+        # adam = torch.optim.Adam([node.tensor for node in self.nodes], lr=init_lr, betas=(0.85, 0.98))
+        
         loss = float("inf")
         best_loss = loss
         wait = 0 
@@ -80,7 +83,7 @@ class TensorNetwork:
         optimizer = adam
         switched = False
         
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1/torch.e, patience=1000, verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1/torch.e, patience=1000)
 
         while loss > tol:
             optimizer.zero_grad()
@@ -98,35 +101,35 @@ class TensorNetwork:
             if loss.item() < best_loss - min_delta:
                 best_loss = loss.item()
                 wait = 0
-                min_delta = best_loss/100
+                min_delta = best_loss/10
             else:
                 wait += 1
             
             if wait >= patience:
-                if switched:
-                    # print(f"TN Failed")
-                    return False
-                else:
-                    wait = 0
-                    switched = True
-                    lr_ = optimizer.param_groups[0]["lr"] * torch.e**2
-                    optimizer = torch.optim.SGD([node.tensor for node in self.nodes], lr=lr_, momentum=0.9)
-                    # optimizer = torch.optim.Adam([node.tensor for node in self.nodes], lr=lr_, betas=(0.85, 0.98))
-                    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1/torch.e, patience=1000, verbose=True)
-                    patience *= 2
+                return loss
+            #     if switched:
+            #         return loss
+            #     else:
+            #         wait = 0
+            #         switched = True
+            #         lr_ = optimizer.param_groups[0]["lr"] * torch.e**2
+            #         optimizer = torch.optim.SGD([node.tensor for node in self.nodes], lr=lr_, momentum=0.9)
+            #         # optimizer = torch.optim.Adam([node.tensor for node in self.nodes], lr=lr_, betas=(0.85, 0.98))
+            #         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1/torch.e, patience=1000)
+            #         patience *= 2
 
             scheduler.step(loss)
             # if epoch % 100 == 0:
             #     sys.stdout.flush()
             #     print(f'\rEpoch {epoch}, Loss: {loss.item()}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
 
-        return True
+        return loss
 
     def numel(self):
         return torch.tensor(sum(node.tensor.numel() for node in self.nodes))
         
 
-def sim_tensor_from_adj(A):
+def sim_tensor_from_adj(A, std_dev=0.1):
     A = A.to(dtype=torch.int)
     ranks = torch.diag(A)
     adj = torch.max(A, A.T) - torch.diag(ranks)
@@ -134,12 +137,11 @@ def sim_tensor_from_adj(A):
     cores = []
     for i, a in enumerate(adj.unbind()):
         shape = [ranks[i]] + a[a.nonzero().squeeze()].tolist()
-        cores.append(torch.randn(shape))
+        cores.append(torch.randn(shape) * std_dev)
     
     ntwrk = TensorNetwork(adj, cores=cores)
     return ntwrk.contract_network()
     
-
 
 if __name__=="__main__":
     torch.manual_seed(2)

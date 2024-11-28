@@ -1,6 +1,6 @@
 from collections import deque
 from scipy.io import loadmat
-from util import *
+from decomp.utils import *
 
 from plotly import graph_objects as go
 from plotly.colors import sample_colorscale

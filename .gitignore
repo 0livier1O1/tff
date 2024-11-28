@@ -1,3 +1,4 @@
 tensorized_weights/
 .vscode/
 .DS_Store
+__pycache__/
