@@ -5,7 +5,7 @@ from algos.bo import BOSS
 
 
 if __name__=="__main__":
-    orders = [4, 5, 6, 7, 8]
+    orders = [5, 6, 7, 8]
     n_samples = 1
     min_rse=0.01
 
@@ -19,7 +19,8 @@ if __name__=="__main__":
                 budget=75,
                 n_init=10,
                 tn_eval_attempts=1,
-                min_rse=min_rse
+                min_rse=min_rse,
+                max_rank=10
             )
             boss()  # Run BOSS
 

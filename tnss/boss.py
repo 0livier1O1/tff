@@ -8,6 +8,8 @@ import warnings
 import torch 
 import multiprocessing as mp
 
+from parallelbar import progress_starmap
+from tqdm import tqdm
 from multiprocessing import Pool
 from torch import Tensor
 
@@ -27,6 +29,7 @@ from gpytorch.likelihoods import GaussianLikelihood
 from botorch.fit import fit_gpytorch_mll
 
 from decomp.tn import TensorNetwork
+from tnss.utils import triu_to_adj_matrix
 
 
 torch.set_printoptions(sci_mode=False)
@@ -40,20 +43,9 @@ class CompressionRatio(DeterministicModel):
         self.diag = diag
 
     def forward(self, X: Tensor) -> Tensor:
-        N = self.target.dim()
         x = unnormalize(X, bounds=self.bounds).round()
-        n = x.shape[0]
-        A = torch.zeros((n, N, N))
-
-        triu_indices = torch.triu_indices(N, N, offset=1)
-        batch_idx1 = torch.arange(n).repeat_interleave(len(triu_indices[0]))
-        batch_idx2 = torch.arange(n).repeat_interleave(N)
-        rng = torch.arange(N)
-
-        A[batch_idx1, triu_indices[0].repeat(n), triu_indices[1].repeat(n)] = x.flatten().to(A)  # Write x into off-diagional elements
-        A = A + A.transpose(-1, -2)
-        A[batch_idx2, rng.repeat(n), rng.repeat(n)] = self.diag.repeat(n).to(A) # Write off-diagional elements
-
+        
+        A = triu_to_adj_matrix(triu=x, diag=self.diag)
         cr = A.prod(dim=-1).sum(dim=-1, keepdim=True)/self.target.numel()
 
         return cr.unsqueeze(-1)
@@ -132,7 +124,7 @@ class BOSS(object):
                 )
                 acqf.append(af)
             x_ = tf(cand)
-            y = self._get_obj_and_constraint(x_).unsqueeze(0)
+            y = self._get_obj_and_constraint(x_)
             X = torch.concat([X, x_])
             Y = torch.concat([Y, y])
         
@@ -189,9 +181,7 @@ class BOSS(object):
         raw_x = draw_sobol_samples(bounds=bounds, n=self.n_init, q=1).squeeze(-2)
         tf = self._get_input_transformation(init=True)
         X_init = tf(raw_x).to(torch.float64)
-        y_init = torch.stack(
-            [self._get_obj_and_constraint(x) for x in X_init.unbind()]
-        ).to(dtype=torch.float64)
+        y_init = self._get_obj_and_constraint(X_init)
         return X_init, y_init
 
     def _get_model(self, X, y):
@@ -213,18 +203,20 @@ class BOSS(object):
         return ModelList(self.model_cr, gp)
 
     def _get_obj_and_constraint(self, raw_x: Tensor):
-        # TODO Enable batch and parallel evaluation 
         x = unnormalize(raw_x, bounds=self.bounds).round().to(torch.int)  # raw_x is a vector in unit cube -> turn into integer ranks
-        # Make adjancy matrix from x 
-        A = torch.zeros((self.N, self.N))
-        A[torch.triu_indices(self.N, self.N, offset=1).unbind()] = x.to(A)
-        A = torch.max(A, A.T) + torch.diag(self.t_shape)
-        
-        assert (torch.diagonal(A) == self.t_shape.to(A)).all()
-
+        A = triu_to_adj_matrix(x, diag=self.t_shape) # Make adjancy matrix from x 
+            
         # Perform contraction 
-        cr, loss = self._evaluate_tn(A)
-        return torch.tensor([cr, loss.log()])
+        if self.n_workers == 1 or raw_x.shape[0] == 1:
+            objectives = []
+            loop = tqdm(A.unbind(), desc="TN eval") if self.verbose and raw_x.shape[0] > 1 else A.unbind()
+            for a in loop:
+                objectives.append(self._evaluate_tn(a))
+        else:
+            args = [(a,) for a in A.unbind()]
+            objectives = progress_starmap(self._evaluate_tn, args, n_cpu=self.n_workers, total=len(args))
+                
+        return torch.tensor(objectives).to(raw_x)
 
     def _evaluate_tn(self, A):
         i = 0
@@ -238,7 +230,7 @@ class BOSS(object):
                 break
             i += 1 
         compression_ratio = t_ntwrk.numel() / self.target.numel()
-        return compression_ratio, min_loss
+        return compression_ratio.detach(), min_loss.log().detach()
     
 
 if __name__=="__main__":
@@ -246,7 +238,7 @@ if __name__=="__main__":
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
     torch.manual_seed(5)
-    A = random_adj_matrix(4, 8)
+    A = random_adj_matrix(4, 7)
     X = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
 
@@ -255,7 +247,8 @@ if __name__=="__main__":
         n_init=10,
         tn_eval_attempts=2,
         min_rse=0.01,
-        max_rank=8
+        max_rank=8,
+        n_workers=4
         )
     bo()
 
