@@ -63,8 +63,11 @@ class TensorNetwork:
         nx.draw(self.G, with_labels=True)
         plt.show()
         
-    def contract_network(self):
-        reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
+    def contract_network(self, ignore_order=False):
+        if ignore_order:
+            reduced_tensor = tn.contractors.greedy(self.nodes, ignore_edge_order=True)
+        else:
+            reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
         return reduced_tensor.tensor
 
     def decompose(self, target, tol=0.01, init_lr=0.05, patience=5000, max_epochs=100000):
@@ -126,7 +129,7 @@ class TensorNetwork:
         return torch.tensor(sum(node.tensor.numel() for node in self.nodes))
         
 
-def sim_tensor_from_adj(A):
+def sim_tensor_from_adj(A, std_dev=0.1):
     A = A.to(dtype=torch.int)
     ranks = torch.diag(A)
     adj = torch.max(A, A.T) - torch.diag(ranks)
@@ -134,7 +137,7 @@ def sim_tensor_from_adj(A):
     cores = []
     for i, a in enumerate(adj.unbind()):
         shape = [ranks[i]] + a[a.nonzero().squeeze()].tolist()
-        cores.append(torch.randn(shape))
+        cores.append(torch.randn(shape) * std_dev)
     
     ntwrk = TensorNetwork(adj, cores=cores)
     return ntwrk.contract_network()

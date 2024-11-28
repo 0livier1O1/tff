@@ -1,3 +1,4 @@
+import warnings
 import torch 
 import multiprocessing as mp
 
@@ -10,7 +11,6 @@ from botorch.models import SingleTaskGP, ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
 from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, ConstrainedExpectedImprovement, _compute_log_prob_feas
-from botorch.acquisition.multi_step_lookahead import 
 from botorch.optim import optimize_acqf
 
 from gpytorch.kernels import RBFKernel, MaternKernel, ScaleKernel
@@ -58,6 +58,7 @@ class BOSS(object):
             tn_eval_attempts = 4,
             n_workers = 4,
             min_rse = 0.001,
+            max_rank = 10,
             verbose=True
         ) -> None:
         self.target = target
@@ -72,14 +73,13 @@ class BOSS(object):
         # BO Variables
         self.budget = budget
         self.n_init = n_init
-        self.y_upper = ((self.t_shape.max()**self.N)*self.N/self.target.numel()).to(torch.float64)
         self.n_workers = n_workers
         self.bounds = torch.ones((2, self.D))  # What should be proper bounds
-        self.bounds[1] *= max(self.t_shape) # Max rank for each node  # TODO is it better for each node's rank to be its own max? 
+        self.bounds[1] *= max_rank # Max rank for each node  # TODO is it better for each node's rank to be its own max? 
 
         self.verbose = verbose
         self.model_cr = CompressionRatio(target=self.target, bounds=self.bounds, diag=self.t_shape)
-
+        self.gp_state = None
 
     def _get_tf(self, init=False):
         """
@@ -133,7 +133,11 @@ class BOSS(object):
             covar_module=kernel,
         )
         mll = ExactMarginalLogLikelihood(model=gp, likelihood=gp.likelihood)
-        fit_gpytorch_mll(mll) 
+        try: 
+            fit_gpytorch_mll(mll) #,  optimizer_kwargs={"options":{"maxiter": 500, 'gtol': 1e-5, 'ftol': 1e-5,}})
+            self.gp_state = gp.state_dict()
+        except:
+            gp.load_state_dict(self.gp_state)
 
         return ModelList(self.model_cr, gp)
 
@@ -144,32 +148,34 @@ class BOSS(object):
         std_bounds[0] = 0 
         
         X, Y = self._initial_points(bounds=std_bounds)
-        best_Y = Y.min(dim=0)[0]
         b = 0 
         while b < self.budget:
+            Y_feas = Y[Y[:, 1].exp() <= self.min_rse]
+            print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
+
             model = self._get_model(X, Y)
             logEI = LogConstrainedExpectedImprovement(
                 model=model,
                 objective_index=0,
                 constraints={1: [None, torch.math.log(self.min_rse)]},
-                maximize=False,
-                best_f=best_Y[0]
+                best_f=Y_feas[:, 0].min(),
+                maximize=False
             )
-            cand, _ = optimize_acqf(
-                acq_function=logEI, 
-                bounds=std_bounds, 
-                q=1,
-                num_restarts=20,
-                raw_samples=512
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                cand, _ = optimize_acqf(
+                    acq_function=logEI, 
+                    bounds=std_bounds, 
+                    q=1,
+                    num_restarts=20,
+                    raw_samples=512
+                )
             x_ = tf(cand)
             y = self.f(x_).unsqueeze(0)
             X = torch.concat([X, x_])
             Y = torch.concat([Y, y])
-            best_Y = Y.min(dim=0)[0]
 
             b += 1
-            print(f"BO step {b}")
 
         best_x = X[torch.argmin(Y[:, 0])]        
         return best_x
@@ -189,7 +195,7 @@ class BOSS(object):
 
     def evaluate_tn(self, A):
         i = 0
-        min_loss = float("inf")
+        min_loss = self.target.norm()
         while i < self.tn_runs:
             t_ntwrk = TensorNetwork(A)
             loss = t_ntwrk.decompose(self.target, tol=self.min_rse)
@@ -201,24 +207,26 @@ class BOSS(object):
         compression_ratio = t_ntwrk.numel() / self.target.numel()
         return compression_ratio, min_loss
     
+def random_adj_matric(n_cores, max_rank):
+    A = torch.randint(1, max_rank+1, size=(n_cores, n_cores))
+    A = ((A + A.T)/2).to(torch.int)
+    # diag = torch.randint(2, max_rank+1, size=(n_cores, ))
+    diag = torch.ones(n_cores) * 3
+    A[torch.arange(n_cores), torch.arange(n_cores)] = diag.to(A)
+    return A 
+
 
 if __name__=="__main__":
     torch.manual_seed(5)
-    X_shape = [4, 3, 5, 4]
-    N = len(X_shape)
-    X = torch.arange(0, torch.tensor(X_shape).prod()).reshape(X_shape)
-    
-    # Build fake input for testing
-    A = torch.ones((N, N)) * 2
-    A[torch.arange(N), torch.arange(N)] = torch.tensor(X_shape).to(A)
-    x = A[torch.triu_indices(N, N, offset=1).unbind()]
-
+    A = random_adj_matric(4, 8)
     X = sim_tensor_from_adj(A)
 
     bo = BOSS(
         X,
         n_init=10,
-        tn_eval_attempts=2
+        tn_eval_attempts=2,
+        min_rse=0.01,
+        max_rank=8
         )
     bo.forward()
 
