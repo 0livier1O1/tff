@@ -19,7 +19,9 @@ from botorch.utils.transforms import unnormalize, normalize
 from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, ConstrainedExpectedImprovement, _compute_log_prob_feas
 from botorch.optim import optimize_acqf
 
-from gpytorch.kernels import RBFKernel, MaternKernel, ScaleKernel
+from botorch.exceptions import ModelFittingError
+
+from gpytorch.kernels import RBFKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
 from botorch.fit import fit_gpytorch_mll
@@ -66,6 +68,9 @@ class BOSS(object):
             n_workers = 4,
             min_rse = 0.001,
             max_rank = 10,
+            raw_samples = 512,
+            num_restarts_af = 20,
+            af_batch = 1,
             verbose=True
         ) -> None:
         self.target = target
@@ -83,11 +88,70 @@ class BOSS(object):
         self.n_workers = n_workers
         self.bounds = torch.ones((2, self.D))  # What should be proper bounds
         self.bounds[1] *= max_rank # Max rank for each node  # TODO is it better for each node's rank to be its own max? 
+        self.raw_samples = raw_samples
+        self.q = af_batch
+        self.num_restarts_af = num_restarts_af
 
         self.verbose = verbose
         self.model_cr = CompressionRatio(target=self.target, bounds=self.bounds, diag=self.t_shape)
-        self.gp_state = None
 
+        # Store results
+        self.gp_state = None
+        self.acqf = None
+        self.sampled_structures = None
+        self.objectives = None
+
+    def __call__(self):
+        tf = self._get_input_transformation() 
+
+        std_bounds = torch.ones((2, self.D))
+        std_bounds[0] = 0 
+        
+        X, Y = self._initial_points(bounds=std_bounds)
+        acqf = []
+        for b in range(self.budget):
+            Y_feas = Y[Y[:, 1].exp() <= self.min_rse]
+            print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
+
+            model = self._get_model(X, Y)
+            logEI = LogConstrainedExpectedImprovement(
+                model=model,
+                objective_index=0,
+                constraints={1: [None, torch.math.log(self.min_rse)]},
+                best_f=Y_feas[:, 0].min(),
+                maximize=False
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                cand, af = optimize_acqf(
+                    acq_function=logEI, 
+                    bounds=std_bounds, 
+                    q=self.q,
+                    num_restarts=self.num_restarts_af,
+                    raw_samples=self.raw_samples
+                )
+                acqf.append(af)
+            x_ = tf(cand)
+            y = self._get_obj_and_constraint(x_).unsqueeze(0)
+            X = torch.concat([X, x_])
+            Y = torch.concat([Y, y])
+        
+        self.X = X
+        self.acqf = torch.stack(acqf)
+        self.sampled_structures = unnormalize(X, self.bounds)
+        self.objectives = Y
+    
+    def get_bo_results(self):
+        if self.acqf is None:
+            raise ModelFittingError("BO has not been run yet")
+        out = {
+            "AF": self.acqf, 
+            "X": self.sampled_structures,
+            "CR": self.objectives[:, 0],
+            "RSE": self.objectives[:, 1].exp()
+        }
+        return out
+    
     def _get_input_transformation(self, init=False):
         """
         """
@@ -147,44 +211,6 @@ class BOSS(object):
             gp.load_state_dict(self.gp_state)
 
         return ModelList(self.model_cr, gp)
-
-    def __call__(self):
-        tf = self._get_input_transformation() 
-
-        std_bounds = torch.ones((2, self.D))
-        std_bounds[0] = 0 
-        
-        X, Y = self._initial_points(bounds=std_bounds)
-        b = 0 
-        while b < self.budget:
-            Y_feas = Y[Y[:, 1].exp() <= self.min_rse]
-            print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
-
-            model = self._get_model(X, Y)
-            logEI = LogConstrainedExpectedImprovement(
-                model=model,
-                objective_index=0,
-                constraints={1: [None, torch.math.log(self.min_rse)]},
-                best_f=Y_feas[:, 0].min(),
-                maximize=False
-            )
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                cand, _ = optimize_acqf(
-                    acq_function=logEI, 
-                    bounds=std_bounds, 
-                    q=1,
-                    num_restarts=20,
-                    raw_samples=512
-                )
-            x_ = tf(cand)
-            y = self._get_obj_and_constraint(x_).unsqueeze(0)
-            X = torch.concat([X, x_])
-            Y = torch.concat([Y, y])
-
-            b += 1
-
-        return
 
     def _get_obj_and_constraint(self, raw_x: Tensor):
         x = unnormalize(raw_x, bounds=self.bounds).round().to(torch.int)  # raw_x is a vector in unit cube -> turn into integer ranks
