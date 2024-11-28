@@ -1,3 +1,9 @@
+# TODO Processing and summarizing results
+# TODO Get GP prediction quality
+# TODO Automate experiments
+# TODO Experiments with actual data
+# TODO Unit tests
+
 import warnings
 import torch 
 import multiprocessing as mp
@@ -18,7 +24,7 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
 from botorch.fit import fit_gpytorch_mll
 
-from networks import TensorNetwork, sim_tensor_from_adj
+from decomp.networks import TensorNetwork, sim_tensor_from_adj
 
 torch.set_printoptions(sci_mode=False)
 
@@ -48,7 +54,7 @@ class CompressionRatio(DeterministicModel):
         cr = A.prod(dim=-1).sum(dim=-1, keepdim=True)/self.target.numel()
 
         return cr.unsqueeze(-1)
-    
+
 
 class BOSS(object):
     def __init__(self, 
@@ -81,7 +87,7 @@ class BOSS(object):
         self.model_cr = CompressionRatio(target=self.target, bounds=self.bounds, diag=self.t_shape)
         self.gp_state = None
 
-    def _get_tf(self, init=False):
+    def _get_input_transformation(self, init=False):
         """
         """
         if init:
@@ -116,10 +122,10 @@ class BOSS(object):
         
     def _initial_points(self, bounds):
         raw_x = draw_sobol_samples(bounds=bounds, n=self.n_init, q=1).squeeze(-2)
-        tf = self._get_tf(init=True)
+        tf = self._get_input_transformation(init=True)
         X_init = tf(raw_x).to(torch.float64)
         y_init = torch.stack(
-            [self.f(x) for x in X_init.unbind()]
+            [self._get_obj_and_constraint(x) for x in X_init.unbind()]
         ).to(dtype=torch.float64)
         return X_init, y_init
 
@@ -141,8 +147,8 @@ class BOSS(object):
 
         return ModelList(self.model_cr, gp)
 
-    def forward(self):
-        tf = self._get_tf() 
+    def __call__(self):
+        tf = self._get_input_transformation() 
 
         std_bounds = torch.ones((2, self.D))
         std_bounds[0] = 0 
@@ -171,17 +177,16 @@ class BOSS(object):
                     raw_samples=512
                 )
             x_ = tf(cand)
-            y = self.f(x_).unsqueeze(0)
+            y = self._get_obj_and_constraint(x_).unsqueeze(0)
             X = torch.concat([X, x_])
             Y = torch.concat([Y, y])
 
             b += 1
 
-        best_x = X[torch.argmin(Y[:, 0])]        
-        return best_x
+        return
 
-    def f(self, raw_x: Tensor):
-        x = unnormalize(raw_x, bounds=self.bounds).round().to(torch.int)
+    def _get_obj_and_constraint(self, raw_x: Tensor):
+        x = unnormalize(raw_x, bounds=self.bounds).round().to(torch.int)  # raw_x is a vector in unit cube -> turn into integer ranks
         # Make adjancy matrix from x 
         A = torch.zeros((self.N, self.N))
         A[torch.triu_indices(self.N, self.N, offset=1).unbind()] = x.to(A)
@@ -190,10 +195,10 @@ class BOSS(object):
         assert (torch.diagonal(A) == self.t_shape.to(A)).all()
 
         # Perform contraction 
-        cr, loss = self.evaluate_tn(A)
+        cr, loss = self._evaluate_tn(A)
         return torch.tensor([cr, loss.log()])
 
-    def evaluate_tn(self, A):
+    def _evaluate_tn(self, A):
         i = 0
         min_loss = self.target.norm()
         while i < self.tn_runs:
@@ -207,6 +212,7 @@ class BOSS(object):
         compression_ratio = t_ntwrk.numel() / self.target.numel()
         return compression_ratio, min_loss
     
+
 def random_adj_matric(n_cores, max_rank):
     A = torch.randint(1, max_rank+1, size=(n_cores, n_cores))
     A = ((A + A.T)/2).to(torch.int)
@@ -220,6 +226,7 @@ if __name__=="__main__":
     torch.manual_seed(5)
     A = random_adj_matric(4, 8)
     X = sim_tensor_from_adj(A)
+    cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
 
     bo = BOSS(
         X,
@@ -228,6 +235,6 @@ if __name__=="__main__":
         min_rse=0.01,
         max_rank=8
         )
-    bo.forward()
+    bo()
 
     print("You got this")
