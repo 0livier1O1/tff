@@ -5,10 +5,12 @@ from multiprocessing import Pool
 from torch import Tensor
 
 from botorch.models.transforms import Round, Normalize, Standardize, ChainedInputTransform
-from botorch.models import SingleTaskGP, ModelListGP
+from botorch.models.deterministic import DeterministicModel
+from botorch.models import SingleTaskGP, ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
-from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, ConstrainedExpectedImprovement
+from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, ConstrainedExpectedImprovement, _compute_log_prob_feas
+from botorch.acquisition.multi_step_lookahead import 
 from botorch.optim import optimize_acqf
 
 from gpytorch.kernels import RBFKernel, MaternKernel, ScaleKernel
@@ -21,6 +23,32 @@ from networks import TensorNetwork, sim_tensor_from_adj
 torch.set_printoptions(sci_mode=False)
 
 
+class CompressionRatio(DeterministicModel):
+    def __init__(self, target, bounds, diag, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.bounds = bounds
+        self.target = target
+        self.diag = diag
+
+    def forward(self, X: Tensor) -> Tensor:
+        N = self.target.dim()
+        x = unnormalize(X, bounds=self.bounds).round()
+        n = x.shape[0]
+        A = torch.zeros((n, N, N))
+
+        triu_indices = torch.triu_indices(N, N, offset=1)
+        batch_idx1 = torch.arange(n).repeat_interleave(len(triu_indices[0]))
+        batch_idx2 = torch.arange(n).repeat_interleave(N)
+        rng = torch.arange(N)
+
+        A[batch_idx1, triu_indices[0].repeat(n), triu_indices[1].repeat(n)] = x.flatten().to(A)  # Write x into off-diagional elements
+        A = A + A.transpose(-1, -2)
+        A[batch_idx2, rng.repeat(n), rng.repeat(n)] = self.diag.repeat(n).to(A) # Write off-diagional elements
+
+        cr = A.prod(dim=-1).sum(dim=-1, keepdim=True)/self.target.numel()
+
+        return cr.unsqueeze(-1)
+    
 
 class BOSS(object):
     def __init__(self, 
@@ -50,6 +78,8 @@ class BOSS(object):
         self.bounds[1] *= max(self.t_shape) # Max rank for each node  # TODO is it better for each node's rank to be its own max? 
 
         self.verbose = verbose
+        self.model_cr = CompressionRatio(target=self.target, bounds=self.bounds, diag=self.t_shape)
+
 
     def _get_tf(self, init=False):
         """
@@ -97,14 +127,15 @@ class BOSS(object):
         kernel = ScaleKernel(base_kernel=RBFKernel(ard_num_dims=self.D))
         likelihood = GaussianLikelihood()  # TODO Impose no noise? 
         gp = SingleTaskGP(
-            X, y,
+            X, y[:, 1].unsqueeze(1),
             likelihood=likelihood,
-            outcome_transform=Standardize(m=2),
+            outcome_transform=Standardize(m=1),
             covar_module=kernel,
         )
         mll = ExactMarginalLogLikelihood(model=gp, likelihood=gp.likelihood)
         fit_gpytorch_mll(mll) 
-        return gp
+
+        return ModelList(self.model_cr, gp)
 
     def forward(self):
         tf = self._get_tf() 
@@ -144,7 +175,7 @@ class BOSS(object):
         return best_x
 
     def f(self, raw_x: Tensor):
-        x = unnormalize(raw_x, bounds=self.bounds).to(torch.int)
+        x = unnormalize(raw_x, bounds=self.bounds).round().to(torch.int)
         # Make adjancy matrix from x 
         A = torch.zeros((self.N, self.N))
         A[torch.triu_indices(self.N, self.N, offset=1).unbind()] = x.to(A)
@@ -169,12 +200,7 @@ class BOSS(object):
             i += 1 
         compression_ratio = t_ntwrk.numel() / self.target.numel()
         return compression_ratio, min_loss
-        
-    def _log(self, type, value):
-        if type == "acqf":
-            if self.verbose:
-                print(f"New objective value: {value}")
-
+    
 
 if __name__=="__main__":
     torch.manual_seed(5)

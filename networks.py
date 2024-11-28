@@ -37,7 +37,7 @@ class TensorNetwork:
                 core = torch.nn.init.normal_(
                     torch.nn.Parameter(torch.empty(*core_shape)), 
                     mean=0.0, 
-                    std=1.0
+                    std=0.1
                 )  # initialize the core tensor as a PyTorch parameter
                 node = tn.Node(core, name=name)
                 self.nodes.append(node)
