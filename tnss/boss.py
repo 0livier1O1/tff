@@ -241,7 +241,6 @@ class BOSS(object):
         return compression_ratio, min_loss
     
 
-
 if __name__=="__main__":
     from scripts.utils import random_adj_matrix
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
