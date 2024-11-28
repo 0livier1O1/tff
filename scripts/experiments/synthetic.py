@@ -1,7 +1,7 @@
 from scripts.utils import random_adj_matrix
 from decomp.tn import sim_tensor_from_adj
 
-from algos.bo import BOSS
+from tnss.boss import BOSS
 
 
 if __name__=="__main__":
@@ -11,7 +11,7 @@ if __name__=="__main__":
 
     for order in orders:
         for i in range(n_samples):
-            A = random_adj_matrix(order, max_rank=10)
+            A = random_adj_matrix(order, max_rank=6)
             Z = sim_tensor_from_adj(A)
 
             boss = BOSS(
@@ -20,7 +20,8 @@ if __name__=="__main__":
                 n_init=10,
                 tn_eval_attempts=1,
                 min_rse=min_rse,
-                max_rank=10
+                max_rank=10,
+                n_workers=4
             )
             boss()  # Run BOSS
 

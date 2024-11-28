@@ -19,7 +19,8 @@ for i, file in enumerate(os.listdir(path)):
         n_init=10,
         tn_eval_attempts=2,
         min_rse=min_rse,
-        max_rank=5
+        max_rank=5,
+        n_workers=4
     )
     boss()
     res = boss.get_bo_results()
