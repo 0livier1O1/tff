@@ -26,7 +26,7 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
 from botorch.fit import fit_gpytorch_mll
 
-from decomp.tn import TensorNetwork, sim_tensor_from_adj
+from decomp.tn import TensorNetwork
 
 
 torch.set_printoptions(sci_mode=False)
@@ -213,6 +213,7 @@ class BOSS(object):
         return ModelList(self.model_cr, gp)
 
     def _get_obj_and_constraint(self, raw_x: Tensor):
+        # TODO Enable batch and parallel evaluation 
         x = unnormalize(raw_x, bounds=self.bounds).round().to(torch.int)  # raw_x is a vector in unit cube -> turn into integer ranks
         # Make adjancy matrix from x 
         A = torch.zeros((self.N, self.N))
@@ -243,6 +244,8 @@ class BOSS(object):
 
 if __name__=="__main__":
     from scripts.utils import random_adj_matrix
+    from decomp.tn import TensorNetwork, sim_tensor_from_adj
+
     torch.manual_seed(5)
     A = random_adj_matrix(4, 8)
     X = sim_tensor_from_adj(A)
