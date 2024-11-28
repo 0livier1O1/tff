@@ -24,7 +24,8 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
 from botorch.fit import fit_gpytorch_mll
 
-from decomp.networks import TensorNetwork, sim_tensor_from_adj
+from decomp.tn import TensorNetwork, sim_tensor_from_adj
+
 
 torch.set_printoptions(sci_mode=False)
 
@@ -213,18 +214,11 @@ class BOSS(object):
         return compression_ratio, min_loss
     
 
-def random_adj_matric(n_cores, max_rank):
-    A = torch.randint(1, max_rank+1, size=(n_cores, n_cores))
-    A = ((A + A.T)/2).to(torch.int)
-    # diag = torch.randint(2, max_rank+1, size=(n_cores, ))
-    diag = torch.ones(n_cores) * 3
-    A[torch.arange(n_cores), torch.arange(n_cores)] = diag.to(A)
-    return A 
-
 
 if __name__=="__main__":
+    from scripts.utils import random_adj_matrix
     torch.manual_seed(5)
-    A = random_adj_matric(4, 8)
+    A = random_adj_matrix(4, 8)
     X = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
 

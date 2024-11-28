@@ -143,7 +143,6 @@ def sim_tensor_from_adj(A, std_dev=0.1):
     return ntwrk.contract_network()
     
 
-
 if __name__=="__main__":
     torch.manual_seed(2)
     B = torch.tensor([
