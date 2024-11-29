@@ -21,7 +21,7 @@ class CompressionRatio(DeterministicModel):
         A = triu_to_adj_matrix(triu=x, diag=self.diag)
         cr = A.prod(dim=-1).sum(dim=-1, keepdim=True)/self.target.numel()
 
-        return cr.unsqueeze(-1)
+        return cr
 
 class IntSingleTaskGP(SingleTaskGP):
     def forward(self, x: Tensor) -> MultivariateNormal:
