@@ -2,9 +2,12 @@
 # TODO Check if GP is constant on integers
 # TODO Experiments with actual data
 # TODO Unit tests
+# TODO Batch Acquisition function
 
 import gc
 import warnings
+from botorch.models.gpytorch import GPyTorchModel
+from botorch.models.model import Model
 import torch 
 import multiprocessing as mp
 
@@ -14,11 +17,17 @@ from multiprocessing import Pool
 from torch import Tensor
 
 from botorch.models.transforms import Round, Normalize, Standardize, ChainedInputTransform
-from botorch.models import ModelList
+from botorch.models import ModelList, ModelListGP
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
 from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas
+<<<<<<< HEAD
+=======
+from botorch.acquisition import qLogExpectedImprovement
+>>>>>>> 321b0c3 (Added batch acquisition function qLogEI for parallel search)
 from botorch.optim import optimize_acqf
+
+from botorch.acquisition.objective import GenericMCObjective
 
 from botorch.exceptions import ModelFittingError
 
@@ -35,6 +44,26 @@ from tnss.models import IntSingleTaskGP, CompressionRatio
 
 
 torch.set_printoptions(sci_mode=False)
+
+
+class FeasibleTN:
+    def __init__(self, min_rse) -> None:
+        self.min_rse = min_rse
+
+    def __call__(self, X: Tensor):
+        return X[..., 1] - torch.math.log(self.min_rse)
+
+
+def objective_callable(Z: Tensor, X: None):
+    return Z[..., 0]
+
+objective = GenericMCObjective(objective_callable)
+
+class ModelListFix(ModelList):
+    num_outputs = 2
+    
+    def __init__(self, *models: Model) -> None:
+        super().__init__(*models)
 
 
 class BOSS(object):
@@ -88,23 +117,20 @@ class BOSS(object):
         std_bounds[0] = 0 
         
         X, Y = self._initial_points(bounds=std_bounds)
-        acqf = []
+        acqf_hist = []
         max_af = -torch.inf
         for b in range(self.budget):
-            Y_feas = Y[Y[:, 1].exp() <= self.min_rse]
+            mask = Y[:, 1].exp() <= self.min_rse
+            Y_feas = Y[mask]
+
             if len(Y_feas) == 0:
                 Y_feas = torch.tensor([[self.target.numel(), -torch.inf]])  # TODO This is a hack to make the current best min
             else:
                 print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
 
             model = self._get_model(X, Y)
-            logEI = LogConstrainedExpectedImprovement(
-                model=model,
-                objective_index=0,
-                constraints={1: [None, torch.math.log(self.min_rse)]},
-                best_f=Y_feas[:, 0].min(),
-                maximize=False
-            )
+            acqf = self._get_acqf(model, Y_feas)
+
             with warnings.catch_warnings(), gpsttngs.fast_pred_samples(state=True), gpsttngs.fast_computations(
                 log_prob=True,
                 covar_root_decomposition=True,
@@ -112,13 +138,13 @@ class BOSS(object):
             ):
                 warnings.simplefilter("ignore")
                 cand, af = optimize_acqf(
-                    acq_function=logEI, 
+                    acq_function=acqf, 
                     bounds=std_bounds, 
                     q=self.q,
                     num_restarts=self.num_restarts_af,
                     raw_samples=self.raw_samples
                 )
-                acqf.append(af)
+            acqf_hist.append(af)
 
             x_ = tf(cand)
             y = self._get_obj_and_constraint(x_)
@@ -130,13 +156,14 @@ class BOSS(object):
                 max_af = af
                 wait = 0 
             else:
+                wait += 1
                 if wait > self.max_stall:
                     break
                 wait += 1
         
         self.X = X
-        self.acqf = torch.stack(acqf)
-        self.sampled_structures = unnormalize(X, self.bounds)
+        self.acqf_hist = torch.stack(acqf_hist)
+        self.sampled_structures = unnormalize(tf(X), self.bounds)
         self.objectives = Y
     
     def get_bo_results(self):
@@ -235,11 +262,29 @@ class BOSS(object):
 
             gp.eval()
 
-        return ModelList(self.model_cr, gp)
+        return ModelListFix(self.model_cr, gp)
 
+    def _get_acqf(self, model, Y_feas):
+        if self.q > 1:
+            af = qLogExpectedImprovement(
+                model=model,
+                best_f=Y_feas[:, 0].min(),
+                constraints=[FeasibleTN(self.min_rse)],
+                objective=objective
+            )
+        else:
+            af = LogConstrainedExpectedImprovement(
+                model=model,
+                objective_index=0,
+                constraints={1: [None, torch.math.log(self.min_rse)]},
+                best_f=Y_feas[:, 0].min(),
+                maximize=False
+            )
+        return af
+        
     def _get_obj_and_constraint(self, raw_x: Tensor):
         x = unnormalize(raw_x, bounds=self.bounds).round().to(torch.int)  # raw_x is a vector in unit cube -> turn into integer ranks
-        A = triu_to_adj_matrix(x, diag=self.t_shape) # Make adjancy matrix from x 
+        A = triu_to_adj_matrix(x, diag=self.t_shape).squeeze() # Make adjancy matrix from x 
             
         # Perform contraction 
         if self.n_workers == 1 or raw_x.shape[0] == 1:
@@ -276,7 +321,7 @@ if __name__=="__main__":
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
     torch.manual_seed(5)
-    A = random_adj_matrix(5, 5)
+    A = random_adj_matrix(4, 4)
     X = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
 
@@ -285,7 +330,8 @@ if __name__=="__main__":
         n_init=10,
         tn_eval_attempts=2,
         min_rse=0.01,
-        max_rank=8,
+        af_batch=4,
+        max_rank=7,
         n_workers=7,
         max_stalling_aqcf=10
         )
