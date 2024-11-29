@@ -1,6 +1,5 @@
-# TODO Processing and summarizing results
-# TODO Get GP prediction quality
-# TODO Automate experiments
+# TODO Get GP diagnostic
+# TODO Check if GP is constant on integers
 # TODO Experiments with actual data
 # TODO Unit tests
 
@@ -14,8 +13,7 @@ from multiprocessing import Pool
 from torch import Tensor
 
 from botorch.models.transforms import Round, Normalize, Standardize, ChainedInputTransform
-from botorch.models.deterministic import DeterministicModel
-from botorch.models import SingleTaskGP, ModelList
+from botorch.models import ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
 from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, ConstrainedExpectedImprovement, _compute_log_prob_feas
@@ -23,6 +21,7 @@ from botorch.optim import optimize_acqf
 
 from botorch.exceptions import ModelFittingError
 
+import gpytorch.settings as gpsttngs
 from gpytorch.kernels import RBFKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
@@ -30,25 +29,10 @@ from botorch.fit import fit_gpytorch_mll
 
 from decomp.tn import TensorNetwork
 from tnss.utils import triu_to_adj_matrix
+from tnss.models import IntSingleTaskGP, CompressionRatio
 
 
 torch.set_printoptions(sci_mode=False)
-
-
-class CompressionRatio(DeterministicModel):
-    def __init__(self, target, bounds, diag, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.bounds = bounds
-        self.target = target
-        self.diag = diag
-
-    def forward(self, X: Tensor) -> Tensor:
-        x = unnormalize(X, bounds=self.bounds).round()
-        
-        A = triu_to_adj_matrix(triu=x, diag=self.diag)
-        cr = A.prod(dim=-1).sum(dim=-1, keepdim=True)/self.target.numel()
-
-        return cr.unsqueeze(-1)
 
 
 class BOSS(object):
@@ -63,7 +47,8 @@ class BOSS(object):
             raw_samples = 512,
             num_restarts_af = 20,
             af_batch = 1,
-            verbose=True
+            max_stalling_aqcf = 5,
+            verbose=True,
         ) -> None:
         self.target = target
         self.t_shape = torch.tensor(target.shape)
@@ -83,6 +68,7 @@ class BOSS(object):
         self.raw_samples = raw_samples
         self.q = af_batch
         self.num_restarts_af = num_restarts_af
+        self.max_stall = max_stalling_aqcf
 
         self.verbose = verbose
         self.model_cr = CompressionRatio(target=self.target, bounds=self.bounds, diag=self.t_shape)
@@ -101,6 +87,7 @@ class BOSS(object):
         
         X, Y = self._initial_points(bounds=std_bounds)
         acqf = []
+        max_af = -torch.inf
         for b in range(self.budget):
             Y_feas = Y[Y[:, 1].exp() <= self.min_rse]
             print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
@@ -113,7 +100,11 @@ class BOSS(object):
                 best_f=Y_feas[:, 0].min(),
                 maximize=False
             )
-            with warnings.catch_warnings():
+            with warnings.catch_warnings(), gpsttngs.fast_pred_samples(state=True), gpsttngs.fast_computations(
+                log_prob=True,
+                covar_root_decomposition=True,
+                solves=False
+            ):
                 warnings.simplefilter("ignore")
                 cand, af = optimize_acqf(
                     acq_function=logEI, 
@@ -123,10 +114,22 @@ class BOSS(object):
                     raw_samples=self.raw_samples
                 )
                 acqf.append(af)
+            af = af.exp()
+
             x_ = tf(cand)
             y = self._get_obj_and_constraint(x_)
-            X = torch.concat([X, x_])
+            X = torch.concat([X, cand])  # TODO What is the point that I add to my dataset
             Y = torch.concat([Y, y])
+
+            # Early stopping
+            if af > max_af:
+                max_af = af
+                wait = 0 
+            else:
+                if (af.exp() < 1e-4):
+                    wait += 1
+                if wait > self.max_stall:
+                    break
         
         self.X = X
         self.acqf = torch.stack(acqf)
@@ -159,8 +162,6 @@ class BOSS(object):
         tfs["unnormalize_tf"] = Normalize(
             d=init_bounds.shape[1],
             bounds=init_bounds,
-            transform_on_train=False,
-            transform_on_fantasize=False,
             reverse=True
         )       
         tfs["round"] = Round(
@@ -170,8 +171,6 @@ class BOSS(object):
         tfs["normalize_tf"] = Normalize(
             d=init_bounds.shape[1],
             bounds=init_bounds,
-            transform_on_train=False,
-            transform_on_fantasize=False,
         )
         tf = ChainedInputTransform(**tfs)
         tf.eval()
@@ -180,25 +179,54 @@ class BOSS(object):
     def _initial_points(self, bounds):
         raw_x = draw_sobol_samples(bounds=bounds, n=self.n_init, q=1).squeeze(-2)
         tf = self._get_input_transformation(init=True)
-        X_init = tf(raw_x).to(torch.float64)
+        X_init = tf(raw_x).to(torch.double)
         y_init = self._get_obj_and_constraint(X_init)
         return X_init, y_init
 
     def _get_model(self, X, y):
+        tf = self._get_input_transformation()
         kernel = ScaleKernel(base_kernel=RBFKernel(ard_num_dims=self.D))
         likelihood = GaussianLikelihood()  # TODO Impose no noise? 
-        gp = SingleTaskGP(
-            X, y[:, 1].unsqueeze(1),
+        y_ = y[:, 1][~y[:, 1].isinf()].unsqueeze(1)
+        gp = IntSingleTaskGP(
+            X, y_,
             likelihood=likelihood,
             outcome_transform=Standardize(m=1),
             covar_module=kernel,
+            input_transform=tf
         )
         mll = ExactMarginalLogLikelihood(model=gp, likelihood=gp.likelihood)
         try: 
-            fit_gpytorch_mll(mll) #,  optimizer_kwargs={"options":{"maxiter": 500, 'gtol': 1e-5, 'ftol': 1e-5,}})
+            fit_gpytorch_mll(mll, optimizer_kwargs={"options":{"maxiter": 500, 'gtol': 1e-5, 'ftol': 1e-5,}})
             self.gp_state = gp.state_dict()
         except:
-            gp.load_state_dict(self.gp_state)
+            # Fit with SGD
+            n_iterations = 50
+            patience = 10
+            optimizer = torch.optim.SGD(gp.parameters(), lr=0.05, momentum=0.9)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
+            best = float("inf")
+            gp.train()
+            likelihood.train()
+            best_state = None   
+            for _ in range(n_iterations):
+                optimizer.zero_grad()
+                output = gp(X)
+                loss = -mll(output, y_).sum()
+                if loss.item() < best:
+                    best = loss.item()
+                    counter = 0
+                    best_state = gp.state_dict()
+                else:
+                    counter += 1
+                if counter >= patience:
+                    break
+                scheduler.step(loss.item())
+            
+            if best_state is not None:
+                gp.load_state_dict(best_state)
+
+            gp.eval()
 
         return ModelList(self.model_cr, gp)
 
@@ -220,7 +248,7 @@ class BOSS(object):
 
     def _evaluate_tn(self, A):
         i = 0
-        min_loss = self.target.norm()
+        min_loss = float("inf")
         while i < self.tn_runs:
             t_ntwrk = TensorNetwork(A)
             loss = t_ntwrk.decompose(self.target, tol=self.min_rse)
@@ -238,7 +266,7 @@ if __name__=="__main__":
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
     torch.manual_seed(5)
-    A = random_adj_matrix(4, 7)
+    A = random_adj_matrix(5, 4)
     X = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
 
@@ -248,7 +276,8 @@ if __name__=="__main__":
         tn_eval_attempts=2,
         min_rse=0.01,
         max_rank=8,
-        n_workers=4
+        n_workers=7,
+        max_stalling_aqcf=10
         )
     bo()
 
