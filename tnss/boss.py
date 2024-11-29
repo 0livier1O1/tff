@@ -90,7 +90,10 @@ class BOSS(object):
         max_af = -torch.inf
         for b in range(self.budget):
             Y_feas = Y[Y[:, 1].exp() <= self.min_rse]
-            print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
+            if len(Y_feas) == 0:
+                Y_feas = torch.ones(2, 1) * torch.inf
+            else:
+                print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
 
             model = self._get_model(X, Y)
             logEI = LogConstrainedExpectedImprovement(
