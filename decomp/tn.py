@@ -38,7 +38,7 @@ class TensorNetwork:
                 core = torch.nn.init.normal_(
                     torch.nn.Parameter(torch.empty(*core_shape)), 
                     mean=0.0, 
-                    std=0.1
+                    std=1
                 )  # initialize the core tensor as a PyTorch parameter
                 node = tn.Node(core, name=name)
                 self.nodes.append(node)
@@ -71,9 +71,9 @@ class TensorNetwork:
             reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
         return reduced_tensor.tensor
 
-    def decompose(self, target, tol=0.001, init_lr=0.05, loss_patience=5000, lr_patience=500, max_epochs=100000):
+    def decompose(self, target, tol=0.001, init_lr=0.05, loss_patience=5000, lr_patience=750, max_epochs=100000):
         # adam = torch.optim.SGD([node.tensor for node in self.nodes], lr=init_lr, momentum=0.5)
-        adam = torch.optim.Adam([node.tensor for node in self.nodes], lr=init_lr, betas=(0.9, 0.995))
+        adam = torch.optim.Adam([node.tensor for node in self.nodes], lr=init_lr, betas=(0.9, 0.99))
         
         loss = float("inf")
         best_loss = loss
@@ -84,9 +84,9 @@ class TensorNetwork:
         optimizer = adam
         switched = False
         
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=1/torch.e, patience=lr_patience)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=lr_patience)
 
-        while loss > tol:
+        while loss >= tol:
             optimizer.zero_grad()
             nodes_cp, edges_cp = tn.copy(self.nodes)
             output_order = [edges_cp[e] for e in self.output_order]
@@ -104,7 +104,7 @@ class TensorNetwork:
             if loss.item() < best_loss - min_delta:
                 best_loss = loss.item()
                 wait = 0
-                min_delta = best_loss/10
+                min_delta = best_loss/20
             else:
                 wait += 1
             

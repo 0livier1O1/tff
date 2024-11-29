@@ -3,6 +3,7 @@
 # TODO Experiments with actual data
 # TODO Unit tests
 
+import gc
 import warnings
 import torch 
 import multiprocessing as mp
@@ -16,15 +17,16 @@ from botorch.models.transforms import Round, Normalize, Standardize, ChainedInpu
 from botorch.models import ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
-from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, ConstrainedExpectedImprovement, _compute_log_prob_feas
+from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas
 from botorch.optim import optimize_acqf
 
 from botorch.exceptions import ModelFittingError
 
 import gpytorch.settings as gpsttngs
-from gpytorch.kernels import RBFKernel, ScaleKernel
+from gpytorch.kernels import RBFKernel, ScaleKernel, RQKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
+from gpytorch.constraints import GreaterThan
 from botorch.fit import fit_gpytorch_mll
 
 from decomp.tn import TensorNetwork
@@ -90,7 +92,10 @@ class BOSS(object):
         max_af = -torch.inf
         for b in range(self.budget):
             Y_feas = Y[Y[:, 1].exp() <= self.min_rse]
-            print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
+            if len(Y_feas) == 0:
+                Y_feas = torch.tensor([[self.target.numel(), -torch.inf]])  # TODO This is a hack to make the current best min
+            else:
+                print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
 
             model = self._get_model(X, Y)
             logEI = LogConstrainedExpectedImprovement(
@@ -114,7 +119,6 @@ class BOSS(object):
                     raw_samples=self.raw_samples
                 )
                 acqf.append(af)
-            af = af.exp()
 
             x_ = tf(cand)
             y = self._get_obj_and_constraint(x_)
@@ -126,10 +130,9 @@ class BOSS(object):
                 max_af = af
                 wait = 0 
             else:
-                if (af.exp() < 1e-4):
-                    wait += 1
                 if wait > self.max_stall:
                     break
+                wait += 1
         
         self.X = X
         self.acqf = torch.stack(acqf)
@@ -185,11 +188,15 @@ class BOSS(object):
 
     def _get_model(self, X, y):
         tf = self._get_input_transformation()
-        kernel = ScaleKernel(base_kernel=RBFKernel(ard_num_dims=self.D))
-        likelihood = GaussianLikelihood()  # TODO Impose no noise? 
+        kernel = ScaleKernel(base_kernel=RQKernel(ard_num_dims=self.D))  # Try RQKernel if numerical unstability continues
+        likelihood = GaussianLikelihood(noise_constraint=GreaterThan(1e-3)) 
         y_ = y[:, 1][~y[:, 1].isinf()].unsqueeze(1)
+
+        # Drop duplicates for training
+        _, idx = torch.unique(tf(X), dim=0, return_inverse=True)
+
         gp = IntSingleTaskGP(
-            X, y_,
+            X[idx.unique()], y_[idx.unique()],
             likelihood=likelihood,
             outcome_transform=Standardize(m=1),
             covar_module=kernel,
@@ -205,7 +212,7 @@ class BOSS(object):
             patience = 10
             optimizer = torch.optim.SGD(gp.parameters(), lr=0.05, momentum=0.9)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
-            best = float("inf")
+            best = torch.inf
             gp.train()
             likelihood.train()
             best_state = None   
@@ -258,6 +265,9 @@ class BOSS(object):
                 break
             i += 1 
         compression_ratio = t_ntwrk.numel() / self.target.numel()
+        del t_ntwrk
+        
+        gc.collect()
         return compression_ratio.detach(), min_loss.log().detach()
     
 
@@ -266,7 +276,7 @@ if __name__=="__main__":
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
     torch.manual_seed(5)
-    A = random_adj_matrix(5, 4)
+    A = random_adj_matrix(5, 5)
     X = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
 
