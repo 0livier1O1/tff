@@ -3,6 +3,7 @@
 # TODO Experiments with actual data
 # TODO Unit tests
 
+import gc
 import warnings
 import torch 
 import multiprocessing as mp
@@ -16,15 +17,18 @@ from botorch.models.transforms import Round, Normalize, Standardize, ChainedInpu
 from botorch.models import ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
-from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, ConstrainedExpectedImprovement, _compute_log_prob_feas
+from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas
+from botorch.acquisition.monte_carlo import SampleReducingMCAcquisitionFunction
+from botorch.acquisition import ConstrainedExpectedImprovement
 from botorch.optim import optimize_acqf
 
 from botorch.exceptions import ModelFittingError
 
 import gpytorch.settings as gpsttngs
-from gpytorch.kernels import RBFKernel, ScaleKernel
+from gpytorch.kernels import RBFKernel, ScaleKernel, RQKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
+from gpytorch.constraints import GreaterThan
 from botorch.fit import fit_gpytorch_mll
 
 from decomp.tn import TensorNetwork
@@ -129,7 +133,7 @@ class BOSS(object):
                 max_af = af
                 wait = 0 
             else:
-                if (af.exp() < 1e-4):
+                if (af.exp() < 1e-3):
                     wait += 1
                 if wait > self.max_stall:
                     break
@@ -169,7 +173,7 @@ class BOSS(object):
         )       
         tfs["round"] = Round(
             integer_indices=[i for i in range(self.D)],
-            approximate=False
+            approximate=True
         )
         tfs["normalize_tf"] = Normalize(
             d=init_bounds.shape[1],
@@ -188,11 +192,15 @@ class BOSS(object):
 
     def _get_model(self, X, y):
         tf = self._get_input_transformation()
-        kernel = ScaleKernel(base_kernel=RBFKernel(ard_num_dims=self.D))
-        likelihood = GaussianLikelihood()  # TODO Impose no noise? 
+        kernel = ScaleKernel(base_kernel=RBFKernel(ard_num_dims=self.D))  # Try RQKernel if numerical unstability continues
+        likelihood = GaussianLikelihood(noise_constraint=GreaterThan(1e-4))  # TODO Impose no noise? 
         y_ = y[:, 1][~y[:, 1].isinf()].unsqueeze(1)
+
+        # Drop duplicates for training
+        _, idx = torch.unique(tf(X), dim=0, return_inverse=True)
+
         gp = IntSingleTaskGP(
-            X, y_,
+            X[idx.unique()], y_[idx.unique()],
             likelihood=likelihood,
             outcome_transform=Standardize(m=1),
             covar_module=kernel,
@@ -208,7 +216,7 @@ class BOSS(object):
             patience = 10
             optimizer = torch.optim.SGD(gp.parameters(), lr=0.05, momentum=0.9)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
-            best = float("inf")
+            best = torch.inf
             gp.train()
             likelihood.train()
             best_state = None   
@@ -261,6 +269,9 @@ class BOSS(object):
                 break
             i += 1 
         compression_ratio = t_ntwrk.numel() / self.target.numel()
+        del t_ntwrk
+        
+        gc.collect()
         return compression_ratio.detach(), min_loss.log().detach()
     
 
