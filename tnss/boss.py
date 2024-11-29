@@ -17,14 +17,11 @@ from multiprocessing import Pool
 from torch import Tensor
 
 from botorch.models.transforms import Round, Normalize, Standardize, ChainedInputTransform
-from botorch.models import ModelList, ModelListGP
+from botorch.models import ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
 from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas
-<<<<<<< HEAD
-=======
 from botorch.acquisition import qLogExpectedImprovement
->>>>>>> 321b0c3 (Added batch acquisition function qLogEI for parallel search)
 from botorch.optim import optimize_acqf
 
 from botorch.acquisition.objective import GenericMCObjective
@@ -159,7 +156,6 @@ class BOSS(object):
                 wait += 1
                 if wait > self.max_stall:
                     break
-                wait += 1
         
         self.X = X
         self.acqf_hist = torch.stack(acqf_hist)
