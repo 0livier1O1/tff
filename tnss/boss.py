@@ -18,8 +18,6 @@ from botorch.models import ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
 from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas
-from botorch.acquisition.monte_carlo import SampleReducingMCAcquisitionFunction
-from botorch.acquisition import ConstrainedExpectedImprovement
 from botorch.optim import optimize_acqf
 
 from botorch.exceptions import ModelFittingError
@@ -95,7 +93,7 @@ class BOSS(object):
         for b in range(self.budget):
             Y_feas = Y[Y[:, 1].exp() <= self.min_rse]
             if len(Y_feas) == 0:
-                Y_feas = torch.ones(2, 1) * torch.inf
+                Y_feas = torch.tensor([[self.target.numel(), -torch.inf]])  # TODO This is a hack to make the current best min
             else:
                 print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
 
@@ -121,7 +119,6 @@ class BOSS(object):
                     raw_samples=self.raw_samples
                 )
                 acqf.append(af)
-            af = af.exp()
 
             x_ = tf(cand)
             y = self._get_obj_and_constraint(x_)
@@ -133,10 +130,9 @@ class BOSS(object):
                 max_af = af
                 wait = 0 
             else:
-                if (af.exp() < 1e-3):
-                    wait += 1
                 if wait > self.max_stall:
                     break
+                wait += 1
         
         self.X = X
         self.acqf = torch.stack(acqf)
@@ -173,7 +169,7 @@ class BOSS(object):
         )       
         tfs["round"] = Round(
             integer_indices=[i for i in range(self.D)],
-            approximate=True
+            approximate=False
         )
         tfs["normalize_tf"] = Normalize(
             d=init_bounds.shape[1],
@@ -192,8 +188,8 @@ class BOSS(object):
 
     def _get_model(self, X, y):
         tf = self._get_input_transformation()
-        kernel = ScaleKernel(base_kernel=RBFKernel(ard_num_dims=self.D))  # Try RQKernel if numerical unstability continues
-        likelihood = GaussianLikelihood(noise_constraint=GreaterThan(1e-4))  # TODO Impose no noise? 
+        kernel = ScaleKernel(base_kernel=RQKernel(ard_num_dims=self.D))  # Try RQKernel if numerical unstability continues
+        likelihood = GaussianLikelihood(noise_constraint=GreaterThan(1e-3)) 
         y_ = y[:, 1][~y[:, 1].isinf()].unsqueeze(1)
 
         # Drop duplicates for training
@@ -280,7 +276,7 @@ if __name__=="__main__":
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
     torch.manual_seed(5)
-    A = random_adj_matrix(5, 4)
+    A = random_adj_matrix(5, 5)
     X = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
 
