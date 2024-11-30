@@ -14,6 +14,9 @@ min_rse = 0.01
 
 
 if __name__=="__main__":
+    from scripts.utils import random_adj_matrix
+    from decomp.tn import TensorNetwork, sim_tensor_from_adj
+
     for i, file in enumerate(os.listdir(folder_path)):
         if i == 5:
             break
@@ -27,7 +30,8 @@ if __name__=="__main__":
             tn_eval_attempts=1,
             n_workers=7,
             min_rse=0.01,
-            max_stalling_aqcf=10
+            max_stalling_aqcf=20,
+            af_batch=4
         )
         boss()
         res = boss.get_bo_results()

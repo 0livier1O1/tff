@@ -106,6 +106,7 @@ class BOSS(object):
         self.acqf = None
         self.sampled_structures = None
         self.objectives = None
+        self.train_X, self.train_Y = None, None
 
     def __call__(self):
         tf = self._get_input_transformation() 
@@ -113,10 +114,12 @@ class BOSS(object):
         std_bounds = torch.ones((2, self.D))
         std_bounds[0] = 0 
         
-        X, Y = self._initial_points(bounds=std_bounds)
+        self.train_X, self.train_Y = self._initial_points(bounds=std_bounds)
         acqf_hist = []
         max_af = -torch.inf
         for b in range(self.budget):
+            X, Y = self.train_X, self.train_Y
+            
             mask = Y[:, 1].exp() <= self.min_rse
             Y_feas = Y[mask]
 
@@ -125,7 +128,7 @@ class BOSS(object):
             else:
                 print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
 
-            model = self._get_model(X, Y)
+            model = self.get_model(X, Y)
             acqf = self._get_acqf(model, Y_feas)
 
             with warnings.catch_warnings(), gpsttngs.fast_pred_samples(state=True), gpsttngs.fast_computations(
@@ -141,35 +144,33 @@ class BOSS(object):
                     num_restarts=self.num_restarts_af,
                     raw_samples=self.raw_samples
                 )
-            acqf_hist.append(af)
-
             x_ = tf(cand)
             y = self._get_obj_and_constraint(x_)
-            X = torch.concat([X, cand])  # TODO What is the point that I add to my dataset
-            Y = torch.concat([Y, y])
+            self.train_X = torch.concat([self.train_X, cand])  # TODO What is the point that I add to my dataset
+            self.train_Y = torch.concat([self.train_Y, y])
 
             # Early stopping
-            if af > max_af:
-                max_af = af
+            if af.max() > max_af:
+                max_af = af.max()
                 wait = 0 
             else:
                 wait += 1
                 if wait > self.max_stall:
                     break
-        
-        self.X = X
-        self.acqf_hist = torch.stack(acqf_hist)
-        self.sampled_structures = unnormalize(tf(X), self.bounds)
-        self.objectives = Y
+        if acqf_hist:
+            self.acqf_hist = torch.stack(acqf_hist)
+        else:
+            self.acqf_hist = []
     
     def get_bo_results(self):
+        tf = self._get_input_transformation()
         if self.acqf is None:
             raise ModelFittingError("BO has not been run yet")
         out = {
             "AF": self.acqf, 
-            "X": self.sampled_structures,
-            "CR": self.objectives[:, 0],
-            "RSE": self.objectives[:, 1].exp()
+            "X": unnormalize(tf(self.train_X), self.bounds),
+            "CR": self.train_Y[:, 0],
+            "RSE": self.train_Y[:, 1].exp()
         }
         return out
     
@@ -192,7 +193,7 @@ class BOSS(object):
         )       
         tfs["round"] = Round(
             integer_indices=[i for i in range(self.D)],
-            approximate=False
+            approximate=True
         )
         tfs["normalize_tf"] = Normalize(
             d=init_bounds.shape[1],
@@ -209,9 +210,12 @@ class BOSS(object):
         y_init = self._get_obj_and_constraint(X_init)
         return X_init, y_init
 
-    def _get_model(self, X, y):
+    def get_model(self, X=None, y=None):
+        if X is None or y is None:
+            X, y = self.train_X, self.train_Y
+
         tf = self._get_input_transformation()
-        kernel = ScaleKernel(base_kernel=RQKernel(ard_num_dims=self.D))  # Try RQKernel if numerical unstability continues
+        kernel = ScaleKernel(base_kernel=RBFKernel(ard_num_dims=self.D))  # Try RQKernel if numerical unstability continues
         likelihood = GaussianLikelihood(noise_constraint=GreaterThan(1e-3)) 
         y_ = y[:, 1][~y[:, 1].isinf()].unsqueeze(1)
 
@@ -227,10 +231,11 @@ class BOSS(object):
         )
         mll = ExactMarginalLogLikelihood(model=gp, likelihood=gp.likelihood)
         try: 
-            fit_gpytorch_mll(mll, optimizer_kwargs={"options":{"maxiter": 500, 'gtol': 1e-5, 'ftol': 1e-5,}})
+            fit_gpytorch_mll(mll)
             self.gp_state = gp.state_dict()
         except:
             # Fit with SGD
+            print("Fitting with SGD")
             n_iterations = 50
             patience = 10
             optimizer = torch.optim.SGD(gp.parameters(), lr=0.05, momentum=0.9)
@@ -241,8 +246,8 @@ class BOSS(object):
             best_state = None   
             for _ in range(n_iterations):
                 optimizer.zero_grad()
-                output = gp(X)
-                loss = -mll(output, y_).sum()
+                output = gp(X[idx.unique()])
+                loss = -mll(output, y_[idx.unique()]).sum()
                 if loss.item() < best:
                     best = loss.item()
                     counter = 0
@@ -307,7 +312,7 @@ class BOSS(object):
             i += 1 
         compression_ratio = t_ntwrk.numel() / self.target.numel()
         del t_ntwrk
-        
+
         gc.collect()
         return compression_ratio.detach(), min_loss.log().detach()
     
@@ -324,11 +329,11 @@ if __name__=="__main__":
     bo = BOSS(
         X,
         n_init=10,
+        num_restarts_af=4,
         tn_eval_attempts=2,
         min_rse=0.01,
-        af_batch=4,
-        max_rank=7,
-        n_workers=7,
+        max_rank=6,
+        n_workers=5,
         max_stalling_aqcf=10
         )
     bo()
