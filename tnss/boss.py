@@ -29,7 +29,7 @@ from botorch.acquisition.objective import GenericMCObjective
 from botorch.exceptions import ModelFittingError
 
 import gpytorch.settings as gpsttngs
-from gpytorch.kernels import RBFKernel, ScaleKernel, RQKernel
+from gpytorch.kernels import RBFKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.constraints import GreaterThan
@@ -304,7 +304,7 @@ class BOSS(object):
         min_loss = float("inf")
         while i < self.tn_runs:
             t_ntwrk = TensorNetwork(A)
-            loss = t_ntwrk.decompose(self.target, tol=self.min_rse)
+            loss = t_ntwrk.decompose(self.target, tol=None)
             if loss < min_loss:
                 min_loss = loss
             if loss < self.min_rse:

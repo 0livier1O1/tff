@@ -36,7 +36,7 @@ class TensorNetwork:
             for t, name in zip(range(self.dim), letter_range(self.dim)):
                 core_shape = [self.modes[t]] + [m for m in self.adj_matrix[t].tolist() if m != 0]  # For all nodes, the first mode is the open leg
                 core = torch.nn.init.normal_(
-                    torch.nn.Parameter(torch.empty(*core_shape)), 
+                    torch.nn.Parameter(torch.empty(*core_shape, dtype=torch.double)), 
                     mean=0.0, 
                     std=init_std
                 )  # initialize the core tensor as a PyTorch parameter
@@ -71,11 +71,12 @@ class TensorNetwork:
             reduced_tensor = tn.contractors.greedy(self.nodes, output_edge_order=self.output_order)
         return reduced_tensor.tensor
 
-    def decompose(self, target, tol=None, pct_loss_improvment=0.05, init_lr=0.05, loss_patience=5000, lr_patience=750, max_epochs=50000):
+    def decompose(self, target, tol=None, pct_loss_improvment=0.025, init_lr=0.05, loss_patience=2500, lr_patience=500, max_epochs=25000):
         # adam = torch.optim.SGD([node.tensor for node in self.nodes], lr=init_lr, momentum=0.5)
         adam = torch.optim.Adam([node.tensor for node in self.nodes], lr=init_lr, betas=(0.9, 0.99))
-        
-        loss = float("inf")
+        target = target.to(dtype=torch.double)
+
+        loss = torch.inf
         best_loss = loss
         wait = 0 
         epoch = 0
@@ -98,18 +99,16 @@ class TensorNetwork:
             optimizer.step()
 
             epoch += 1
-            if epoch > max_epochs:
-                return False
             
-            if loss.item() < best_loss - min_delta:
-                best_loss = loss.item()
+            if loss < best_loss - min_delta:
+                best_loss = loss
                 wait = 0
                 min_delta = best_loss * pct_loss_improvment
             else:
                 wait += 1
             
             if wait >= loss_patience:
-                return loss
+                break
             
             if tol is not None:
                 if loss <= tol:
@@ -134,7 +133,7 @@ def sim_tensor_from_adj(A, std_dev=0.1):
     cores = []
     for i, a in enumerate(adj.unbind()):
         shape = [ranks[i]] + a[a.nonzero().squeeze()].tolist()
-        cores.append(torch.randn(shape) * std_dev)
+        cores.append(torch.randn(shape, dtype=torch.double) * std_dev)
     
     ntwrk = TensorNetwork(adj, cores=cores)
     return ntwrk.contract_network()

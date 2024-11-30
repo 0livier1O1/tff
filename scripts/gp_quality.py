@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from botorch.models.kernels import InfiniteWidthBNNKernel
 from botorch.models.transforms import Round, Normalize, Standardize, ChainedInputTransform
 
-from gpytorch.kernels import MaternKernel, RBFKernel, ScaleKernel
+from gpytorch.kernels import MaternKernel, RBFKernel, ScaleKernel, RQKernel
 from gpytorch.mlls.exact_marginal_log_likelihood import ExactMarginalLogLikelihood
 from botorch.fit import fit_gpytorch_mll
 from botorch.models.gp_regression import SingleTaskGP
@@ -64,8 +64,14 @@ mll3 = ExactMarginalLogLikelihood(gp3.likelihood, gp3)
 fit_gpytorch_mll(mll3)
 gp3.eval()
 
+kernel4 = ScaleKernel(RQKernel(ard_num_dims=train_X.shape[1]))
+gp4 = SingleTaskGP(train_X, train_Y.unsqueeze(1), covar_module=kernel4, outcome_transform=Standardize(m=1))
+mll4 = ExactMarginalLogLikelihood(gp4.likelihood, gp4)
+fit_gpytorch_mll(mll4)
+gp4.eval()
+
 means = []
-for model in [gp1, gp2, gp3]:
+for model in [gp1, gp2, gp3, gp4]:
     post = model.posterior(test_X)
     mean = post.mean.squeeze().detach()
     means.append(mean)
@@ -81,6 +87,9 @@ fig.add_trace(go.Scatter(
 ))
 fig.add_trace(go.Scatter(
     x = test_Y, y=means[:, 0], mode="markers", name="IBNN"
+))
+fig.add_trace(go.Scatter(
+    x = test_Y, y=means[:, 3], mode="markers", name="IBNN"
 ))
 # fig.update_xaxes(range=[0,1])
 # fig.update_yaxes(range=[0,1])
