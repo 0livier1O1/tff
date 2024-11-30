@@ -41,56 +41,35 @@ init_bounds[1] *= 6
 
 n = 500
 
-tf = Normalize(d=2)
-Y = tf(Y)
 train_X, train_Y = X[:n], Y[:n][:, 1].detach()
 test_X, test_Y = X[n:], Y[n:][:, 1].detach()
 
-kernel1 = ScaleKernel(base_kernel=InfiniteWidthBNNKernel(depth=1))
-gp1 = SingleTaskGP(train_X, train_Y.unsqueeze(1), covar_module=kernel1, outcome_transform=Standardize(m=1))
-mll1 = ExactMarginalLogLikelihood(gp1.likelihood, gp1)
-fit_gpytorch_mll(mll1)
-gp1.eval()
 
-kernel2 = ScaleKernel(MaternKernel())
-gp2 = SingleTaskGP(train_X, train_Y.unsqueeze(1), covar_module=kernel2, outcome_transform=Standardize(m=1))
-mll2 = ExactMarginalLogLikelihood(gp2.likelihood, gp2)
-fit_gpytorch_mll(mll2)
-gp2.eval()
+def train_gp(kernel):
+    gp = SingleTaskGP(train_X, train_Y.unsqueeze(1), covar_module=kernel, outcome_transform=Standardize(m=1))
+    mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+    fit_gpytorch_mll(mll)
+    return gp
 
-kernel3 = ScaleKernel(RBFKernel(ard_num_dims=train_X.shape[1]))
-gp3 = SingleTaskGP(train_X, train_Y.unsqueeze(1), covar_module=kernel3, outcome_transform=Standardize(m=1))
-mll3 = ExactMarginalLogLikelihood(gp3.likelihood, gp3)
-fit_gpytorch_mll(mll3)
-gp3.eval()
+k1 = ScaleKernel(base_kernel=InfiniteWidthBNNKernel(depth=1))
+k2 = ScaleKernel(MaternKernel())
+k3 = ScaleKernel(RBFKernel(ard_num_dims=train_X.shape[1]))
+k4 = ScaleKernel(RQKernel(ard_num_dims=train_X.shape[1]))
 
-kernel4 = ScaleKernel(RQKernel(ard_num_dims=train_X.shape[1]))
-gp4 = SingleTaskGP(train_X, train_Y.unsqueeze(1), covar_module=kernel4, outcome_transform=Standardize(m=1))
-mll4 = ExactMarginalLogLikelihood(gp4.likelihood, gp4)
-fit_gpytorch_mll(mll4)
-gp4.eval()
+gps = [train_gp(kernel) for kernel in [k1, k2, k3, k4]]
 
 means = []
-for model in [gp1, gp2, gp3, gp4]:
+for model in gps:
     post = model.posterior(test_X)
     mean = post.mean.squeeze().detach()
     means.append(mean)
 means = torch.stack(means, axis=1)
 
-
 fig = go.Figure()
-fig.add_trace(go.Scatter(
-    x = test_Y, y=means[:, 1], mode="markers", name="Mattern"
-))
-fig.add_trace(go.Scatter(
-    x = test_Y, y=means[:, 2], mode="markers", name="RBF"
-))
-fig.add_trace(go.Scatter(
-    x = test_Y, y=means[:, 0], mode="markers", name="IBNN"
-))
-fig.add_trace(go.Scatter(
-    x = test_Y, y=means[:, 3], mode="markers", name="IBNN"
-))
+for i in range(means.shape[1]):
+    fig.add_trace(go.Scatter(
+        x = test_Y, y=means[:, i], mode="markers", name="Mattern"
+    ))
 # fig.update_xaxes(range=[0,1])
 # fig.update_yaxes(range=[0,1])
 fig.show()
