@@ -14,10 +14,10 @@ def triu_to_adj_matrix(triu: Tensor, diag: Tensor):
     Returns:
         A `batch_size x q x N x N` tensor of adjacency matrices.
     """
-    x = triu
+    x = triu.clone()
     N = diag.shape[0]
     if x.dim() < 3:
-        x = x.unsqueeze(0)
+        x = x.unsqueeze(1)
     n, q, _ = x.shape
     A = torch.zeros((n, q, N, N))
     
