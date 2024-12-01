@@ -83,7 +83,6 @@ class TensorNetwork:
         min_delta=0
 
         optimizer = adam
-        switched = False
         
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=lr_patience)
 

@@ -1,12 +1,10 @@
-# TODO Get GP diagnostic
-# TODO Check if GP is constant on integers
-# TODO Experiments with actual data
+# TODO check for duplicate Adjacency matrix
 # TODO Unit tests
-# TODO Batch Acquisition function
 
 import gc
 import warnings
-from botorch.models.gpytorch import GPyTorchModel
+import numpy as np
+
 from botorch.models.model import Model
 import torch 
 import multiprocessing as mp
@@ -16,13 +14,13 @@ from tqdm import tqdm
 from multiprocessing import Pool
 from torch import Tensor
 
-from botorch.models.transforms import Round, Normalize, Standardize, ChainedInputTransform
+from botorch.models.transforms import Standardize
 from botorch.models import ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
 from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas
 from botorch.acquisition import qLogExpectedImprovement
-from botorch.optim import optimize_acqf
+from botorch.optim import optimize_acqf, optimize_acqf_discrete_local_search
 
 from botorch.acquisition.objective import GenericMCObjective
 
@@ -30,18 +28,17 @@ from botorch.exceptions import ModelFittingError
 
 import gpytorch.settings as gpsttngs
 from gpytorch.kernels import RBFKernel, ScaleKernel
+from botorch.models.kernels import InfiniteWidthBNNKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
-from gpytorch.constraints import GreaterThan
 from botorch.fit import fit_gpytorch_mll
 
 from decomp.tn import TensorNetwork
-from tnss.utils import triu_to_adj_matrix
-from tnss.models import IntSingleTaskGP, CompressionRatio
+from tnss.utils import triu_to_adj_matrix, tf_unit_cube_int
+from tnss.models import SingleTaskGP, CompressionRatio, ManhattanDistanceKernel
 
 
 torch.set_printoptions(sci_mode=False)
-
 
 class FeasibleTN:
     def __init__(self, min_rse) -> None:
@@ -76,10 +73,12 @@ class BOSS(object):
             num_restarts_af = 20,
             af_batch = 1,
             max_stalling_aqcf = 5,
+            maxiter_tn = 25000,
+            discrete_search = False,
             verbose=True,
         ) -> None:
         self.target = target
-        self.t_shape = torch.tensor(target.shape)
+        self.t_shape = torch.tensor(target.shape).to(dtype=torch.double)
         
         N = target.dim()  
         self.D = int((N * (N-1))/2)  # Number of parameters (i.e. number of off-diagonal elements of adjacency matrix)
@@ -97,6 +96,7 @@ class BOSS(object):
         self.q = af_batch
         self.num_restarts_af = num_restarts_af
         self.max_stall = max_stalling_aqcf
+        self.discrete_search = discrete_search
 
         self.verbose = verbose
         self.model_cr = CompressionRatio(target=self.target, bounds=self.bounds, diag=self.t_shape)
@@ -107,19 +107,20 @@ class BOSS(object):
         self.sampled_structures = None
         self.objectives = None
         self.train_X, self.train_Y = None, None
+        self.maxiter_tn = maxiter_tn
+        self.choices = list(torch.arange(1, max_rank+1).repeat(self.D, 1).to(dtype=torch.double).unbind())
 
     def __call__(self):
-        tf = self._get_input_transformation() 
+        tf = tf_unit_cube_int(self.D, self.bounds)
 
-        std_bounds = torch.ones((2, self.D))
+        std_bounds = torch.ones((2, self.D)).to(dtype=torch.double)
         std_bounds[0] = 0 
         
         self.train_X, self.train_Y = self._initial_points(bounds=std_bounds)
         acqf_hist = []
         max_af = -torch.inf
         for b in range(self.budget):
-            X, Y = self.train_X, self.train_Y
-            
+            X, Y = self.train_X.to(dtype=torch.double), self.train_Y.to(dtype=torch.double)
             mask = Y[:, 1].exp() <= self.min_rse
             Y_feas = Y[mask]
 
@@ -130,20 +131,9 @@ class BOSS(object):
 
             model = self.get_model(X, Y)
             acqf = self._get_acqf(model, Y_feas)
+            
+            cand, af = self._optimize_acqf(acqf, std_bounds)
 
-            with warnings.catch_warnings(), gpsttngs.fast_pred_samples(state=True), gpsttngs.fast_computations(
-                log_prob=True,
-                covar_root_decomposition=True,
-                solves=False
-            ):
-                warnings.simplefilter("ignore")
-                cand, af = optimize_acqf(
-                    acq_function=acqf, 
-                    bounds=std_bounds, 
-                    q=self.q,
-                    num_restarts=self.num_restarts_af,
-                    raw_samples=self.raw_samples
-                )
             x_ = tf(cand)
             y = self._get_obj_and_constraint(x_)
             self.train_X = torch.concat([self.train_X, cand])  # TODO What is the point that I add to my dataset
@@ -163,7 +153,7 @@ class BOSS(object):
             self.acqf_hist = []
     
     def get_bo_results(self):
-        tf = self._get_input_transformation()
+        tf = tf_unit_cube_int(self.D, self.bounds)
         if self.acqf is None:
             raise ModelFittingError("BO has not been run yet")
         out = {
@@ -173,94 +163,40 @@ class BOSS(object):
             "RSE": self.train_Y[:, 1].exp()
         }
         return out
-    
-    def _get_input_transformation(self, init=False):
-        """
-        """
-        if init:
-            # This increases probability of sampling cube edges (extreme values)
-            init_bounds = self.bounds.clone() 
-            init_bounds[0, :] -= 0.4999
-            init_bounds[1, :] += 0.4999
-        else:
-            init_bounds = self.bounds
-
-        tfs = {}
-        tfs["unnormalize_tf"] = Normalize(
-            d=init_bounds.shape[1],
-            bounds=init_bounds,
-            reverse=True
-        )       
-        tfs["round"] = Round(
-            integer_indices=[i for i in range(self.D)],
-            approximate=True
-        )
-        tfs["normalize_tf"] = Normalize(
-            d=init_bounds.shape[1],
-            bounds=init_bounds,
-        )
-        tf = ChainedInputTransform(**tfs)
-        tf.eval()
-        return tf
         
     def _initial_points(self, bounds):
         raw_x = draw_sobol_samples(bounds=bounds, n=self.n_init, q=1).squeeze(-2)
-        tf = self._get_input_transformation(init=True)
+        tf = tf_unit_cube_int(self.D, self.bounds, init=True)
         X_init = tf(raw_x).to(torch.double)
         y_init = self._get_obj_and_constraint(X_init)
         return X_init, y_init
 
     def get_model(self, X=None, y=None):
         if X is None or y is None:
-            X, y = self.train_X, self.train_Y
+            X, y = self.train_X.to(dtype=torch.double), self.train_Y.to(dtype=torch.double)
 
-        tf = self._get_input_transformation()
-        kernel = ScaleKernel(base_kernel=RBFKernel(ard_num_dims=self.D))  # Try RQKernel if numerical unstability continues
-        likelihood = GaussianLikelihood(noise_constraint=GreaterThan(1e-3)) 
+        tf = tf_unit_cube_int(self.D, self.bounds)
+        kernel = ScaleKernel(base_kernel=ManhattanDistanceKernel(ard_num_dims=self.D))
+        likelihood = GaussianLikelihood() 
         y_ = y[:, 1][~y[:, 1].isinf()].unsqueeze(1)
 
         # Drop duplicates for training
         _, idx = torch.unique(tf(X), dim=0, return_inverse=True)
 
-        gp = IntSingleTaskGP(
+        gp = SingleTaskGP(
             X[idx.unique()], y_[idx.unique()],
             likelihood=likelihood,
             outcome_transform=Standardize(m=1),
-            covar_module=kernel,
-            input_transform=tf
+            covar_module=kernel
         )
         mll = ExactMarginalLogLikelihood(model=gp, likelihood=gp.likelihood)
         try: 
-            fit_gpytorch_mll(mll)
+            fit_gpytorch_mll(mll, optimizer_kwargs={"options":{"maxiter": 50}})
             self.gp_state = gp.state_dict()
         except:
-            # Fit with SGD
-            print("Fitting with SGD")
-            n_iterations = 50
-            patience = 10
-            optimizer = torch.optim.SGD(gp.parameters(), lr=0.05, momentum=0.9)
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
-            best = torch.inf
-            gp.train()
-            likelihood.train()
-            best_state = None   
-            for _ in range(n_iterations):
-                optimizer.zero_grad()
-                output = gp(X[idx.unique()])
-                loss = -mll(output, y_[idx.unique()]).sum()
-                if loss.item() < best:
-                    best = loss.item()
-                    counter = 0
-                    best_state = gp.state_dict()
-                else:
-                    counter += 1
-                if counter >= patience:
-                    break
-                scheduler.step(loss.item())
-            
-            if best_state is not None:
-                gp.load_state_dict(best_state)
-
+            if self.gp_state is not None:
+                gp.load_state_dict(self.gp_state)
+            print("Failed to fite GP")
             gp.eval()
 
         return ModelListFix(self.model_cr, gp)
@@ -271,7 +207,8 @@ class BOSS(object):
                 model=model,
                 best_f=Y_feas[:, 0].min(),
                 constraints=[FeasibleTN(self.min_rse)],
-                objective=objective
+                objective=objective,
+                fat=True,
             )
         else:
             af = LogConstrainedExpectedImprovement(
@@ -279,13 +216,38 @@ class BOSS(object):
                 objective_index=0,
                 constraints={1: [None, torch.math.log(self.min_rse)]},
                 best_f=Y_feas[:, 0].min(),
-                maximize=False
+                maximize=False,
             )
         return af
         
+    def _optimize_acqf(self, acqf, bounds):
+        with warnings.catch_warnings(), gpsttngs.fast_pred_samples(state=True), gpsttngs.fast_computations(
+            log_prob=True,
+            covar_root_decomposition=True,
+            solves=False
+        ):
+            warnings.simplefilter("ignore")
+            if self.discrete_search:
+                cand, af = optimize_acqf_discrete_local_search(
+                    acq_function=acqf, 
+                    discrete_choices=self.choices,
+                    q=self.q, 
+                    num_restarts=self.num_restarts_af,
+                    raw_samples=self.raw_samples
+                ) # TODO I shoud normalize the result here
+            else:
+                cand, af = optimize_acqf(
+                    acq_function=acqf, 
+                    bounds=bounds, 
+                    q=self.q,
+                    num_restarts=self.num_restarts_af,
+                    raw_samples=self.raw_samples
+                )
+        return cand, af
+    
     def _get_obj_and_constraint(self, raw_x: Tensor):
         x = unnormalize(raw_x, bounds=self.bounds).round().to(torch.int)  # raw_x is a vector in unit cube -> turn into integer ranks
-        A = triu_to_adj_matrix(x, diag=self.t_shape).squeeze() # Make adjancy matrix from x 
+        A = triu_to_adj_matrix(x, diag=self.t_shape).squeeze(0) # Make adjancy matrix from x 
             
         # Perform contraction 
         if self.n_workers == 1 or raw_x.shape[0] == 1:
@@ -294,8 +256,8 @@ class BOSS(object):
             for a in loop:
                 objectives.append(self._evaluate_tn(a))
         else:
-            args = [(a,) for a in A.unbind()]
-            objectives = progress_starmap(self._evaluate_tn, args, n_cpu=self.n_workers, total=len(args))
+            par_args = [(a,) for a in A.unbind()]
+            objectives = progress_starmap(self._evaluate_tn, par_args, n_cpu=self.n_workers, total=len(par_args))
                 
         return torch.tensor(objectives).to(raw_x)
 
@@ -304,7 +266,7 @@ class BOSS(object):
         min_loss = float("inf")
         while i < self.tn_runs:
             t_ntwrk = TensorNetwork(A)
-            loss = t_ntwrk.decompose(self.target, tol=None)
+            loss = t_ntwrk.decompose(self.target, tol=self.min_rse/10, max_epochs=self.maxiter_tn)
             if loss < min_loss:
                 min_loss = loss
             if loss < self.min_rse:
@@ -321,21 +283,26 @@ if __name__=="__main__":
     from scripts.utils import random_adj_matrix
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
-    torch.manual_seed(5)
-    A = random_adj_matrix(4, 4)
+    torch.manual_seed(6)
+    A = random_adj_matrix(5, 6, num_zero_edges=3)
     X = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
+    print(f"True Compression Ratio {cr_true}")
 
-    bo = BOSS(
+    boss = BOSS(
         X,
-        n_init=10,
-        num_restarts_af=4,
-        tn_eval_attempts=2,
+        n_init=20,
+        num_restarts_af=20,
+        tn_eval_attempts=1,
         min_rse=0.01,
         max_rank=6,
         n_workers=5,
-        max_stalling_aqcf=10
+        budget=500,
+        af_batch=1,
+        max_stalling_aqcf=500,
+        maxiter_tn = 20000,
+        discrete_search=False
         )
-    bo()
+    boss()
 
     print("You got this")

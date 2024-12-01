@@ -1,5 +1,6 @@
-from torch import Tensor
 import torch
+from torch import Tensor
+from botorch.models.transforms import Round, Normalize, ChainedInputTransform
 
 
 def triu_to_adj_matrix(triu: Tensor, diag: Tensor):
@@ -38,3 +39,31 @@ def triu_to_adj_matrix(triu: Tensor, diag: Tensor):
     A[batch_idx2, q_idx_diag, rng, rng] = diag.unsqueeze(0).unsqueeze(0).expand(n, q, N).flatten().to(A)
     
     return A
+
+
+def tf_unit_cube_int(D, bounds, init=False):
+    if init:
+        # This increases probability of sampling cube edges (extreme values)
+        init_bounds = bounds.clone() 
+        init_bounds[0, :] -= 0.4999
+        init_bounds[1, :] += 0.4999
+    else:
+        init_bounds = bounds
+
+    tfs = {}
+    tfs["unnormalize_tf"] = Normalize(
+        d=init_bounds.shape[1],
+        bounds=init_bounds,
+        reverse=True
+    )       
+    tfs["round"] = Round(
+        integer_indices=[i for i in range(D)],
+        approximate=False
+    )
+    tfs["normalize_tf"] = Normalize(
+        d=init_bounds.shape[1],
+        bounds=init_bounds,
+    )
+    tf = ChainedInputTransform(**tfs)
+    tf.eval()
+    return tf
