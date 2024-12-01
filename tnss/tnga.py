@@ -21,7 +21,8 @@ class TNGA:
         tn_eval_attempts=1, 
         min_rse=0.01,
         n_workers=1,
-        lambda_= 1,
+        lambda_=1,
+        pct_elimination=0.2, 
         maxiter_tn=10000
     ) -> None:
         self.N = target.dim()
@@ -34,6 +35,7 @@ class TNGA:
         self.maxiter_tn = maxiter_tn
 
         # GA settings
+        self.pct_elim = pct_elimination
         self.pop_size = pop_size
         self.mut_rate = mutation_rate
         self.lambda_ = lambda_
@@ -48,6 +50,7 @@ class TNGA:
         
         for k in range(self.iter):
             fitness, _ = self.eval_fitness(population)
+            population = self.elimination(population, fitness)
             population = self.selection(population, fitness)
             population = self.crossover(population)
             population = self.mutation(population)
@@ -73,10 +76,17 @@ class TNGA:
             parent1 = population[i]
             parent2 = population[(i + 1) % self.pop_size]
 
+            perm = torch.randperm(self.D)
+            inverse_perm = torch.argsort(perm)
+            
+            pparent1 = parent1[perm]
+            pparent2 = parent2[perm]
+
             split_idx = torch.randint(1, self.D, (1,)).item()
-            child1 = torch.cat((parent1[:split_idx], parent2[split_idx:]))
-            child2 = torch.cat((parent2[:split_idx], parent1[split_idx:]))
-            offspring.extend([child1, child2])
+            child1 = torch.cat((pparent1[:split_idx], pparent2[split_idx:]))
+            child2 = torch.cat((pparent2[:split_idx], pparent1[split_idx:]))
+
+            offspring.extend([child1[inverse_perm], child2[inverse_perm]])
 
         return torch.stack(offspring[:self.pop_size])
 
@@ -85,6 +95,11 @@ class TNGA:
         mutations = torch.randint(1, self.max_rank + 1, population.shape)
         population[mask] = mutations[mask]
         return population
+    
+    def elimination(self, population, fitness):
+        keep = int(self.pop_size * (1-self.pct_elim))
+        sorted_idx = torch.argsort(fitness, descending=False)  # Sort fitness (lower is better)
+        return population[sorted_idx][:keep]
 
     def eval_fitness(self, X: Tensor):
         A = triu_to_adj_matrix(X, self.diag).squeeze()
@@ -102,7 +117,7 @@ class TNGA:
         fitness = objectives[:,0] + self.lambda_ * objectives[:, 1].exp()
 
         return fitness, objectives
-
+    
     def _evaluate_tn(self, A):
         i = 0
         min_loss = float("inf")
@@ -130,15 +145,15 @@ if __name__=="__main__":
     Z = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / Z.numel()
     print(f"True Compression Ratio {cr_true}")
-    
+
     tnga = TNGA(
         target=Z,
         max_rank=6,
-        pop_size=50,
+        pop_size=10,
         mutation_rate=0.05, 
         iter=30,
-        n_workers=4,
-        maxiter_tn=20000,
+        n_workers=7,
+        maxiter_tn=15000,
         lambda_= 50
     )
     pop, obj = tnga()
