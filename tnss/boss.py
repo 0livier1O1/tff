@@ -11,7 +11,6 @@ import multiprocessing as mp
 
 from parallelbar import progress_starmap
 from tqdm import tqdm
-from multiprocessing import Pool
 from torch import Tensor
 
 from botorch.models.transforms import Standardize
@@ -133,7 +132,8 @@ class BOSS(object):
             acqf = self._get_acqf(model, Y_feas)
             
             cand, af = self._optimize_acqf(acqf, std_bounds)
-
+            acqf_hist.append(af)
+            
             x_ = tf(cand)
             y = self._get_obj_and_constraint(x_)
             self.train_X = torch.concat([self.train_X, cand])  # TODO What is the point that I add to my dataset

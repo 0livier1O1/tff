@@ -29,7 +29,7 @@ class TensorNetwork:
         
         self.dim = self.shape[0]
 
-        self.G = nx.from_numpy_array(np.array(self.adj_matrix))
+        self.G = nx.from_numpy_array(self.adj_matrix.numpy())
         self.nodes = []
         self.output_order = []  
         if cores is None:
@@ -124,7 +124,7 @@ class TensorNetwork:
         return torch.tensor(sum(node.tensor.numel() for node in self.nodes))
         
 
-def sim_tensor_from_adj(A, std_dev=0.1):
+def sim_tensor_from_adj(A, std_dev=0.1):  # TODO Remove from this page
     A = A.to(dtype=torch.int)
     ranks = torch.diag(A)
     adj = torch.max(A, A.T) - torch.diag(ranks)
