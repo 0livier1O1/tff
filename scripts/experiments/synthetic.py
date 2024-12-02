@@ -1,3 +1,9 @@
+# TODO do last iteration of order 5 
+
+import os
+import torch
+import numpy as np
+
 from scripts.utils import random_adj_matrix
 from decomp.tn import sim_tensor_from_adj
 
@@ -5,34 +11,60 @@ from tnss.boss import BOSS
 
 
 if __name__=="__main__":
-    orders = [5, 6]
-    n_samples = 1
     min_rse=0.01
+    budget = 300
+    n_init = 25
+    tn_eval_attempts=1
+    maxiter_tn = 15000
+    max_rank = 6
 
-    for order in orders:
-        for i in range(n_samples):
-            A = random_adj_matrix(order, max_rank=6)
-            Z = sim_tensor_from_adj(A)
+    method = "BOSS"
+    order = 6
+
+    path = f"./data/synthetic/order{order}/"
+    results_path = f"./results/synthetic/{method}/order{order}/"
+    os.makedirs(results_path, exist_ok=True)
+
+    As = np.load(path + "A.npz")
+    Zs = np.load(path + "Z.npz")
+
+    n_samples = len(As)
+
+    for i in range(3):
+        A = torch.tensor(As[f"{i}"])
+        Z = torch.tensor(Zs[f"{i}"])
+        cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / Z.numel()
+        
+        print(f"Iteration {i} - order {order} - True CR: {cr_true.item():0.4f}")
+
+        if method=="BOSS":
+            print("BOSS Starting")
 
             boss = BOSS(
                 target=Z,
-                budget=75,
-                n_init=10,
-                tn_eval_attempts=1,
+                budget=budget,
+                n_init=n_init,
+                tn_eval_attempts=tn_eval_attempts,
                 min_rse=min_rse,
-                max_rank=10,
-                n_workers=8
+                maxiter_tn=maxiter_tn,
+                max_rank=max_rank,
+                n_workers=8,
+                max_stalling_aqcf=budget 
             )
-            boss()  # Run BOSS
+            boss()  
 
             res = boss.get_bo_results()
-            
-            cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / Z.numel()
-            
-            rse = res["RSE"]
-            cr = (res["CR"][res["RSE"] < min_rse]).min()
+            rse = res["logRSE"].exp()
+            cr = (res["CR"][res["logRSE"].exp() < min_rse]).min()
             eff = cr_true/cr
 
-            print(f"Sample {i}, Order {order} --- CR: {cr.item():0.4f} --- Eff: {eff.item():0.4f}")
+            print(f"Best CR: {cr.item():0.5f} --- Eff: {eff.item():0.5f}")
+            
+            np.savez(results_path + f"result_sample{i}.npz", res=res)
+            print("Results saved")
+        
+        elif method=="TNGA":
+            pass
+            # TODO Save results of TNA
 
 
