@@ -4,3 +4,4 @@ tensorized_weights/
 __pycache__/
 data/
 results/
+*.ipynb
