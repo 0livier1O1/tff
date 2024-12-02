@@ -53,12 +53,7 @@ class TNGA:
         all_objectives = {}
         
         for k in range(self.iter):
-<<<<<<< HEAD
-            fitness, _ = self.eval_fitness(population)
-            population = self.elimination(population, fitness)
-=======
             fitness, objectives = self.eval_fitness(population)
->>>>>>> c6a75eb (Added logs for TNGA)
             population = self.selection(population, fitness)
             population = self.crossover(population)
             population = self.mutation(population)
