@@ -3,3 +3,4 @@ tensorized_weights/
 .DS_Store
 __pycache__/
 data/
+results/

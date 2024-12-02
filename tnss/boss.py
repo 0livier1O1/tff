@@ -17,7 +17,7 @@ from botorch.models.transforms import Standardize
 from botorch.models import ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
-from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas
+from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas, ConstrainedExpectedImprovement
 from botorch.acquisition import qLogExpectedImprovement
 from botorch.optim import optimize_acqf, optimize_acqf_discrete_local_search
 
@@ -118,35 +118,37 @@ class BOSS(object):
         self.train_X, self.train_Y = self._initial_points(bounds=std_bounds)
         acqf_hist = []
         max_af = -torch.inf
+        best_cr = torch.inf
+
         for b in range(self.budget):
             X, Y = self.train_X.to(dtype=torch.double), self.train_Y.to(dtype=torch.double)
             mask = Y[:, 1].exp() <= self.min_rse
             Y_feas = Y[mask]
-
             if len(Y_feas) == 0:
                 Y_feas = torch.tensor([[self.target.numel(), -torch.inf]])  # TODO This is a hack to make the current best min
-            else:
-                print(f"Starting BO step {b} --- Best CR: {Y_feas[:, 0].min().item():0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
+            
+            best_cr = min(Y_feas[:, 0].min().item(), best_cr)
+            print(f"Starting BO step {b} --- Best CR: {best_cr:0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
 
             model = self.get_model(X, Y)
             acqf = self._get_acqf(model, Y_feas)
             
             cand, af = self._optimize_acqf(acqf, std_bounds)
             acqf_hist.append(af)
-            
+
             x_ = tf(cand)
             y = self._get_obj_and_constraint(x_)
             self.train_X = torch.concat([self.train_X, cand])  # TODO What is the point that I add to my dataset
             self.train_Y = torch.concat([self.train_Y, y])
 
-            # Early stopping
-            if af.max() > max_af:
-                max_af = af.max()
-                wait = 0 
-            else:
-                wait += 1
-                if wait > self.max_stall:
-                    break
+            # Early stopping  # TODO Need to find a better stopping criterion
+            # if af.max() > max_af:
+            #     max_af = af.max()
+            #     wait = 0 
+            # else:
+            #     wait += 1
+            #     if wait > self.max_stall:
+            #         break
         if acqf_hist:
             self.acqf_hist = torch.stack(acqf_hist)
         else:
@@ -154,13 +156,13 @@ class BOSS(object):
     
     def get_bo_results(self):
         tf = tf_unit_cube_int(self.D, self.bounds)
-        if self.acqf is None:
+        if self.acqf_hist is None:
             raise ModelFittingError("BO has not been run yet")
         out = {
-            "AF": self.acqf, 
+            "AF": self.acqf_hist, 
             "X": unnormalize(tf(self.train_X), self.bounds),
             "CR": self.train_Y[:, 0],
-            "RSE": self.train_Y[:, 1].exp()
+            "logRSE": self.train_Y[:, 1]
         }
         return out
         
@@ -247,7 +249,7 @@ class BOSS(object):
     
     def _get_obj_and_constraint(self, raw_x: Tensor):
         x = unnormalize(raw_x, bounds=self.bounds).round().to(torch.int)  # raw_x is a vector in unit cube -> turn into integer ranks
-        A = triu_to_adj_matrix(x, diag=self.t_shape).squeeze(0) # Make adjancy matrix from x 
+        A = triu_to_adj_matrix(x, diag=self.t_shape).squeeze(1) # Make adjancy matrix from x 
             
         # Perform contraction 
         if self.n_workers == 1 or raw_x.shape[0] == 1:
@@ -266,7 +268,7 @@ class BOSS(object):
         min_loss = float("inf")
         while i < self.tn_runs:
             t_ntwrk = TensorNetwork(A)
-            loss = t_ntwrk.decompose(self.target, tol=self.min_rse/10, max_epochs=self.maxiter_tn)
+            loss = t_ntwrk.decompose(self.target, tol=None, max_epochs=self.maxiter_tn, loss_patience=5000)
             if loss < min_loss:
                 min_loss = loss
             if loss < self.min_rse:
