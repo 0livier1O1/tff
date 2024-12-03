@@ -9,29 +9,32 @@ from tnss.boss import BOSS
 
 folder_path = "./data/BDS300/"
 tensors = []
-min_rse = 0.01
 
-
+min_rse = 0.1
+budget = 300
+maxiter_tn = 15000
 
 if __name__=="__main__":
-    from scripts.utils import random_adj_matrix
-    from decomp.tn import TensorNetwork, sim_tensor_from_adj
-
     for i, file in enumerate(os.listdir(folder_path)):
-        if i == 5:
+        if i == 1:
             break
         image_path = os.path.join(folder_path, file)
         img = Image.open(image_path).convert("L")
         img = resize(np.array(img), (256, 256), anti_aliasing=True, preserve_range=True)
         tensor = torch.tensor(img).reshape(*(16 for _ in range(4)))
+        max_ = tensor.max()
+        tensor = tensor/max_
 
         boss = BOSS(
             target=tensor, 
+            budget=budget,
+            n_init=25,
             tn_eval_attempts=1,
-            n_workers=7,
-            min_rse=0.01,
-            max_stalling_aqcf=20,
-            af_batch=4
+            n_workers=4,
+            min_rse=min,
+            max_stalling_aqcf=budget,
+            af_batch=1,
+            maxiter_tn=maxiter_tn,
         )
         boss()
         res = boss.get_bo_results()

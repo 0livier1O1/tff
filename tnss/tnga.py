@@ -48,22 +48,35 @@ class TNGA:
     def __call__(self):
         population = torch.randint(1, self.max_rank+1, (self.pop_size, self.D))
         
+        all_population = {}
+        all_fitness = {}
+        all_objectives = {}
+        
         for k in range(self.iter):
-            fitness, _ = self.eval_fitness(population)
-            population = self.elimination(population, fitness)
+            fitness, objectives = self.eval_fitness(population)
+            population, fitness = self.elimination(population, fitness)
             population = self.selection(population, fitness)
             population = self.crossover(population)
             population = self.mutation(population)
             print(f"Generation {k}: Best fitness {fitness.min().item():0.4f}")
+            
+            all_population[k] = population
+            all_fitness[k] = fitness
+            all_objectives[k] = objectives
 
         fitness, objectives = self.eval_fitness(population)
         sorted_idx = torch.argsort(fitness, descending=False)
+        
+        self.all_population = all_population
+        self.all_fitness = all_fitness
+        self.all_objectives = all_objectives
+        
         return population[sorted_idx[-1]], objectives[-1]
 
     def selection(self, population, fitness):
         sorted_idx = torch.argsort(fitness, descending=False)
         sorted_pop = population[sorted_idx]
-        ranks = torch.arange(1, self.pop_size + 1, dtype=torch.float)
+        ranks = torch.arange(1, sorted_pop.size(0)  + 1, dtype=torch.float)
 
         prob = 1 / (ranks + 1e-6)
         prob /= prob.sum()
@@ -97,9 +110,9 @@ class TNGA:
         return population
     
     def elimination(self, population, fitness):
-        keep = int(self.pop_size * (1-self.pct_elim))
+        keep = int(population.shape[0] * (1-self.pct_elim))
         sorted_idx = torch.argsort(fitness, descending=False)  # Sort fitness (lower is better)
-        return population[sorted_idx][:keep]
+        return population[sorted_idx][:keep], fitness[sorted_idx][:keep]
 
     def eval_fitness(self, X: Tensor):
         A = triu_to_adj_matrix(X, self.diag).squeeze()
@@ -141,7 +154,7 @@ if __name__=="__main__":
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
     torch.manual_seed(6)
-    A = random_adj_matrix(5, 6, num_zero_edges=3)
+    A = random_adj_matrix(4, 3)
     Z = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / Z.numel()
     print(f"True Compression Ratio {cr_true}")
@@ -151,8 +164,8 @@ if __name__=="__main__":
         max_rank=6,
         pop_size=10,
         mutation_rate=0.05, 
-        iter=30,
-        n_workers=7,
+        iter=3,
+        n_workers=4,
         maxiter_tn=15000,
         lambda_= 50
     )

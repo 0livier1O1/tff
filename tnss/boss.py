@@ -286,7 +286,7 @@ if __name__=="__main__":
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
     torch.manual_seed(6)
-    A = random_adj_matrix(5, 6, num_zero_edges=3)
+    A = random_adj_matrix(4, 3, num_zero_edges=3)
     X = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
     print(f"True Compression Ratio {cr_true}")
@@ -294,7 +294,7 @@ if __name__=="__main__":
     boss = BOSS(
         X,
         n_init=20,
-        num_restarts_af=20,
+        num_restarts_af=25,
         tn_eval_attempts=1,
         min_rse=0.01,
         max_rank=6,
