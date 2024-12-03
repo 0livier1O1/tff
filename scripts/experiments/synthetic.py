@@ -8,6 +8,7 @@ from scripts.utils import random_adj_matrix
 from decomp.tn import sim_tensor_from_adj
 
 from tnss.boss import BOSS
+from tnss.tnga import TNGA
 
 
 if __name__=="__main__":
@@ -18,8 +19,8 @@ if __name__=="__main__":
     maxiter_tn = 15000
     max_rank = 6
 
-    method = "BOSS"
-    order = 6
+    method = "TNGA"
+    order = 5
 
     path = f"./data/synthetic/order{order}/"
     results_path = f"./results/synthetic/{method}/order{order}/"
@@ -30,7 +31,7 @@ if __name__=="__main__":
 
     n_samples = len(As)
 
-    for i in range(3):
+    for i in range(2):
         A = torch.tensor(As[f"{i}"])
         Z = torch.tensor(Zs[f"{i}"])
         cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / Z.numel()
@@ -64,7 +65,26 @@ if __name__=="__main__":
             print("Results saved")
         
         elif method=="TNGA":
-            pass
-            # TODO Save results of TNA
+            tnga = TNGA(
+                target=Z,
+                max_rank=8,
+                pop_size=50,
+                mutation_rate=0.05, 
+                iter=30,
+                n_workers=4,
+                maxiter_tn=15000,
+                lambda_= 50
+            )
+            pop, obj = tnga()
+            all_fitness = torch.stack(list(tnga.all_fitness.values()))
+            all_population = torch.concat(list(tnga.all_population.values()))
+            all_objectives = torch.concat(list(tnga.all_objectives.values()))
+            
+            np.savez(results_path + f"result_sample{i}.npz", fitness=all_fitness, pop=all_population, obj=all_objectives)
+            
+            
+            
+            
+            
 
 

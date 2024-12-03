@@ -54,6 +54,7 @@ class TNGA:
         
         for k in range(self.iter):
             fitness, objectives = self.eval_fitness(population)
+            population, fitness = self.elimination(population, fitness)
             population = self.selection(population, fitness)
             population = self.crossover(population)
             population = self.mutation(population)
@@ -75,7 +76,7 @@ class TNGA:
     def selection(self, population, fitness):
         sorted_idx = torch.argsort(fitness, descending=False)
         sorted_pop = population[sorted_idx]
-        ranks = torch.arange(1, self.pop_size + 1, dtype=torch.float)
+        ranks = torch.arange(1, sorted_pop.size(0)  + 1, dtype=torch.float)
 
         prob = 1 / (ranks + 1e-6)
         prob /= prob.sum()
@@ -109,9 +110,9 @@ class TNGA:
         return population
     
     def elimination(self, population, fitness):
-        keep = int(self.pop_size * (1-self.pct_elim))
+        keep = int(population.shape[0] * (1-self.pct_elim))
         sorted_idx = torch.argsort(fitness, descending=False)  # Sort fitness (lower is better)
-        return population[sorted_idx][:keep]
+        return population[sorted_idx][:keep], fitness[sorted_idx][:keep]
 
     def eval_fitness(self, X: Tensor):
         A = triu_to_adj_matrix(X, self.diag).squeeze()
@@ -161,17 +162,10 @@ if __name__=="__main__":
     tnga = TNGA(
         target=Z,
         max_rank=6,
-<<<<<<< HEAD
         pop_size=10,
         mutation_rate=0.05, 
-        iter=30,
-        n_workers=7,
-=======
-        pop_size=8,
-        mutation_rate=0.05, 
-        iter=30,
+        iter=3,
         n_workers=4,
->>>>>>> c6a75eb (Added logs for TNGA)
         maxiter_tn=15000,
         lambda_= 50
     )
