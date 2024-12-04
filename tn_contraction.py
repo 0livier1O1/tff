@@ -35,11 +35,37 @@ class cuTensorNetwork:
         self.ntwrk = cutn.Network(self.eq, *self.nodes)
     
     def contract_ntwrk(self):
-        # This fails with the following error
-        # cuquantum.cutensornet.configuration.MemoryLimitExceeded: GPU memory limit exceeded. Device id: 0.
-        # The memory limit is 18971361280, while the minimum workspace size needed is 1244715913728.
-        path, info = self.ntwrk.contract_path(optimize={'samples': 8, 'slicing': {'min_slices': 16}})
-        return self.ntwrk.contract(optimize={'path': path, 'slicing': info.slices})   
+        handle = cutn.create()
+        options = {
+            "handle": handle,
+            "blocking": "auto",
+            "memory_limit": "20%",
+        }
+        optimize_options = {
+            "samples": 5,  # default is 0 (disabled)
+            "slicing": {
+                "disable_slicing": 0,
+                "memory_model": 1,  # 0 is heuristic, 1 is cutensor (default)
+                "min_slices": 500,  # default is 1
+                "slice_factor": 32,  # default is 32
+            },
+            "cost_function": 0,  # 0 for FLOPS (default), 1 for time
+            "reconfiguration": {
+                "num_iterations": 1000,  # default is 500; good values are within 500-1000
+                # Higher number means more time spent in reconfiguration, scales exponentially
+                "num_leaves": 20,  # default is 8
+            },
+        }
+        # optimize_options = None
+        path, info = self.ntwrk.contract_path(
+            optimize=optimize_options
+        )
+
+        output = self.ntwrk.contract(
+            optimize={"path": path, "slicing": info.slices},
+            options=options,
+        )  
+        return output
 
 def einsum_expr(adj_matrix):
     """Convert adjacency matrix of TN to ein_sum equation for tn contraction"""
@@ -51,7 +77,6 @@ def einsum_expr(adj_matrix):
     output_labels = []
     for i in range(dim):
         tensor_labels = []
-        skip = 0 
         for j in range(dim):
             if adj_matrix[i, j] > 1:  
                 if (j, i) in einsum_map:  
