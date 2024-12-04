@@ -3,6 +3,8 @@ from botorch.utils.transforms import unnormalize
 
 import torch
 
+
+
 def random_adj_matrix(n_cores, max_rank, num_zero_edges=None):
     D = int(n_cores * (n_cores-1)/2)
     X = torch.rand(())
@@ -11,7 +13,7 @@ def random_adj_matrix(n_cores, max_rank, num_zero_edges=None):
     X = torch.rand((D, ))
 
     if num_zero_edges is None:
-        X = unnormalize(X, bounds)
+        X = unnormalize(X, bounds).round()
     else:
         bounds[0] = 2
         X = unnormalize(X, bounds).round()

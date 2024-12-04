@@ -4,3 +4,6 @@ tensorized_weights/
 __pycache__/
 data/
 results/
+.devcontainer/
+.copier-answers.yml
+README.md

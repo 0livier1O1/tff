@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 from torch import Tensor
 from scripts.utils import random_adj_matrix
 
-
 tn.set_default_backend("pytorch")
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def letter_range(n):
 	for c in range(97, 97+n):
@@ -36,10 +36,10 @@ class TensorNetwork:
             for t, name in zip(range(self.dim), letter_range(self.dim)):
                 core_shape = [self.modes[t]] + [m for m in self.adj_matrix[t].tolist() if m != 0]  # For all nodes, the first mode is the open leg
                 core = torch.nn.init.normal_(
-                    torch.nn.Parameter(torch.empty(*core_shape, dtype=torch.double)), 
+                    torch.nn.Parameter(torch.empty(*core_shape, dtype=torch.double, device=device)), 
                     mean=0.0, 
                     std=init_std
-                )  # initialize the core tensor as a PyTorch parameter
+                )
                 node = tn.Node(core, name=name)
                 self.nodes.append(node)
                 self.output_order.append(node.edges[0])
@@ -74,7 +74,7 @@ class TensorNetwork:
     def decompose(self, target, tol=None, pct_loss_improvment=0.025, init_lr=0.05, loss_patience=2500, lr_patience=500, max_epochs=25000):
         # adam = torch.optim.SGD([node.tensor for node in self.nodes], lr=init_lr, momentum=0.5)
         adam = torch.optim.Adam([node.tensor for node in self.nodes], lr=init_lr, betas=(0.9, 0.99))
-        target = target.to(dtype=torch.double)
+        target = target.to(dtype=torch.double, device=device)
 
         loss = torch.inf
         best_loss = loss
@@ -85,12 +85,13 @@ class TensorNetwork:
         optimizer = adam
         
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=lr_patience)
-
+        assert target.is_cuda, "Target tensor is not on the GPU."
+        
         while epoch < max_epochs:
             optimizer.zero_grad()
             nodes_cp, edges_cp = tn.copy(self.nodes)
             output_order = [edges_cp[e] for e in self.output_order]
-            contracted_t = tn.contractors.greedy(nodes_cp.values(), output_edge_order=output_order).tensor
+            contracted_t = tn.contractors.greedy(nodes_cp.values(), output_edge_order=output_order)
             loss = (torch.norm(target - contracted_t)/target.norm())
             
             loss.backward()
@@ -114,9 +115,9 @@ class TensorNetwork:
                     break
 
             scheduler.step(loss)
-            # if epoch % 100 == 0:
-            #     sys.stdout.flush()
-            #     print(f'\rEpoch {epoch}, Loss: {loss.item():0.5f}, Learning Rate: {optimizer.param_groups[0]["lr"]:0.6f}')
+            if epoch % 100 == 0:
+                sys.stdout.flush()
+                print(f'\rEpoch {epoch}, Loss: {loss.item():0.5f}, Learning Rate: {optimizer.param_groups[0]["lr"]:0.6f}')
 
         return loss
 
@@ -132,22 +133,25 @@ def sim_tensor_from_adj(A, std_dev=0.1):  # TODO Remove from this page
     cores = []
     for i, a in enumerate(adj.unbind()):
         shape = [ranks[i]] + a[a.nonzero().squeeze()].tolist()
-        cores.append(torch.randn(shape, dtype=torch.double) * std_dev)
-    
+        cores.append(torch.randn(shape, dtype=torch.double, device=device) * std_dev)
+
     ntwrk = TensorNetwork(adj, cores=cores)
-    return ntwrk.contract_network()
+    return ntwrk.contract_network(), cores
     
 
 if __name__=="__main__":
+    import time 
     torch.manual_seed(2)
-    N = 6
+    N = 4
     max_rank = 5
-
-    B = random_adj_matrix(N, max_rank)
-    A = random_adj_matrix(N, max_rank)
     
+    t0 = time.time()
+    B = random_adj_matrix(N, max_rank)    
     target = sim_tensor_from_adj(B)
-    # torch.manual_seed(1)
-    ntwrk_ = TensorNetwork(A)
+
+    ntwrk_ = TensorNetwork(B)
     loss = ntwrk_.decompose(target)
     print(loss)
+    
+    t1 = time.time()
+    print(t1-t0)
