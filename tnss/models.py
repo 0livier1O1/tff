@@ -48,3 +48,13 @@ class ManhattanDistanceKernel(Kernel):
         return k_cat.to(dtype=torch.float64)
 
 
+class PartiallyConvergedKernel(Kernel):
+    has_lengthscale = True
+
+    def __init__(self, t_dim, *args, **kwargs):
+        super(PartiallyConvergedKernel, self).__init__(has_lengthscale=True, **kwargs)
+        self.t_dim = t_dim
+        
+    def forward(self, x1, x2, diag=False, **params):
+        s = lambda x: self.lengthscale[self.t_dim] * torch.exp(x[..., self.t_dim])
+    

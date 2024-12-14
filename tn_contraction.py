@@ -2,7 +2,6 @@ import torch
 from torch import Tensor
 from cuquantum import cutensornet as cutn
 
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def letter_range(n):

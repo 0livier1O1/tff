@@ -42,7 +42,7 @@ class cuTensorNetwork:
     def contract_ntwrk(self):
         # self.ntwrk.options.blocking = True
         # self.ntwrk.contract_path(optimize_memory=True)
-        path, info = self.ntwrk.contract_path(optimize={'samples': 8, 'slicing': {'min_slices': 16}})
+        path, info = self.ntwrk.contract_path()
         self.ntwrk.autotune(samples=5)
         
         return self.ntwrk.contract(optimize={'path': path, 'slicing': info.slices})

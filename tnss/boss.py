@@ -102,7 +102,7 @@ class BOSS(object):
 
         # Store results
         self.gp_state = None
-        self.acqf = None
+        self.acqf_hist = []
         self.sampled_structures = None
         self.objectives = None
         self.train_X, self.train_Y = None, None
@@ -117,7 +117,6 @@ class BOSS(object):
         
         self.train_X, self.train_Y = self._initial_points(bounds=std_bounds)
         acqf_hist = []
-        max_af = -torch.inf
         best_cr = torch.inf
 
         for b in range(self.budget):
@@ -140,24 +139,14 @@ class BOSS(object):
             y = self._get_obj_and_constraint(x_)
             self.train_X = torch.concat([self.train_X, cand])  # TODO What is the point that I add to my dataset
             self.train_Y = torch.concat([self.train_Y, y])
-
-            # Early stopping  # TODO Need to find a better stopping criterion
-            # if af.max() > max_af:
-            #     max_af = af.max()
-            #     wait = 0 
-            # else:
-            #     wait += 1
-            #     if wait > self.max_stall:
-            #         break
+            
         if acqf_hist:
             self.acqf_hist = torch.stack(acqf_hist)
-        else:
-            self.acqf_hist = []
     
     def get_bo_results(self):
         tf = tf_unit_cube_int(self.D, self.bounds)
         if self.acqf_hist is None:
-            raise ModelFittingError("BO has not been run yet")
+            raise UserWarning("BO has not been run yet")
         out = {
             "AF": self.acqf_hist, 
             "X": unnormalize(tf(self.train_X), self.bounds),
@@ -286,25 +275,26 @@ if __name__=="__main__":
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
     torch.manual_seed(6)
-    A = random_adj_matrix(5, 6, num_zero_edges=3)
-    X = sim_tensor_from_adj(A)
+    A = random_adj_matrix(4, 6)
+    X, _ = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
     print(f"True Compression Ratio {cr_true}")
 
     boss = BOSS(
         X,
-        n_init=20,
+        n_init=100,
         num_restarts_af=20,
         tn_eval_attempts=1,
         min_rse=0.01,
         max_rank=6,
-        n_workers=5,
-        budget=500,
+        n_workers=4,
+        budget=0,
         af_batch=1,
         max_stalling_aqcf=500,
         maxiter_tn = 20000,
         discrete_search=False
         )
     boss()
+    res = boss.get_bo_results() 
 
     print("You got this")
