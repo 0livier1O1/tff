@@ -67,3 +67,8 @@ def tf_unit_cube_int(D, bounds, init=False):
     tf = ChainedInputTransform(**tfs)
     tf.eval()
     return tf
+
+
+if __name__=="__main__":
+    X = torch.tensor([[[ 6., 10., 10.,  6.,  9.,  8.]]], dtype=torch.float64)
+    triu_to_adj_matrix(X, torch.tensor([3,4,5,6]))
