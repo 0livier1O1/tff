@@ -15,10 +15,11 @@ def random_adj_matrix(n_cores, max_rank, num_zero_edges=None, n_samples=1):
     if num_zero_edges is None:
         X = unnormalize(X, bounds).round()
     else:
+        raise KeyError
         bounds[0] = 2
         X = unnormalize(X, bounds).round()
         idx = torch.randperm(D)[:num_zero_edges]
-        X[idx] = 1
+        X[:, idx] = 1
 
     diag = torch.randint(2, max_rank+1, size=(n_cores, ))
     A = triu_to_adj_matrix(X.unsqueeze(1), diag=diag).squeeze()

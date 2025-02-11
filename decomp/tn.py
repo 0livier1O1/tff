@@ -1,4 +1,5 @@
 import sys
+import time
 import torch
 import tensornetwork as tn
 import numpy as np
@@ -93,7 +94,7 @@ class TensorNetwork:
             optimizer.zero_grad()
             nodes_cp, edges_cp = tn.copy(self.nodes)
             output_order = [edges_cp[e] for e in self.output_order]
-            contracted_t = tn.contractors.optimal(nodes_cp.values(), output_edge_order=output_order, memory_limit=int(5 * (2**30) * 0.2)).tensor
+            contracted_t = tn.contractors.optimal(nodes_cp.values(), output_edge_order=output_order).tensor
             loss = (torch.norm(target - contracted_t)/target.norm())
             
             loss.backward()
@@ -117,11 +118,11 @@ class TensorNetwork:
                     break
 
             scheduler.step(loss)
-            # if epoch % 100 == 0:
-            #     sys.stdout.flush()
-            #     print(f'\rEpoch {epoch}, Loss: {loss.item():0.5f}, Learning Rate: {optimizer.param_groups[0]["lr"]:0.6f}')
+            if epoch % 100 == 0:
+                sys.stdout.flush()
+                print(f'\rEpoch {epoch}, Loss: {loss.item():0.5f}, Learning Rate: {optimizer.param_groups[0]["lr"]:0.6f}')
 
-        return loss
+        return loss, epoch
 
     def numel(self):
         return torch.tensor(sum(node.tensor.numel() for node in self.nodes))
@@ -144,8 +145,8 @@ def sim_tensor_from_adj(A, std_dev=0.1):  # TODO Remove from this page
 if __name__=="__main__":
     import time 
     torch.manual_seed(2)
-    N = 7
-    max_rank = 5
+    N = 8
+    max_rank = 8
     
     t0 = time.time()
     B = random_adj_matrix(N, max_rank)    

@@ -3,6 +3,7 @@
 
 import gc
 import warnings
+import time
 import numpy as np
 
 from botorch.models.model import Model
@@ -115,7 +116,7 @@ class BOSS(object):
         std_bounds = torch.ones((2, self.D)).to(dtype=torch.double)
         std_bounds[0] = 0 
         
-        self.train_X, self.train_Y = self._initial_points(bounds=std_bounds)
+        self.train_X, self.train_t, self.train_Y = self._initial_points(bounds=std_bounds)
         acqf_hist = []
         best_cr = torch.inf
 
@@ -136,22 +137,23 @@ class BOSS(object):
             acqf_hist.append(af)
 
             x_ = tf(cand)
-            y = self._get_obj_and_constraint(x_)
+            t, y = self._get_obj_and_constraint(x_)
             self.train_X = torch.concat([self.train_X, cand])  # TODO What is the point that I add to my dataset
             self.train_Y = torch.concat([self.train_Y, y])
+            self.train_t = torch.concat([self.train_t, t])
             
         if acqf_hist:
             self.acqf_hist = torch.stack(acqf_hist)
     
     def get_bo_results(self):
         tf = tf_unit_cube_int(self.D, self.bounds)
-        if self.acqf_hist is None:
-            raise UserWarning("BO has not been run yet")
+        if len(self.acqf_hist) == 0:
+            warnings.warn(UserWarning("BO has not been run yet"))
         out = {
             "AF": self.acqf_hist, 
             "X": unnormalize(tf(self.train_X), self.bounds),
-            "CR": self.train_Y[:, 0],
-            "logRSE": self.train_Y[:, 1]
+            "t": self.train_t,
+            "Y": self.train_Y
         }
         return out
         
@@ -159,8 +161,8 @@ class BOSS(object):
         raw_x = draw_sobol_samples(bounds=bounds, n=self.n_init, q=1).squeeze(-2)
         tf = tf_unit_cube_int(self.D, self.bounds, init=True)
         X_init = tf(raw_x).to(torch.double)
-        y_init = self._get_obj_and_constraint(X_init)
-        return X_init, y_init
+        Y_init, t_init = self._get_obj_and_constraint(X_init)
+        return X_init, t_init, Y_init
 
     def get_model(self, X=None, y=None):
         if X is None or y is None:
@@ -249,15 +251,18 @@ class BOSS(object):
         else:
             par_args = [(a,) for a in A.unbind()]
             objectives = progress_starmap(self._evaluate_tn, par_args, n_cpu=self.n_workers, total=len(par_args))
-                
-        return torch.tensor(objectives).to(raw_x)
+        objectives = torch.tensor(objectives)
+        return objectives[:, [0, 1]], objectives[:, [2, 3]]
 
     def _evaluate_tn(self, A):
         i = 0
         min_loss = float("inf")
+        
         while i < self.tn_runs:
+            t0 = time.time()
             t_ntwrk = TensorNetwork(A)
-            loss = t_ntwrk.decompose(self.target, tol=None, max_epochs=self.maxiter_tn, loss_patience=5000)
+            loss, n_epochs = t_ntwrk.decompose(self.target, tol=None, max_epochs=self.maxiter_tn, loss_patience=2500)
+            t1 = time.time()
             if loss < min_loss:
                 min_loss = loss
             if loss < self.min_rse:
@@ -267,34 +272,40 @@ class BOSS(object):
         del t_ntwrk
 
         gc.collect()
-        return compression_ratio.detach(), min_loss.log().detach()
+        return compression_ratio.detach(), min_loss.log().detach(), t1-t0, n_epochs
     
 
 if __name__=="__main__":
+    import os
     from scripts.utils import random_adj_matrix
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
 
     torch.manual_seed(6)
-    A = random_adj_matrix(4, 6)
+    order = 5
+    max_rank = 6
+    
+    A = random_adj_matrix(order, max_rank)
     X, _ = sim_tensor_from_adj(A)
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
     print(f"True Compression Ratio {cr_true}")
 
     boss = BOSS(
         X,
-        n_init=100,
+        n_init=5000,
         num_restarts_af=20,
         tn_eval_attempts=1,
         min_rse=0.01,
         max_rank=6,
-        n_workers=4,
+        n_workers=24,
         budget=0,
         af_batch=1,
         max_stalling_aqcf=500,
-        maxiter_tn = 20000,
+        maxiter_tn = 15000,
         discrete_search=False
         )
     boss()
     res = boss.get_bo_results() 
-
+    save_folder = f"./data/synthetic/order{order}_maxr{max_rank}/"
+    os.makedirs(save_folder, exist_ok=True)
+    np.savez(save_folder + "gp.npz", Z=X, A=A, X=res["X"], Y=res["Y"], t=res["t"])
     print("You got this")
