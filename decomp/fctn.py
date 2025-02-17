@@ -4,24 +4,35 @@ from scipy.io import savemat, loadmat
 
 from decomp.utils import *
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1):
+
+def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1000):
     N = len(adj_matrix)
-    G = [torch.rand(adj_matrix[i].tolist()) for i in range(N)]
-    X = target.clone()
+    X = target.clone().to(device)
+    G = [torch.rand(adj_matrix[i].tolist()).to(X) for i in range(N)]
     
+    rho = 0.1
     
     for i in range(iter):
+        # Gold = [Gi.clone() for Gi in G]
         for k in range(N):
             Xk = unfold(X, k)
             Gk = unfold(G[k], k)
             Mk = fctn_comp_partial(G, skip=k)
             Mk = gen_unfold(Mk, N, k)
             
-            tempC = Xk @ Mk.t()
+            tempC = Xk @ Mk.t() + rho * Gk
+            tempA = Mk @ Mk.t() + rho * torch.eye(Gk.shape[1]).to(X)
+            G[k] = fold(tempC @ torch.linalg.pinv(tempA), k, adj_matrix[k])
             
-    out = fctn_comp(G)
-    return out            
+        # max_change = max((Gold[k]-G[k]).max() for k in range(N))
+            
+        X_comp = fctn_comp(G)
+        rse = torch.norm(X - X_comp)/torch.norm(X)
+        print(rse)
+
+    return G 
 
             
 def fctn_comp(G: list[Tensor]):
@@ -45,7 +56,6 @@ def fctn_comp(G: list[Tensor]):
         # m = torch.cat([m, torch.tensor([1 + (i+1)*(N-(i+1))])])
         m.append(1 + (i+1)*(N-(i+1)))
     return out
-    
     
 def fctn_comp_partial(G: list[Tensor], skip):
     N = len(G)
@@ -80,7 +90,7 @@ def gen_unfold(tensor, N, i):
     """
     Generalized Tensor unfolding
     """
-    m = [2*k-1 if k < i else 2 * k for k in range(N-1)]
+    m = [2*k+1 if k < i else 2 * k for k in range(N-1)]
     n = [2*k if k < i else 2 * k+1 for k in range(N-1)]
     
     dim1 = torch.tensor(tensor.shape)[m]
@@ -88,50 +98,22 @@ def gen_unfold(tensor, N, i):
     return torch.reshape(torch.permute(tensor, m + n), (dim1.prod(), dim2.prod()))
     
     
-    
-
 if __name__=="__main__":
     from scripts.utils import random_adj_matrix
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
     import os
     
-    # order = 5
-    # max_rank = 6
-    
-    A = torch.tensor([
-        [60, 2, 2, 2],
-        [2, 60, 2, 2],
-        [2, 2, 20, 2],
-        [2, 2, 2, 20]
-    ])
-    
-    N = len(A)
-    # X, _ = sim_tensor_from_adj(A)
-    # X = X.to(torch.float32)
-    # G = [torch.rand(A[i].tolist()) for i in range(N)]
-    # savemat(os.path.expanduser('tensors.mat'), {'X': X, "G": G})
-    data = loadmat(os.path.expanduser('tensors.mat'))
-    X = torch.tensor(data["X"])
-    G = [torch.tensor(data['G'][0][i]) for i in range(len(data['G'][0]))]
-    rho = 0.1
-    
-    for k in range(N):
-        Xk = unfold(X, k)
-        Gk = unfold(G[k], k)
-        Mk = fctn_comp_partial(G, skip=k)
-        Mk = gen_unfold(Mk, N, k)
+    N = 8
+    max_rank = 6
+    A = random_adj_matrix(N, max_rank).to(torch.int)
+    with torch.no_grad():
+        X, _ = sim_tensor_from_adj(A)
+        X = X.to(torch.float32)
+        a = X.max()
+        X = X/a
         
-        tempC = Xk @ Mk.t() + rho * Gk
-        tempA = Mk @ Mk.t() + rho * torch.eye(Gk.shape[1])
-        temp = tempC @ torch.linalg.pinv(tempA)
-        G[k] = fold(temp, k, A[k])
-        
-        # G[k] = 
-        
-
-    # # X = fctn_comp_partial(G, skip=3)
-    # # X = fctn_comp(G)
-    # # X_m = loadmat("tensor.mat")["X"]
-    # assert ((X - X_m).pow(2).sum() < 1e-8)
+        G = decomp_pam(X, A, 1000)
+    print("Hi")
+    
     
     
