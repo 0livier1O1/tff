@@ -34,6 +34,7 @@ from gpytorch.likelihoods import GaussianLikelihood
 from botorch.fit import fit_gpytorch_mll
 
 from decomp.tn import TensorNetwork
+from decomp.fctn import decomp_pam
 from tnss.utils import triu_to_adj_matrix, tf_unit_cube_int
 from tnss.models import SingleTaskGP, CompressionRatio, ManhattanDistanceKernel
 
@@ -66,7 +67,7 @@ class BOSS(object):
             budget = 100, 
             n_init = 10,
             tn_eval_attempts = 4,
-            n_workers = 4,
+            n_workers = 1,
             min_rse = 0.001,
             max_rank = 10,
             raw_samples = 512,
@@ -74,6 +75,7 @@ class BOSS(object):
             af_batch = 1,
             max_stalling_aqcf = 5,
             maxiter_tn = 25000,
+            decomp = "FCTN", 
             discrete_search = False,
             verbose=True,
         ) -> None:
@@ -81,7 +83,7 @@ class BOSS(object):
         self.t_shape = torch.tensor(target.shape).to(dtype=torch.double)
         
         N = target.dim()  
-        self.D = int((N * (N-1))/2)  # Number of parameters (i.e. number of off-diagonal elements of adjacency matrix)
+        self.D = int((N * (N-1))/2)  # Number of parameter`s (i.e. number of off-diagonal elements of adjacency matrix)
         self.N = N  # Number of nodes in the TN
         self.tn_runs = tn_eval_attempts
         self.min_rse = min_rse
@@ -100,6 +102,7 @@ class BOSS(object):
 
         self.verbose = verbose
         self.model_cr = CompressionRatio(target=self.target, bounds=self.bounds, diag=self.t_shape)
+        self.decomp = decomp
 
         # Store results
         self.gp_state = None
@@ -137,7 +140,7 @@ class BOSS(object):
             acqf_hist.append(af)
 
             x_ = tf(cand)
-            t, y = self._get_obj_and_constraint(x_)
+            y, t = self._get_obj_and_constraint(x_)
             self.train_X = torch.concat([self.train_X, cand])  # TODO What is the point that I add to my dataset
             self.train_Y = torch.concat([self.train_Y, y])
             self.train_t = torch.concat([self.train_t, t])
@@ -260,8 +263,12 @@ class BOSS(object):
         
         while i < self.tn_runs:
             t0 = time.time()
-            t_ntwrk = TensorNetwork(A)
-            loss, n_epochs = t_ntwrk.decompose(self.target, tol=None, max_epochs=self.maxiter_tn, loss_patience=2500)
+            t_ntwrk = TensorNetwork(A) 
+            if self.decomp == "FCTN":
+                # TODO integrate to have a single object
+                loss, n_epochs = decomp_pam(self.target, A.to(torch.int), tol=None, iter=self.maxiter_tn) 
+            else:
+                loss, n_epochs = t_ntwrk.decompose(self.target, tol=None, max_epochs=self.maxiter_tn, loss_patience=2500)
             t1 = time.time()
             if loss < min_loss:
                 min_loss = loss
@@ -286,22 +293,26 @@ if __name__=="__main__":
     
     A = random_adj_matrix(order, max_rank)
     X, _ = sim_tensor_from_adj(A)
+    X = X.to(torch.float32)
+    a = X.max()
+    X = X/a
     cr_true = A.prod(dim=-1).sum(dim=-1, keepdim=True) / X.numel()
     print(f"True Compression Ratio {cr_true}")
 
     boss = BOSS(
         X,
-        n_init=5000,
+        n_init=20,
         num_restarts_af=20,
-        tn_eval_attempts=1,
+        tn_eval_attempts=4,
         min_rse=0.01,
         max_rank=6,
-        n_workers=24,
-        budget=0,
+        n_workers=4,
+        budget=100,
         af_batch=1,
         max_stalling_aqcf=500,
-        maxiter_tn = 15000,
-        discrete_search=False
+        maxiter_tn = 100,
+        discrete_search=False,
+        decomp = "FCTN"
         )
     boss()
     res = boss.get_bo_results() 

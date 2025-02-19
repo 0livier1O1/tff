@@ -4,18 +4,22 @@ from scipy.io import savemat, loadmat
 
 from decomp.utils import *
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Need a try statement to catch an early fail
 
-
-def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1000):
+def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1000, tol=None, return_history=False):
+    if tol is None:
+        tol = -float("inf")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
+    
     N = len(adj_matrix)
     X = target.clone().to(device)
     G = [torch.rand(adj_matrix[i].tolist()).to(X) for i in range(N)]
     
     rho = 0.1
-    
+    failed = False
+    rse = []
     for i in range(iter):
-        # Gold = [Gi.clone() for Gi in G]
         for k in range(N):
             Xk = unfold(X, k)
             Gk = unfold(G[k], k)
@@ -24,15 +28,21 @@ def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1000):
             
             tempC = Xk @ Mk.t() + rho * Gk
             tempA = Mk @ Mk.t() + rho * torch.eye(Gk.shape[1]).to(X)
-            G[k] = fold(tempC @ torch.linalg.pinv(tempA), k, adj_matrix[k])
-            
-        # max_change = max((Gold[k]-G[k]).max() for k in range(N))
-            
+            try:
+                G[k] = fold(tempC @ torch.linalg.pinv(tempA), k, adj_matrix[k])
+            except:
+                failed = True
+                break        
+                        
         X_comp = fctn_comp(G)
-        rse = torch.norm(X - X_comp)/torch.norm(X)
-        print(rse)
-
-    return G 
+        rse.append(torch.norm(X - X_comp)/torch.norm(X))
+        # print(rse)
+        if rse[-1] < tol or failed:
+            break
+    if return_history:
+        return torch.tensor(rse)
+    else:
+        return rse[-1], i
 
             
 def fctn_comp(G: list[Tensor]):
@@ -102,17 +112,33 @@ if __name__=="__main__":
     from scripts.utils import random_adj_matrix
     from decomp.tn import TensorNetwork, sim_tensor_from_adj
     import os
+    import pandas as pd
     
-    N = 8
-    max_rank = 6
+    torch.manual_seed(6)
+    N = 5
+    max_rank = 10
     A = random_adj_matrix(N, max_rank).to(torch.int)
+    
     with torch.no_grad():
         X, _ = sim_tensor_from_adj(A)
         X = X.to(torch.float32)
         a = X.max()
         X = X/a
         
-        G = decomp_pam(X, A, 1000)
+        rse = []
+        for i in range(1, max_rank+1):
+            A[1,3] = i
+            A[3,1] = i
+            rse_i = decomp_pam(X, A, 500, return_history=True)
+            rse.append(rse_i.tolist())
+        df = pd.DataFrame(rse).fillna(-1).T
+    
+    import matplotlib.pyplot as plt
+
+    for column in df.columns:
+        plt.plot(df[column], label=f'Column {column}')
+
+    plt.show()
     print("Hi")
     
     
