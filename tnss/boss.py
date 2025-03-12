@@ -18,7 +18,7 @@ from botorch.models.transforms import Standardize
 from botorch.models import ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
-from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas, ConstrainedExpectedImprovement
+from botorch.acquisition.analytic import LogConstrainedExpectedImprovement, _compute_log_prob_feas, ConstrainedExpectedImprovement, LogExpectedImprovement
 from botorch.acquisition import qLogExpectedImprovement
 from botorch.optim import optimize_acqf, optimize_acqf_discrete_local_search
 
@@ -27,7 +27,7 @@ from botorch.acquisition.objective import GenericMCObjective
 from botorch.exceptions import ModelFittingError
 
 import gpytorch.settings as gpsttngs
-from gpytorch.kernels import RBFKernel, ScaleKernel
+from gpytorch.kernels import RBFKernel, ScaleKernel, MaternKernel
 from botorch.models.kernels import InfiniteWidthBNNKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.likelihoods import GaussianLikelihood
@@ -128,15 +128,17 @@ class BOSS(object):
 
         for b in range(self.budget):
             X = self.train_X.to(dtype=torch.double)
-            Y = self.train_Y[:, [0, -1]].to(dtype=torch.double)
+            # Y = self.train_Y[:, [0, -1]].to(dtype=torch.double)
+            Y = - self.train_Y[:, [0, -1]].abs().sum(dim=-1).to(dtype=torch.double)
             
-            mask = Y[:, 1].exp() <= self.min_rse
-            Y_feas = Y[mask]
-            if len(Y_feas) == 0:
-                Y_feas = torch.tensor([[self.target.numel(), -torch.inf]])  # TODO This is a hack to make the current best min
+            # mask = Y[:, 1].exp() <= self.min_rse
+            # Y_feas = Y[mask]
+            Y_feas = Y
+            # if len(Y_feas) == 0:
+            #     Y_feas = torch.tensor([[self.target.numel(), -torch.inf]])  # TODO This is a hack to make the current best min
             
-            best_cr = min(Y_feas[:, 0].min().item(), best_cr)
-            print(f"Starting BO step {b} --- Best CR: {best_cr:0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
+            # best_cr = min(Y_feas[:, 0].min().item(), best_cr)
+            # print(f"Starting BO step {b} --- Best CR: {best_cr:0.4f} --- RSE: {Y_feas[:, 1][Y_feas[:, 0].argmin()].exp().item():0.4f}")
 
             model = self.get_model(X, Y)
             acqf = self._get_acqf(model, Y_feas)
@@ -149,6 +151,7 @@ class BOSS(object):
             self.train_X = torch.concat([self.train_X, cand])  # TODO What is the point that I add to my dataset
             self.train_Y = torch.concat([self.train_Y, y])
             self.train_t = torch.concat([self.train_t, t])
+            print(f"Selected point: CR={self.train_Y[-1][0]:0.5f} --- RSE={self.train_Y[-1][-1].exp():0.5f}")
             
         if acqf_hist:
             self.acqf_hist = torch.stack(acqf_hist)
@@ -177,9 +180,10 @@ class BOSS(object):
             X, y = self.train_X.to(dtype=torch.double), self.train_Y.to(dtype=torch.double)
 
         tf = tf_unit_cube_int(self.D, self.bounds)
-        kernel = ScaleKernel(base_kernel=ManhattanDistanceKernel(ard_num_dims=self.D))
+        kernel = ScaleKernel(base_kernel=MaternKernel(nu=0.5, ard_num_dims=self.D))
         likelihood = GaussianLikelihood() 
-        y_ = y[:, 1][~y[:, 1].isinf()].unsqueeze(1)
+        # y_ = y[:, 1][~y[:, 1].isinf()].unsqueeze(1)
+        y_ = y.unsqueeze(1)
 
         # Drop duplicates for training
         _, idx = torch.unique(tf(X), dim=0, return_inverse=True)
@@ -192,7 +196,7 @@ class BOSS(object):
         )
         mll = ExactMarginalLogLikelihood(model=gp, likelihood=gp.likelihood)
         try: 
-            fit_gpytorch_mll(mll, optimizer_kwargs={"options":{"maxiter": 50}})
+            fit_gpytorch_mll(mll, optimizer_kwargs={"options":{"maxiter": 200}})
             self.gp_state = gp.state_dict()
         except:
             if self.gp_state is not None:
@@ -200,7 +204,8 @@ class BOSS(object):
             print("Failed to fite GP")
             gp.eval()
 
-        return ModelListFix(self.model_cr, gp)
+        # return ModelListFix(self.model_cr, gp)
+        return gp
 
     def _get_acqf(self, model, Y_feas):
         if self.q > 1:
@@ -212,11 +217,13 @@ class BOSS(object):
                 fat=True,
             )
         else:
-            af = LogConstrainedExpectedImprovement(
+            # af = LogConstrainedExpectedImprovement(
+            af = LogExpectedImprovement(
                 model=model,
-                objective_index=0,
-                constraints={1: [None, torch.math.log(self.min_rse)]},
-                best_f=Y_feas[:, 0].min(),
+                # objective_index=0,
+                # constraints={1: [None, torch.math.log(self.min_rse)]},
+                # best_f=Y_feas[:, 0].min(),
+                best_f=Y_feas.min(),
                 maximize=False,
             )
         return af
@@ -316,13 +323,13 @@ if __name__=="__main__":
 
     boss = BOSS(
         X,
-        n_init=500,
+        n_init=100,
         num_restarts_af=20,
         tn_eval_attempts=2,
         min_rse=0.01,
         max_rank=6,
         n_workers=1,
-        budget=0,
+        budget=200,
         af_batch=1,
         max_stalling_aqcf=500,
         maxiter_tn = 300,
@@ -333,5 +340,5 @@ if __name__=="__main__":
     res = boss.get_bo_results() 
     save_folder = f"./data/synthetic/order{order}_maxr{max_rank}/"
     os.makedirs(save_folder, exist_ok=True)
-    np.savez(save_folder + "gp.npz", Z=X, A=A, X=res["X"], Y=res["Y"], t=res["t"])
+    np.savez(save_folder + "boss.npz", Z=X, A=A, X=res["X"], Y=res["Y"], t=res["t"])
     print("You got this")
