@@ -129,7 +129,7 @@ class BOSS(object):
         for b in range(self.budget):
             X = self.train_X.to(dtype=torch.double)
             # Y = self.train_Y[:, [0, -1]].to(dtype=torch.double)
-            Y = - self.train_Y[:, [0, -1]].abs().sum(dim=-1).to(dtype=torch.double)
+            Y = self.train_Y[:, [0, -1]].sum(dim=-1).to(dtype=torch.double)
             
             # mask = Y[:, 1].exp() <= self.min_rse
             # Y_feas = Y[mask]
