@@ -19,21 +19,25 @@ from botorch import fit_fully_bayesian_model_nuts
 from tnss.models import IntSingleTaskGP, ManhattanDistanceKernel
 
 
-data_path = "./data/synthetic/tn.npz"
+N = 4
+max_rank = 8
+
+data_path = f"./data/synthetic/order{N}_maxr{max_rank}/0.npz"
 data = np.load(data_path)
 
 X = torch.tensor(data["X"].squeeze())
-X_tf = torch.tensor(data["X_tf"].squeeze())
-Y = torch.tensor(data["Y"])
+Y = torch.tensor(data["Y"]).to(X)
 
-init_bounds = torch.ones((2, X_tf.shape[1]))  # What should be proper bounds
-init_bounds[1] *= 6 
+bounds = torch.ones((2, X.shape[1]))  # What should be proper bounds
+bounds[1] *= max_rank
+tf = Normalize(d, bounds=bounds)
+X_tf = tf(X)
+X = X_tf
 
 n = 50
 train_X, train_Y = X[:n], Y[:n][:, 1].detach()
 test_X, test_Y = X[n:], Y[n:][:, 1].detach()
 
-X = X_tf
 
 def train_gp(kernel):
     gp = SingleTaskGP(train_X, train_Y.unsqueeze(1), covar_module=kernel, outcome_transform=Standardize(m=1))

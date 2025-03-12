@@ -6,10 +6,10 @@ from decomp.utils import *
 
 # Need a try statement to catch an early fail
 
-def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1000, tol=None, return_history=False):
+def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1000, tol=None):
     if tol is None:
         tol = -float("inf")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     # device = torch.device("cpu")
     
     N = len(adj_matrix)
@@ -36,13 +36,10 @@ def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1000, tol=None, return_h
                         
         X_comp = fctn_comp(G)
         rse.append(torch.norm(X - X_comp)/torch.norm(X))
-        # print(rse)
+        # print(rse[-1])
         if rse[-1] < tol or failed:
             break
-    if return_history:
-        return torch.tensor(rse)
-    else:
-        return rse[-1], i
+    return torch.tensor(rse)
 
             
 def fctn_comp(G: list[Tensor]):
@@ -115,7 +112,7 @@ if __name__=="__main__":
     import pandas as pd
     
     torch.manual_seed(6)
-    N = 5
+    N = 6
     max_rank = 10
     A = random_adj_matrix(N, max_rank).to(torch.int)
     
@@ -129,7 +126,7 @@ if __name__=="__main__":
         for i in range(1, max_rank+1):
             A[1,3] = i
             A[3,1] = i
-            rse_i = decomp_pam(X, A, 500, return_history=True)
+            rse_i = decomp_pam(X, A, 500)
             rse.append(rse_i.tolist())
         df = pd.DataFrame(rse).fillna(-1).T
     
