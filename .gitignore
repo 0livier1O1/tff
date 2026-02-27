@@ -7,3 +7,5 @@ results/
 .devcontainer/
 .copier-answers.yml
 README.md
+refs/
+context/
