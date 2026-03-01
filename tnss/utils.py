@@ -41,7 +41,7 @@ def triu_to_adj_matrix(triu: Tensor, diag: Tensor):
     return A
 
 
-def tf_unit_cube_int(D, bounds, init=False):
+def tf_unit_cube_int(D, bounds, init=False, from_integer=False):
     if init:
         # This increases probability of sampling cube edges (extreme values)
         init_bounds = bounds.clone() 
@@ -51,11 +51,12 @@ def tf_unit_cube_int(D, bounds, init=False):
         init_bounds = bounds
 
     tfs = {}
-    tfs["unnormalize_tf"] = Normalize(
-        d=init_bounds.shape[1],
-        bounds=init_bounds,
-        reverse=True
-    )       
+    if not from_integer:
+        tfs["unnormalize_tf"] = Normalize(
+            d=init_bounds.shape[1],
+            bounds=init_bounds,
+            reverse=True
+        )       
     tfs["round"] = Round(
         integer_indices=[i for i in range(D)],
         approximate=False

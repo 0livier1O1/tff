@@ -7,7 +7,7 @@ from scripts.utils import random_adj_matrix
 from decomp.tn import sim_tensor_from_adj
 
 from botorch.utils.transforms import unnormalize
-from tnss.boss import BOSS
+from tnss.algo.boss import BOSS
 
 if __name__=="__main__":
     torch.manual_seed(5)

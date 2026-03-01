@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image
 from skimage.transform import resize
 
-from tnss.boss import BOSS
+from tnss.algo.boss import BOSS
 
 
 folder_path = "./data/BDS300/"
