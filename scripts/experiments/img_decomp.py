@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 
-from tnss.boss import BOSS
+from tnss.algo.boss import BOSS
 
 
 min_rse=0.01
