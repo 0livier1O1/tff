@@ -13,12 +13,16 @@ class FreezeThawKernel(Kernel):
     This kernel implements the covariance
 
     .. math::
-        k\big((x, c, \tau), (x', c', \tau')\big)
-        = k_x(x, x') + \mathbf{1}\{c = c'\} k_\tau(\tau, \tau'),
+        k\big((x, \tau), (x', \tau')\big)
+        = k_x(x, x') + \mathbf{1}\{x = x'\} k_\tau(\tau, \tau'),
 
-    where :math:`x` denotes state-action features, :math:`c` is a curve identifier,
-    and :math:`\tau` is optimization effort. The temporal component is the
-    exponential-mixture kernel from freeze-thaw Bayesian optimization,
+    where :math:`x` denotes state-action-history features and :math:`\tau` is
+    optimization effort. Temporal covariance is only added when two observations
+    correspond to the same curve, which is inferred here from equality of the
+    feature vectors :math:`x`.
+
+    The temporal component is the exponential-mixture kernel from freeze-thaw
+    Bayesian optimization,
 
     .. math::
         k_\tau(\tau, \tau')
@@ -28,10 +32,9 @@ class FreezeThawKernel(Kernel):
     with :math:`\alpha > 0` and :math:`\beta > 0`.
 
     The intended input layout is a dense tensor whose last dimension contains
-    the state-action features together with two special coordinates:
+    the state-action-history features together with one special coordinate:
 
     - ``time_dim``: optimization effort :math:`\tau`
-    - ``curve_id_dim``: curve identifier :math:`c`
 
     All remaining dimensions are passed to ``base_kernel`` as the asymptotic
     state-action kernel :math:`k_x`.
@@ -42,29 +45,27 @@ class FreezeThawKernel(Kernel):
     observation of one partially observed optimization curve:
 
     .. math::
-        z = (x, \tau, c),
+        z = (x, \tau),
 
     where
 
-    - :math:`x \in \mathbb{R}^{d_x}` are state-action features,
+    - :math:`x \in \mathbb{R}^{d_x}` are state-action-history features,
     - :math:`\tau \ge 0` is the optimization effort for that observation,
-    - :math:`c` is a numeric identifier for the curve to which the observation belongs.
+    - the same optimization curve is inferred from identical :math:`x`.
 
-    Concretely, if ``d_total = d_x + 2``, then one common layout is
+    Concretely, if ``d_total = d_x + 1``, then one common layout is
 
     .. code-block:: text
 
-        [feature_1, ..., feature_d, effort, curve_id]
+        [feature_1, ..., feature_d, effort]
 
-    in which case ``time_dim=-2`` and ``curve_id_dim=-1``.
+    in which case ``time_dim=-1``.
 
     Semantics of repeated rows
     --------------------------
-    Multiple rows may share the same state-action features ``x`` and curve id ``c``
-    while having different effort values ``tau``. This corresponds to several partial
-    observations from the same re-optimization trajectory. If two rows have different
-    curve ids, the temporal covariance between them is zero by construction, even if
-    their state-action features are identical.
+    Multiple rows may share the same feature vector ``x`` while having different
+    effort values ``tau``. This corresponds to several partial observations from
+    one re-optimization trajectory.
 
     Parameters
     ----------
@@ -74,10 +75,9 @@ class FreezeThawKernel(Kernel):
     time_dim:
         Column index of the optimization-effort variable :math:`\tau`. Negative
         indices are supported and interpreted relative to the last dimension.
-    curve_id_dim:
-        Column index of the curve identifier :math:`c`. Negative indices are supported.
-        Equality of this column determines whether two observations are treated as
-        belonging to the same optimization trace.
+    same_curve_atol:
+        Absolute tolerance used to infer whether two feature vectors are identical
+        (same curve). This is applied via ``torch.isclose`` coordinate-wise.
     alpha_prior, beta_prior:
         Optional GPyTorch priors for the freeze-thaw temporal kernel hyperparameters.
     alpha_constraint, beta_constraint:
@@ -96,7 +96,7 @@ class FreezeThawKernel(Kernel):
         self,
         base_kernel: Kernel,
         time_dim: int,
-        curve_id_dim: int,
+        same_curve_atol: float = 1e-12,
         alpha_prior=None,
         beta_prior=None,
         alpha_constraint: Optional[Positive] = None,
@@ -105,12 +105,9 @@ class FreezeThawKernel(Kernel):
     ) -> None:
         super().__init__(**kwargs)
 
-        if time_dim == curve_id_dim:
-            raise ValueError("time_dim and curve_id_dim must refer to different columns.")
-
         self.base_kernel = base_kernel
         self.time_dim = time_dim
-        self.curve_id_dim = curve_id_dim
+        self.same_curve_atol = same_curve_atol
 
         self.register_parameter(
             name="raw_alpha",
@@ -169,31 +166,27 @@ class FreezeThawKernel(Kernel):
 
     def _feature_dims(self, ndim: int) -> list[int]:
         time_dim = self._normalize_dim(self.time_dim, ndim)
-        curve_id_dim = self._normalize_dim(self.curve_id_dim, ndim)
-        return [d for d in range(ndim) if d not in (time_dim, curve_id_dim)]
+        return [d for d in range(ndim) if d != time_dim]
 
-    def _split_inputs(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Split a design tensor into asymptotic features, effort, and curve id.
+    def _split_inputs(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split a design tensor into asymptotic features and effort.
 
         Parameters
         ----------
         x:
             Tensor with shape ``(..., n, d_total)`` or ``(n, d_total)``. The last
-            dimension must contain both the effort coordinate and the curve id.
+            dimension must contain the effort coordinate.
 
         Returns
         -------
         features:
-            Tensor containing all columns except ``time_dim`` and ``curve_id_dim``.
+            Tensor containing all columns except ``time_dim``.
             This is the input passed to ``base_kernel``.
         effort:
             Tensor containing the effort coordinate :math:`\tau`.
-        curve_id:
-            Tensor containing the numeric curve identifier :math:`c`.
         """
         ndim = x.size(-1)
         time_dim = self._normalize_dim(self.time_dim, ndim)
-        curve_id_dim = self._normalize_dim(self.curve_id_dim, ndim)
         feature_dims = self._feature_dims(ndim)
 
         if not feature_dims:
@@ -201,8 +194,21 @@ class FreezeThawKernel(Kernel):
 
         features = x[..., feature_dims]
         effort = x[..., time_dim]
-        curve_id = x[..., curve_id_dim]
-        return features, effort, curve_id
+        return features, effort
+
+    def _same_curve_mask(self, feat1: torch.Tensor, feat2: torch.Tensor, diag: bool) -> torch.Tensor:
+        if diag:
+            return torch.isclose(feat1, feat2, atol=self.same_curve_atol, rtol=0.0).all(dim=-1).to(dtype=feat1.dtype)
+        return (
+            torch.isclose(
+                feat1.unsqueeze(-2),
+                feat2.unsqueeze(-3),
+                atol=self.same_curve_atol,
+                rtol=0.0,
+            )
+            .all(dim=-1)
+            .to(dtype=feat1.dtype)
+        )
 
     def _temporal_covar(self, t1: torch.Tensor, t2: torch.Tensor) -> torch.Tensor:
         r"""Evaluate the freeze-thaw temporal kernel.
@@ -228,24 +234,21 @@ class FreezeThawKernel(Kernel):
         Given two input sets ``x1`` and ``x2``, this returns
 
         .. math::
-            k\big((x,c,\tau),(x',c',\tau')\big)
+            k\big((x,\tau),(x',\tau')\big)
             =
-            k_x(x,x') + \mathbf{1}\{c=c'\}k_\tau(\tau,\tau').
+            k_x(x,x') + \mathbf{1}\{x=x'\}k_\tau(\tau,\tau').
 
-        The asymptotic component is delegated to ``base_kernel`` after removing
-        the effort and curve-id columns. The temporal component is only added for
-        pairs of observations that share the same curve id.
+        The asymptotic component is delegated to ``base_kernel`` after removing the
+        effort column. The temporal component is only added for pairs inferred to
+        belong to the same curve via feature-vector equality.
         """
-        feat1, t1, c1 = self._split_inputs(x1)
-        feat2, t2, c2 = self._split_inputs(x2)
+        feat1, t1 = self._split_inputs(x1)
+        feat2, t2 = self._split_inputs(x2)
 
         asymptotic = self.base_kernel(feat1, feat2, diag=diag, **params)
+        same_curve = self._same_curve_mask(feat1, feat2, diag=diag)
+        temporal = self._temporal_covar(t1, t2)
 
         if diag:
-            same_curve = (c1 == c2).to(dtype=feat1.dtype)
-            temporal = self._temporal_covar(t1, t2).diagonal(dim1=-2, dim2=-1)
-            return asymptotic + same_curve * temporal
-
-        same_curve = (c1.unsqueeze(-1) == c2.unsqueeze(-2)).to(dtype=feat1.dtype)
-        temporal = self._temporal_covar(t1, t2)
+            temporal = temporal.diagonal(dim1=-2, dim2=-1)
         return asymptotic + same_curve * temporal
