@@ -415,8 +415,91 @@ class cuTensorNetwork:
         pct_loss_improvment=0.025,
         **kwargs
     ):
-        # TODO implement ALS as in @discrete_optim_tensor_decomposition.py, but using cuTensorNet for contractions and CuPy for tensor storage and updates.
-        pass
+        if self.backend != "cupy":
+            raise NotImplementedError("ALS decomposition is implemented only for backend='cupy'.")
+        if not self.cores:
+            raise ValueError("Network has no tensors to optimize.")
+
+        max_iter = int(kwargs.get("max_iter", kwargs.get("max_epochs", 500)))
+        cvg_threshold = float(kwargs.get("cvg_threshold", 1e-7))
+        verbose = int(kwargs.get("verbose", -1))
+        vertices = tuple(kwargs.get("vertices", range(len(self.cores))))
+
+        target = cp.asarray(target).astype(self.cores[0].dtype, copy=False)
+        eps = cp.finfo(target.dtype).eps
+        target_norm = cp.maximum(cp.linalg.norm(target), eps)
+
+        provided_unfold = kwargs.get("target_unfold_list")
+        if provided_unfold is None:
+            target_unfold_list = [
+                cp.moveaxis(target, v, 0).reshape(target.shape[v], -1) for v in range(len(self.cores))
+            ]
+        else:
+            target_unfold_list = [cp.asarray(tu) for tu in provided_unfold]
+
+        lhs, rhs = self.eq.split("->")
+        input_terms = lhs.split(",")
+        num_cores = len(self.cores)
+
+        used_labels = set(lhs.replace(",", "") + rhs)
+        label_pool = [c for c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_labels]
+
+        env_specs = {}
+        for v in vertices:
+            operand_ids = tuple(i for i in range(num_cores) if i != v)
+            if len(label_pool) < len(operand_ids):
+                raise ValueError("Not enough einsum labels to build ALS environment contractions.")
+
+            aux_labels = label_pool[:len(operand_ids)]
+            env_terms = []
+            for k, i in enumerate(operand_ids):
+                term = list(input_terms[i])
+                term[v] = aux_labels[k]
+                env_terms.append("".join(term))
+
+            env_out = "".join(rhs[i] for i in operand_ids) + "".join(aux_labels)
+            env_eq = f"{','.join(env_terms)}->{env_out}"
+            env_operands = [self.cores[i] for i in operand_ids]
+            env_path, env_info = cutn.contract_path(env_eq, *env_operands)
+            env_opt = {"path": env_path, "slicing": getattr(env_info, "slices", None)}
+
+            n_rows = int(np.prod([int(target.shape[i]) for i in operand_ids], dtype=np.int64))
+            n_cols = int(np.prod([int(self.cores[i].shape[v]) for i in operand_ids], dtype=np.int64))
+            solve_shape = list(self.cores[v].shape)
+            solve_shape.insert(0, solve_shape.pop(v))
+            env_specs[v] = (env_eq, env_operands, env_opt, n_rows, n_cols, solve_shape)
+
+        full_path, full_info = cutn.contract_path(self.eq, *self.cores)
+        full_opt = {"path": full_path, "slicing": getattr(full_info, "slices", None)}
+
+        prev_loss = float("inf")
+        loss_history = []
+
+        for it in range(max_iter):
+            for v in vertices:
+                env_eq, env_operands, env_opt, n_rows, n_cols, solve_shape = env_specs[v]
+                env = cutn.contract(env_eq, *env_operands, optimize=env_opt).reshape(n_rows, n_cols)
+                sol = cp.linalg.lstsq(env, target_unfold_list[v].T, rcond=None)[0].T
+                updated = cp.moveaxis(sol.reshape(solve_shape), 0, v)
+                self.cores[v][...] = updated
+
+            recon = cutn.contract(self.eq, *self.cores, optimize=full_opt)
+            loss = float((cp.linalg.norm(recon - target) / target_norm).item())
+            loss_history.append(loss)
+
+            if verbose > 0:
+                print(it, ":", loss)
+
+            if tol is not None and loss <= tol:
+                break
+
+            if np.isfinite(prev_loss):
+                min_delta = max(cvg_threshold, prev_loss * pct_loss_improvment)
+                if abs(prev_loss - loss) < min_delta:
+                    break
+            prev_loss = loss
+
+        return loss_history
 
 
 def einsum_expr(adj_matrix, keep_rank1=True):

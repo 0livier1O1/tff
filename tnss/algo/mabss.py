@@ -3,6 +3,7 @@ import numpy as np
 import cupy as cp
 import random
 import time
+import atexit
 
 from torch import Tensor
 from botorch.fit import fit_gpytorch_mll
@@ -16,18 +17,42 @@ from tensors.networks.cutensor_network import cuTensorNetwork, increment_mode_ra
 from tnss.kernels.freeze_thaw_kernel import FreezeThawKernel
 
 
+def _cleanup_cuda():
+    """Properly cleanup CUDA and CuPy resources at exit."""
+    try:
+        # Clear CuPy memory pool
+        memory_pool = cp.get_default_memory_pool()
+        memory_pool.free_all_blocks()
+        
+        # Clear PyTorch CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception:
+        # Silently ignore cleanup errors at exit
+        pass
+
+
+# Register cleanup function to run on exit
+atexit.register(_cleanup_cuda)
+
+
 class MABSS:
     def __init__(
             self, 
             budget: int, 
             target: Tensor,
             dtype: torch.dtype = torch.float64,
-            warm_start_epochs: int = 100,
+            warm_start_epochs: int = 160,
             backend: str = "cupy",
             use_time_component: bool = False,
-            beta: float = 2.0,
+            beta: float = 5.0,
             stopping_threshold: float = 1e-5,
             seed: int = 0,
+            kernel_name: str = "matern",
+            include_arm_feature: bool = True,
+            include_cr_feature: bool = True,
+            normalize_inputs: bool = True,
             **kwargs
         ):
         super().__init__(**kwargs)
@@ -50,6 +75,10 @@ class MABSS:
         self.beta = beta
         self.stopping_threshold = stopping_threshold
         self.seed = int(seed)
+        self.kernel_name = kernel_name
+        self.include_arm_feature = include_arm_feature
+        self.include_cr_feature = include_cr_feature
+        self.normalize_inputs = normalize_inputs
         self.T_refit = 5
         self._set_seed(self.seed)
 
@@ -79,6 +108,38 @@ class MABSS:
 
         return designs, losses
 
+    def _build_arm_feature(self, adj_matrix, arm_idx, compression_ratio):
+        bonds = _upper_tri_bonds(adj_matrix)
+        parts = []
+        if self.include_cr_feature:
+            parts.append(compression_ratio.unsqueeze(0))
+        if self.include_arm_feature:
+            parts.append(torch.tensor([arm_idx + 1], dtype=compression_ratio.dtype).to(compression_ratio))
+        parts.append(bonds.to(compression_ratio))
+        return torch.cat(parts, dim=0)
+
+    def evaluate_all_arm_losses(self, ntwrk):
+        designs, losses = self.increment_all_arms(ntwrk.cores, ntwrk.adj_matrix)
+        if not self.use_time_component:
+            final_losses = losses.squeeze(-1).to(dtype=torch.double)
+        else:
+            final_losses = []
+            for k in range(self.K):
+                _, arm_losses = self.increment_arm(k, ntwrk.adj_matrix.copy(), [core.copy() for core in ntwrk.cores], inplace=False)
+                final_losses.append(arm_losses[-1].to(dtype=torch.double))
+            final_losses = torch.stack(final_losses)
+        return designs, final_losses
+
+    def evaluate_all_arm_rewards(self, ntwrk, cur_loss=None):
+        if cur_loss is None:
+            cur_loss = torch.tensor(
+                cp.linalg.norm(ntwrk.contract_ntwrk() - self.target) / cp.linalg.norm(self.target),
+                dtype=torch.double,
+            ).cpu()
+        designs, final_losses = self.evaluate_all_arm_losses(ntwrk)
+        rewards = cur_loss.to(final_losses) - final_losses
+        return designs, rewards, final_losses
+
     def increment_arm(self, k, adj_matrix, cores, inplace=False):
         i, j = self.arms[k]
         old_cores = (cores[i], cores[j])
@@ -92,13 +153,12 @@ class MABSS:
         
         ntwrk = cuTensorNetwork(A, cores=cores)
 
-        decomp_losses = ntwrk.decompose(self.target, max_epochs=self.warm_start_epochs, unfrozen_edge=(i, j))
+        decomp_losses = ntwrk.decompose(self.target, max_epochs=self.warm_start_epochs)#, unfrozen_edge=(i, j))
         cr = torch.tensor(ntwrk.compression_ratio(), dtype=torch.double).cpu()
         losses = torch.tensor(decomp_losses, dtype=torch.double).cpu()
         T = losses.numel()
 
-        bonds = _upper_tri_bonds(A)
-        feat = torch.cat([cr.unsqueeze(0), torch.tensor([k+1]).to(cr), bonds.to(cr)], dim=0)
+        feat = self._build_arm_feature(A, k, cr)
         if self.use_time_component:
             # Freeze-thaw mode: one training point per observed time.
             t = torch.arange(1, T + 1, dtype=torch.double).unsqueeze(1).to(feat)   # (T,1)
@@ -123,9 +183,6 @@ class MABSS:
         results = {"loss": [], "reward": [], "compression_ratio": [], "arms": [], "clock": []}
 
         for b in range(self.budget):
-            memory_pool = cp.get_default_memory_pool()
-            print(f"cuPy GPU memory: {memory_pool.used_bytes() / 1e9:.2f} GB")            
-            
             t0 = time.time()
             ntwrk = cuTensorNetwork(self.adj, cores)
             cur_loss = torch.tensor(cp.linalg.norm(ntwrk.contract_ntwrk() - self.target) / cp.linalg.norm(self.target))
@@ -140,7 +197,9 @@ class MABSS:
                 Y = torch.tensor(cur_loss).to(Y) - Y  # convert to reward
 
             self.fit_model(X, Y, b)
-            best_arm = self.pick_arm(ntwrk)
+            # best_arm = self.pick_arm_greedy(ntwrk)
+            best_arm = self.pick_arm_ucb(ntwrk)
+            print(f"Selected arm: {best_arm} -- {self.arms[best_arm]} -- Cur loss: {cur_loss}")
             x, f = self.increment_arm(best_arm, A, cores, inplace=True)
             X = torch.cat([X, x], dim=0)
             Y = torch.cat([Y, cur_loss.to(f) - f], dim=0)
@@ -156,9 +215,32 @@ class MABSS:
         results["X"] = X
         results["Y"] = Y
         
+        # Cleanup CUDA resources
+        self._cleanup_resources()
+        
         return results
+    
+    def _cleanup_resources(self):
+        """Cleanup GPU resources used during optimization."""
+        try:
+            # Clear CuPy memory pool
+            memory_pool = cp.get_default_memory_pool()
+            memory_pool.free_all_blocks()
+            
+            # Synchronize CUDA
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
-    def pick_arm(self, ntwrk):
+    def pick_arm_greedy(self, ntwrk):
+        _, rewards, _ = self.evaluate_all_arm_rewards(ntwrk)
+        best_arm = torch.argmax(rewards).item()
+        return best_arm
+
+
+    def score_arms_ucb(self, ntwrk):
         A = ntwrk.adj_matrix.copy()
 
         X_new = []
@@ -166,9 +248,8 @@ class MABSS:
             A[i, j] += 1
             A[j, i] += 1
     
-            bonds = _upper_tri_bonds(A)
             cr = torch.tensor(ntwrk.compression_ratio(A), dtype=torch.double).cpu()
-            feat = torch.cat([cr.unsqueeze(0), torch.tensor([k+1]).to(cr), bonds.to(cr)], dim=0)
+            feat = self._build_arm_feature(A, k, cr)
             X_new.append(feat.unsqueeze(0))
             
             A[i, j] -= 1
@@ -176,8 +257,19 @@ class MABSS:
 
         X_new = torch.cat(X_new, dim=0)
         post = self.model.posterior(X_new)
-        ucb = post.mean.squeeze() + self.beta * post.stddev.squeeze()
-        best_arm = torch.argmax(ucb).item() 
+        mean = post.mean.squeeze(-1).detach().cpu()
+        std = post.stddev.squeeze(-1).detach().cpu()
+        ucb = mean + self.beta * std
+        return {
+            "X": X_new,
+            "mean": mean,
+            "std": std,
+            "ucb": ucb,
+        }
+
+    def pick_arm_ucb(self, ntwrk):
+        scores = self.score_arms_ucb(ntwrk)
+        best_arm = torch.argmax(scores["ucb"]).item()
         return best_arm
                
     def fit_model(self, X: Tensor, Y: Tensor, b: int):
@@ -186,18 +278,31 @@ class MABSS:
         Y_train = (Y.clone() - Y_mean) / Y_std
         X_train = X.clone()
         
-        if self.model is None:
-            if self.use_time_component:
-                kernel = FreezeThawKernel(ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=X_train.shape[-1])), time_dim=0)
-            else:
-                kernel = ScaleKernel(RBFKernel(ard_num_dims=X_train.shape[-1]))
-            gp = SingleTaskGP(X_train, Y_train, covar_module=kernel)
+        # if self.model is None:
+        if self.kernel_name == "matern":
+            base_kernel = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=X_train.shape[-1]))
+        elif self.kernel_name == "rbf":
+            base_kernel = ScaleKernel(RBFKernel(ard_num_dims=X_train.shape[-1]))
         else:
-            gp = self.model.condition_on_observations(X[-1].unsqueeze(0), Y[-1].unsqueeze(0))
+            raise ValueError(f"Unsupported kernel_name '{self.kernel_name}'.")
+        if self.use_time_component:
+            kernel = FreezeThawKernel(base_kernel, time_dim=0)
+        else:
+            kernel = base_kernel
+        # else:
+            # gp = self.model.condition_on_observations(X[-1].unsqueeze(0), Y[-1].unsqueeze(0))
         
-        if (b % self.T_refit) == 0:
+        # if (b % self.T_refit) == 0:
+        try: 
+            gp_kwargs = {"covar_module": kernel}
+            if self.normalize_inputs:
+                gp_kwargs["input_transform"] = Normalize(X_train.shape[-1])
+            gp = SingleTaskGP(X_train, Y_train, **gp_kwargs)
             mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
             fit_gpytorch_mll(mll, optimizer_kwargs={"options":{"maxiter": 150, 'gtol': 1e-5, 'ftol': 1e-5,}})
+        except: 
+            gp = self.model
+
         self.model = gp
 
 def _upper_tri_bonds(adj):
@@ -226,10 +331,14 @@ if __name__ == "__main__":
     A = random_adj_matrix(N, max_rank)
     tgt, cores = sim_tensor_from_adj(A, backend="cupy", dtype="float32")
 
-    mabs = MABSS(
-        10, 
-        tgt, 
-        dtype=cp.float16,
-        seed=seed,
-    )
-    mabs.run()
+    try:
+        mabs = MABSS(
+            100, 
+            tgt, 
+            dtype=cp.float16,
+            seed=seed,
+        )
+        results = mabs.run()
+    finally:
+        # Ensure cleanup happens even if there's an error
+        _cleanup_cuda()
