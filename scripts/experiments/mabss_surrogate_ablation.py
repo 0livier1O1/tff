@@ -116,6 +116,7 @@ def _build_runner(args: argparse.Namespace, config: dict, target, seed: int) -> 
         kernel_name=config["kernel_name"],
         include_arm_feature=config["include_arm_feature"],
         include_cr_feature=config["include_cr_feature"],
+        deterministic_eval=args.deterministic_eval,
     )
 
 
@@ -321,6 +322,7 @@ def main() -> None:
     parser.add_argument("--dtype", type=str, default="float32", choices=["float16", "float32", "float64"])
     parser.add_argument("--stopping-threshold", type=float, default=1e-5)
     parser.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
+    parser.add_argument("--deterministic-eval", action="store_true")
     parser.add_argument("--out-dir", type=Path, default=ROOT / "artifacts" / "mabss_surrogate")
     args = parser.parse_args()
 
@@ -345,7 +347,8 @@ def main() -> None:
             )
 
     aggregate = aggregate_results(all_results)
-    out_dir = args.out_dir / f"budget_{args.budget}_epochs_{args.warm_start_epochs}"
+    mode = "deterministic" if args.deterministic_eval else "stochastic"
+    out_dir = args.out_dir / f"{mode}_budget_{args.budget}_epochs_{args.warm_start_epochs}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     out_json = out_dir / "ablation_summary.json"

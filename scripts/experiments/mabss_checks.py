@@ -62,6 +62,7 @@ def _build_runner(args: argparse.Namespace, target):
         beta=args.beta,
         stopping_threshold=args.stopping_threshold,
         seed=args.seed,
+        deterministic_eval=args.deterministic_eval,
     )
 
 
@@ -267,6 +268,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--dtype", type=str, default="float32", choices=["float16", "float32", "float64"])
     parser.add_argument("--stopping-threshold", type=float, default=1e-5)
+    parser.add_argument("--deterministic-eval", action="store_true")
     parser.add_argument("--out-dir", type=Path, default=ROOT / "artifacts" / "mabss_checks")
     args = parser.parse_args()
 
@@ -281,7 +283,9 @@ def main() -> None:
     ucb_summary, ucb_rows = run_policy(args, target, policy="ucb")
     greedy_summary, greedy_rows = run_policy(args, target, policy="greedy")
 
-    out_dir = args.out_dir / f"seed_{args.seed}_budget_{args.budget}_epochs_{args.warm_start_epochs}"
+    mode = "deterministic" if args.deterministic_eval else "stochastic"
+    beta_tag = str(args.beta).replace(".", "p")
+    out_dir = args.out_dir / f"{mode}_beta_{beta_tag}_seed_{args.seed}_budget_{args.budget}_epochs_{args.warm_start_epochs}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     payload = {

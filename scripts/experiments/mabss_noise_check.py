@@ -50,6 +50,7 @@ def evaluate_seed(args: argparse.Namespace, seed: int) -> dict:
         warm_start_epochs=args.warm_start_epochs,
         beta=0.0,
         seed=seed,
+        deterministic_eval=args.deterministic_eval,
     )
 
     ntwrk = cuTensorNetwork(mabss.adj, cores=None, backend="cupy", dtype=args.dtype)
@@ -118,6 +119,7 @@ def main() -> None:
     parser.add_argument("--dtype", type=str, default="float32", choices=["float16", "float32", "float64"])
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
+    parser.add_argument("--deterministic-eval", action="store_true")
     parser.add_argument("--out-dir", type=Path, default=ROOT / "artifacts" / "mabss_noise")
     args = parser.parse_args()
 
@@ -135,7 +137,8 @@ def main() -> None:
         "mean_signal_to_noise": float(np.mean([p["signal_to_noise"] for p in seed_payloads])),
     }
 
-    out_dir = args.out_dir / f"epochs_{args.warm_start_epochs}_repeats_{args.repeats}"
+    mode = "deterministic" if args.deterministic_eval else "stochastic"
+    out_dir = args.out_dir / f"{mode}_epochs_{args.warm_start_epochs}_repeats_{args.repeats}"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_json = out_dir / "noise_summary.json"
     payload = {

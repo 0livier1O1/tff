@@ -53,6 +53,7 @@ class MABSS:
             include_arm_feature: bool = True,
             include_cr_feature: bool = True,
             normalize_inputs: bool = True,
+            deterministic_eval: bool = False,
             **kwargs
         ):
         super().__init__(**kwargs)
@@ -79,6 +80,7 @@ class MABSS:
         self.include_arm_feature = include_arm_feature
         self.include_cr_feature = include_cr_feature
         self.normalize_inputs = normalize_inputs
+        self.deterministic_eval = deterministic_eval
         self.T_refit = 5
         self._set_seed(self.seed)
 
@@ -140,11 +142,20 @@ class MABSS:
         rewards = cur_loss.to(final_losses) - final_losses
         return designs, rewards, final_losses
 
+    def _evaluation_seed(self, adj_matrix, arm_idx: int) -> int:
+        arr = cp.asnumpy(cp.asarray(adj_matrix)).astype(np.int64, copy=False).ravel()
+        weights = np.arange(1, arr.size + 1, dtype=np.int64)
+        mixed = int(np.abs(np.dot(arr, weights)) % 2_147_483_647)
+        seed = (self.seed * 1_000_003 + 97_613 * (arm_idx + 1) + mixed) % 2_147_483_647
+        return int(max(seed, 1))
+
     def increment_arm(self, k, adj_matrix, cores, inplace=False):
         i, j = self.arms[k]
         old_cores = (cores[i], cores[j])
 
         A = adj_matrix
+        if self.deterministic_eval:
+            self._set_seed(self._evaluation_seed(A, k))
         A[i, j] += 1
         A[j, i] += 1
         
