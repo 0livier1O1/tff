@@ -56,7 +56,7 @@ def solve_least_squares(target, tensor_list, vertex, weights=None, target_unfold
         sol = weighted_lstsq(G_without_vertex, target_unfold.T, weights_unfold)
     else:
         # sol = torch.lstsq(target_unfold.T, G_without_vertex)[0][:G_without_vertex.shape[1]].T
-        sol = torch.linalg.lstsq(G_without_vertex, target_unfold.T, driver='gelsd').solution.T
+        sol = torch.linalg.lstsq(G_without_vertex, target_unfold.T, driver='gels').solution.T
 
     G_shape = list(tensor_list[vertex].shape)
     G_shape.insert(0, G_shape.pop(vertex))
@@ -65,7 +65,11 @@ def solve_least_squares(target, tensor_list, vertex, weights=None, target_unfold
     return sol
 
 
-def ALS(target, tensor_list, vertices, max_iter=500, cvg_threshold=1e-7, verbose=-1, weights=None, target_unfold_list=None):
+def ALS(target, tensor_list, vertices, device, max_iter=500, cvg_threshold=1e-7, verbose=-1, weights=None, target_unfold_list=None):
+    target = target.to(device=device)
+    tensor_list = [t.to(device) for t in tensor_list]
+    if weights is not None:
+        weights = weights.to(device=device)
     loss = squared_error_loss(target, cc.get_full_tensor(tensor_list), weights)
     if verbose > 0:
         print("init:", loss)
@@ -79,8 +83,12 @@ def ALS(target, tensor_list, vertices, max_iter=500, cvg_threshold=1e-7, verbose
         if torch.abs(prev_loss - loss) < cvg_threshold:
             if verbose > 0:
                 print("*** ALS converged at ", it)
-            return tensor_list
+            break
         prev_loss = loss
+    target = target.cpu()
+    tensor_list = [t.cpu() for t in tensor_list]
+    if weights is not None:
+        weights = weights.cpu()
     return tensor_list
 
 
@@ -98,7 +106,7 @@ def split_weights_train_val(weights, validation_ratio):
     return weights, val_weights
 
 
-def increase_rank_and_rank_one_ALS(target, model, i, j, opt, weights=None):
+def increase_rank_and_rank_one_ALS(target, model, i, j, opt, device, weights=None):
     opt.weights = None
     residual = target - cc.get_full_tensor(model)
     vi_shape = list(model[i].shape)
@@ -111,13 +119,13 @@ def increase_rank_and_rank_one_ALS(target, model, i, j, opt, weights=None):
     current_model[i] = Vi
     current_model[j] = Vj
     current_model = ALS(residual, current_model, (i, j), max_iter=opt.iter_rank_one, cvg_threshold=opt.cvg_threshold,
-                        verbose=-1, weights=weights)
+                        verbose=-1, weights=weights, device=device)
     current_model[i] = torch.cat((copy.deepcopy(model[i]), current_model[i]), dim=j)
     current_model[j] = torch.cat((copy.deepcopy(model[j]), current_model[j]), dim=i)
     return current_model
 
 
-def find_best_edge(target, model, allowed_edges, opt, verbose=-1, weights=None, target_unfold_list=None, use_valid_data=-1):
+def find_best_edge(target, model, allowed_edges, opt, device=None, verbose=-1, weights=None, target_unfold_list=None, use_valid_data=-1):
     num_cores = len(target.shape)
     best_loss = np.inf
 
@@ -128,10 +136,10 @@ def find_best_edge(target, model, allowed_edges, opt, verbose=-1, weights=None, 
         if opt.heuristic == "full":
             current_model = cc.increase_rank(copy.deepcopy(model), i, j, rank_inc=opt.rank_increment, pad_noise=opt.pad_noise)
             current_model = ALS(target, current_model, range(num_cores), cvg_threshold=opt.cvg_threshold, max_iter=opt.epochs,
-                                weights=weights, target_unfold_list=target_unfold_list)
+                                weights=weights, target_unfold_list=target_unfold_list, device=device)
             loss = squared_error_loss(target, cc.get_full_tensor(current_model), weights)
         elif opt.heuristic == "rank_one":
-            current_model = increase_rank_and_rank_one_ALS(target, model, i, j, opt, weights)
+            current_model = increase_rank_and_rank_one_ALS(target, model, i, j, opt, device=device, weights=weights)
             loss = squared_error_loss(target, cc.get_full_tensor(current_model), weights)
 
         if opt.use_valid_data > 0:
@@ -161,9 +169,10 @@ def limit_arity(model, allowed_edges, max_arity):
     return L
 
 
-def greedy_decomposition_ALS(target, opt, verbose=1, weights=None, max_arity=-1, internal_nodes=False):
+def greedy_decomposition_ALS(target, opt, device, verbose=1, weights=None, max_arity=-1, internal_nodes=False):
     results = []
     num_cores = len(target.shape)
+    target_norm = torch.norm(target).item()
 
     it = 0
     if opt.restart_from_pickle is not None:
@@ -192,7 +201,7 @@ def greedy_decomposition_ALS(target, opt, verbose=1, weights=None, max_arity=-1,
                 #                                             [  1,   1,   3,   1],
                 #                                             [  1,   1,   1,   3]])
                 model = cc.random_tn(target.shape, rank=1)
-            model = ALS(target, model, range(num_cores), max_iter=opt.epochs, cvg_threshold=opt.cvg_threshold, weights=weights, target_unfold_list=target_unfold_list)
+            model = ALS(target, model, range(num_cores), device, max_iter=opt.epochs, cvg_threshold=opt.cvg_threshold, weights=weights, target_unfold_list=target_unfold_list)
             loss = squared_error_loss(target, cc.get_full_tensor(model), weights)
             if verbose > 0:
                 print(f"{it}: initial loss (rank 1) {loss}", RMSE(target, cc.get_full_tensor(model)))
@@ -201,7 +210,7 @@ def greedy_decomposition_ALS(target, opt, verbose=1, weights=None, max_arity=-1,
                 {'iter': step,
                  'model': model,
                  'num_params': cc.get_num_params(model),
-                 'loss': loss,
+                 'loss': loss / target_norm,
                  'weights': weights,
                  'target': target})
         else:
@@ -210,14 +219,22 @@ def greedy_decomposition_ALS(target, opt, verbose=1, weights=None, max_arity=-1,
                 allowed_edges = limit_arity(model, allowed_edges, max_arity)
 
             print("searching")
-            best_model, best_edge, best_loss = find_best_edge(target, model, allowed_edges, opt, verbose=verbose,
-                                                              weights=weights, target_unfold_list=target_unfold_list)
+            best_model, best_edge, best_loss = find_best_edge(
+                target,
+                model,
+                allowed_edges,
+                opt,
+                device=device,
+                verbose=verbose,
+                weights=weights,
+                target_unfold_list=target_unfold_list,
+            )
 
             model = best_model
 
             if opt.heuristic == 'rank_one':
                 print("training")
-                model = ALS(target, model, range(num_cores), max_iter=opt.epochs,
+                model = ALS(target, model, range(num_cores), device=device, max_iter=opt.epochs,
                             cvg_threshold=opt.cvg_threshold, verbose=-1, weights=weights, target_unfold_list=target_unfold_list)
 
             loss = squared_error_loss(target, cc.get_full_tensor(model), weights)
@@ -240,7 +257,7 @@ def greedy_decomposition_ALS(target, opt, verbose=1, weights=None, max_arity=-1,
                                 weights = torch.unsqueeze(weights, -1)
                             num_cores += 1
                         print("added internal node, retraining")
-                        model = ALS(target, model, range(num_cores), max_iter=opt.epochs,
+                        model = ALS(target, model, range(num_cores), device=device, max_iter=opt.epochs,
                                     cvg_threshold=opt.cvg_threshold, verbose=-1, weights=weights, target_unfold_list=target_unfold_list)
                         loss = squared_error_loss(target, cc.get_full_tensor(model), weights)
                         print("loss after:", loss)
@@ -259,14 +276,14 @@ def greedy_decomposition_ALS(target, opt, verbose=1, weights=None, max_arity=-1,
             results.append(
                 {'iter': step,
                  'num_params': cc.get_num_params(model),
-                 'loss': loss,
+                 'loss': loss / target_norm,
                  'weights': weights})
 
             if opt.result_pickle:
                 with open(opt.result_pickle, "wb") as f:
                     pickle.dump([results, opt], f)
 
-        if loss <= opt.stopping_threshold:
+        if loss / target_norm <= opt.stopping_threshold:
             return results, model
 
     return results, model

@@ -70,7 +70,12 @@ def increment_mode_rank(tensor, i):
 class cuTensorNetwork:
     _DTYPE_OPTIONS = ("float16", "float32", "float64")
 
-    def __init__(self, adj_matrix: Union[Tensor, cp.ndarray], cores=None, init_std=0.1, backend="cupy", dtype="float32") -> None:
+    def __init__(self, adj_matrix: Union[Tensor, cp.ndarray]=None, cores=None, init_std=0.1, backend="cupy", dtype="float32") -> None:
+        if adj_matrix is None:
+            if cores is None:
+                raise ValueError("Must provide at least one of adj_matrix or cores to initialize cuTensorNetwork.")
+            adj_matrix = np.array([core.shape for core in cores], dtype=np.int32)
+            
         # TODO What about ranks?
         self.backend = backend.lower()
         self.dtype_name = dtype.lower()
@@ -188,6 +193,7 @@ class cuTensorNetwork:
         lr_patience=250,
         max_epochs=25000,
         momentum=0.5,
+        method="sgd",
         **kwargs
     ):
         kwargs = dict(
@@ -201,6 +207,8 @@ class cuTensorNetwork:
             momentum=momentum,
             **kwargs
         )
+        if method == "als":
+            return self._decompose_als_cp(**kwargs)
         if self.backend == "torch":
             return self._decompose_torch_sgd(**kwargs)
         if self.backend == "cupy":
@@ -399,6 +407,16 @@ class cuTensorNetwork:
                 print(f"\rEpoch {epoch}, Loss: {loss_history[-1]:0.5f}, Learning Rate: {lr:0.6f}")
 
         return loss_history
+
+    def _decompose_als_cp(
+            self,
+        target,
+        tol=0.01,
+        pct_loss_improvment=0.025,
+        **kwargs
+    ):
+        # TODO implement ALS as in @discrete_optim_tensor_decomposition.py, but using cuTensorNet for contractions and CuPy for tensor storage and updates.
+        pass
 
 
 def einsum_expr(adj_matrix, keep_rank1=True):

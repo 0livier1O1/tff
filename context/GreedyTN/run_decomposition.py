@@ -18,7 +18,7 @@ def parse_option():
 
     parser.add_argument('--nruns', type=int, default=50)
 
-    parser.add_argument('--seed', type=int, default=0,
+    parser.add_argument('--seed', type=int, default=2,
                         help='seed')
     parser.add_argument('--steps', type=int, default=100,
                         help='number of discrete optimization steps')
@@ -56,6 +56,7 @@ def parse_option():
     parser.add_argument('--restart_from_pickle', type=str, default=None)
     parser.add_argument('--use_valid_data', type=float, default=-1)
     parser.add_argument('--pattern', type=str, help="Patterns to the benchmark data files")
+    parser.add_argument('--cuda_number', type=int)
 
     opt = parser.parse_args()
 
@@ -72,7 +73,8 @@ def main():
     target_dims = literal_eval(opt.target_dims)
     gen_dic = {'tucker': generate_tucker, 'tt': generate_tensor_train, 'tr': generate_tensor_ring, 'triangle': generate_tensor_tri}
     results = []
-
+    # device = torch.device(f"cuda:{opt.cuda_number}" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     eps = opt.stopping_threshold
     # for f in glob.glob(opt.pattern):
         # print(f)
@@ -101,7 +103,7 @@ def main():
         #     result[decomp + "-time"] = toc()
         print("greedy...")
         tic()
-        result["greedy"], model = discrete_optim_tensor_decomposition.greedy_decomposition_ALS(target_full, opt, verbose=1, internal_nodes=False)
+        result["greedy"], model = discrete_optim_tensor_decomposition.greedy_decomposition_ALS(target_full, opt, verbose=1, internal_nodes=False, device=device)
         result["greedy-time"] = toc()
         # print("greedy w/ internal nodes...")
         # tic()
