@@ -98,6 +98,7 @@ class GPUCBPolicy(BasePolicy):
                 optimizer_kwargs={
                     "options": {"maxiter": 150, "gtol": 1e-5, "ftol": 1e-5}
                 },
+                timeout_sec=30.0,
             )
         except:
             pass  # Keep untrained or fallback depending on strictness

@@ -51,6 +51,11 @@ st.markdown(
     div[data-baseweb="tooltip"] > div {
         background-color: transparent !important;
     }
+
+    /* Compact vertical spacing between plotly charts */
+    div[data-testid="stPlotlyChart"] {
+        margin-bottom: -1rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -616,31 +621,44 @@ if app_mode == "Run New Evaluation":
 
             progress_file = seed_dir / "progress.json"
             last_policy_seen = None
+            full_stdout = ""
 
             # --- POLLING LOOP: blocks Streamlit thread until subprocess exits ---
-            # Ticks every 1s: reads progress.json written by run_mabss_experiment.py,
-            # updates the progress bar, and refreshes the live RAM/VRAM chart.
-            total_steps = total_tasks * budget  # fixed denominator for x-axis
+            total_steps = total_tasks * budget
+            cur_pol, step_n, budget_n = "?", 0, budget
             while proc.poll() is None:
-                time.sleep(2)
+                _time.sleep(2)
 
-                # Single read of progress.json per tick (used for both bar and global_step)
-                step_n, budget_n, cur_pol = 0, budget, "?"
+                # Drain stdout to prevent pipe buffer hangs
+                if proc.stdout:
+                    import os as _os, fcntl as _fcntl
+                    # Set non-blocking
+                    _fd = proc.stdout.fileno()
+                    _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
+                    _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | _os.O_NONBLOCK)
+                    try:
+                        chunk = proc.stdout.read()
+                        if chunk:
+                            full_stdout += chunk
+                    except Exception:
+                        pass
+
                 try:
                     if progress_file.exists():
                         with open(progress_file, "r") as _pf:
                             prog = json.load(_pf)
-                        cur_pol = prog.get("policy", "?")
+                        new_pol = prog.get("policy", "?")
                         step_n = prog.get("step", 0)
                         budget_n = prog.get("budget", budget)
 
-                        # Policy transition → mark the just-finished policy as done
-                        if last_policy_seen and last_policy_seen != cur_pol:
-                            tasks_done += 1
-                            completed_items.append(
-                                f"Seed {seed} / {last_policy_seen.upper()}"
-                            )
-                            render_completed()
+                        # Detect policy transition
+                        if last_policy_seen and last_policy_seen != new_pol:
+                            label = f"Seed {seed} / {last_policy_seen.upper()}"
+                            if label not in completed_items:
+                                tasks_done += 1
+                                completed_items.append(label)
+                                render_completed()
+                        cur_pol = new_pol
                         last_policy_seen = cur_pol
 
                         pct = min(
@@ -713,9 +731,8 @@ if app_mode == "Run New Evaluation":
 
             retcode = proc.returncode
             if retcode != 0:
-                stdout = proc.stdout.read() if proc.stdout else ""
                 st.error(
-                    f"Seed {seed} failed (exit {retcode}):\n```\n{stdout[-2000:]}\n```"
+                    f"Seed {seed} failed (exit {retcode}):\n```\n{full_stdout[-2000:]}\n```"
                 )
                 continue
 
@@ -1088,15 +1105,25 @@ if data_ready:
 
             pol_names = [s["policy"] for s in seed_summaries]
             if pol_names:
-                pcols = st.columns(len(pol_names))
-                for pcol, pol_name in zip(pcols, pol_names):
-                    p_path = s_dir / f"tn_graph_{pol_name}.png"
+                if len(pol_names) == 1:
+                    _, pcenter, _ = st.columns([2, 2, 2])
+                    p_path = s_dir / f"tn_graph_{pol_names[0]}.png"
                     if p_path.exists():
-                        pcol.image(
+                        pcenter.image(
                             str(p_path),
-                            caption=pol_name.upper(),
+                            caption=pol_names[0].upper(),
                             use_container_width=True,
                         )
+                else:
+                    pcols = st.columns(len(pol_names))
+                    for pcol, pol_name in zip(pcols, pol_names):
+                        p_path = s_dir / f"tn_graph_{pol_name}.png"
+                        if p_path.exists():
+                            pcol.image(
+                                str(p_path),
+                                caption=pol_name.upper(),
+                                use_container_width=True,
+                            )
 
             st.divider()
 

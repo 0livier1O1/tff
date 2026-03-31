@@ -288,10 +288,13 @@ def run_policy(
                 text=f"[{policy_str.upper()}] Optimizing Epoch {step+1}/{args.budget}...",
             )
         if progress_file:
-            with open(progress_file, "w") as _pf:
+            # Atomic write to prevent dashboard race conditions
+            tmp_p = progress_file.with_suffix(".tmp")
+            with open(tmp_p, "w") as _pf:
                 json.dump(
                     {"policy": policy_str, "step": step + 1, "budget": args.budget}, _pf
                 )
+            tmp_p.replace(progress_file)
         t_step = time.time()
 
         if env.cur_loss.item() < env.stopping_threshold:
