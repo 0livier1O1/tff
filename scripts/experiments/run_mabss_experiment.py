@@ -229,6 +229,7 @@ def run_policy(
         stopping_threshold=args.stopping_threshold,
         deterministic_eval=args.deterministic_eval,
         seed=args.seed,
+        decomp_method=getattr(args, "decomp_method", "sgd"),
     )
     encoder = LocalEncoder(
         include_arm=args.include_arm_feature,
@@ -445,6 +446,9 @@ def main() -> None:
     parser.add_argument("--dtype", type=str, default="float32")
     parser.add_argument("--stopping-threshold", type=float, default=1e-5)
     parser.add_argument("--deterministic-eval", action="store_true", default=True)
+    parser.add_argument("--decomp-method", type=str, default="sgd",
+                        choices=["sgd", "pam", "als"],
+                        help="Decomposition method: sgd (cuTN-SGD), pam (proximal ALS), als (standard ALS)")
     parser.add_argument(
         "--objective", type=str, default="reward", choices=["reward", "loss"]
     )

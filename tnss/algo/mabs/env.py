@@ -27,6 +27,7 @@ class TNSearchEnv:
         self.max_edge_rank = max_edge_rank
         self.stopping_threshold = stopping_threshold
         self.deterministic_eval = deterministic_eval
+        self.decomp_method = kwargs.get("decomp_method", "sgd")
         self.seed = int(seed)
 
         k = len(self.Z_dim)
@@ -101,7 +102,7 @@ class TNSearchEnv:
         cores[j] = increment_mode_rank(cores[j], i)
 
         ntwrk = cuTensorNetwork(A, cores=cores, backend=self.backend, dtype=self.dtype)
-        decomp_losses = ntwrk.decompose(self.target, max_epochs=self.warm_start_epochs)
+        decomp_losses = ntwrk.decompose(self.target, max_epochs=self.warm_start_epochs, method=self.decomp_method)
         losses = torch.tensor(decomp_losses, dtype=torch.double).cpu()
 
         if inplace:

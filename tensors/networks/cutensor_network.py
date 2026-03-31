@@ -209,6 +209,8 @@ class cuTensorNetwork:
         )
         if method == "als":
             return self._decompose_als_cp(**kwargs)
+        if method == "pam":
+            return self._decompose_pam(**kwargs)
         if self.backend == "torch":
             return self._decompose_torch_sgd(**kwargs)
         if self.backend == "cupy":
@@ -498,6 +500,89 @@ class cuTensorNetwork:
                 if abs(prev_loss - loss) < min_delta:
                     break
             prev_loss = loss
+
+        return loss_history
+
+    def _decompose_pam(
+        self, target, tol=None, max_epochs=1000, rho=0.1, **kwargs
+    ):
+        """Proximal Alternating Minimization via cuTensorNet environments.
+
+        Update rule per core k:
+            G_k <- (X_(k) @ M_k^T + rho * G_k) @ pinv(M_k @ M_k^T + rho * I)
+
+        where M_k is the environment contraction with core k removed.
+        Uses cutn for environment computation, cp.linalg for the solve.
+        """
+        if self.backend != "cupy":
+            raise NotImplementedError("PAM decomposition requires backend='cupy'.")
+
+        target = cp.asarray(target).astype(self.cores[0].dtype, copy=False)
+        eps = cp.finfo(target.dtype).eps
+        target_norm = cp.maximum(cp.linalg.norm(target), eps)
+        num_cores = len(self.cores)
+        vertices = tuple(range(num_cores))
+
+        # Pre-compute mode-k unfoldings of target
+        target_unfolds = [
+            cp.moveaxis(target, v, 0).reshape(target.shape[v], -1)
+            for v in vertices
+        ]
+
+        # Build environment contraction specs (reuse ALS infrastructure)
+        lhs, rhs = self.eq.split("->")
+        input_terms = lhs.split(",")
+        used_labels = set(lhs.replace(",", "") + rhs)
+        label_pool = [c for c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_labels]
+
+        env_specs = {}
+        for v in vertices:
+            operand_ids = tuple(i for i in range(num_cores) if i != v)
+            aux_labels = label_pool[:len(operand_ids)]
+            env_terms = []
+            for k, i in enumerate(operand_ids):
+                term = list(input_terms[i])
+                term[v] = aux_labels[k]
+                env_terms.append("".join(term))
+            env_out = "".join(rhs[i] for i in operand_ids) + "".join(aux_labels)
+            env_eq = f"{','.join(env_terms)}->{env_out}"
+            env_operands = [self.cores[i] for i in operand_ids]
+            env_path, env_info = cutn.contract_path(env_eq, *env_operands)
+            env_opt = {"path": env_path, "slicing": getattr(env_info, "slices", None)}
+
+            n_rows = int(np.prod([int(target.shape[i]) for i in operand_ids], dtype=np.int64))
+            n_cols = int(np.prod([int(self.cores[i].shape[v]) for i in operand_ids], dtype=np.int64))
+            solve_shape = list(self.cores[v].shape)
+            solve_shape.insert(0, solve_shape.pop(v))
+            env_specs[v] = (env_eq, env_operands, env_opt, n_rows, n_cols, solve_shape)
+
+        full_path, full_info = cutn.contract_path(self.eq, *self.cores)
+        full_opt = {"path": full_path, "slicing": getattr(full_info, "slices", None)}
+
+        loss_history = []
+        for it in range(max_epochs):
+            for v in vertices:
+                env_eq, env_operands, env_opt, n_rows, n_cols, solve_shape = env_specs[v]
+                M = cutn.contract(env_eq, *env_operands, optimize=env_opt).reshape(n_rows, n_cols)
+
+                Gk_flat = cp.moveaxis(self.cores[v], v, 0).reshape(self.cores[v].shape[v], -1)
+                Xk = target_unfolds[v]  # (d_v, n_rows)
+
+                # PAM update: (Xk @ M^T + rho*Gk) @ pinv(M @ M^T + rho*I)
+                MtM = M.T @ M
+                reg = rho * cp.eye(MtM.shape[0], dtype=MtM.dtype)
+                rhs_mat = Xk @ M + rho * Gk_flat
+                sol = rhs_mat @ cp.linalg.pinv(MtM + reg)
+
+                updated = cp.moveaxis(sol.reshape(solve_shape), 0, v)
+                self.cores[v][...] = updated
+
+            recon = cutn.contract(self.eq, *self.cores, optimize=full_opt)
+            loss = float((cp.linalg.norm(recon - target) / target_norm).item())
+            loss_history.append(loss)
+
+            if tol is not None and loss <= tol:
+                break
 
         return loss_history
 

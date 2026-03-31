@@ -97,6 +97,14 @@ beta, kernel_name, learn_noise, fixed_noise = (
 exp3_gamma, exp4_gamma, exp3_decay, exp4_eta = 0.2, 0.1, 0.95, 0.5
 exp3_loss_bins, exp3_cr_bins = 4, 4
 n_cores, max_rank, seed, budget, warm_start_epochs, max_edge_rank = 5, 6, 1, 15, 60, 10
+boss_n_init, boss_max_bond, boss_min_rse, boss_maxiter_tn, boss_ucb_beta = (
+    10,
+    10,
+    0.01,
+    1000,
+    2.0,
+)
+mabss_decomp_method, boss_decomp_method = "sgd", "pam_legacy"
 policies_to_run = []
 run_name = "historical_load"
 
@@ -147,17 +155,43 @@ if app_mode == "Run New Evaluation":
     )
     policies_to_run = st.sidebar.multiselect(
         "Active Policies",
-        ["greedy", "ucb", "exp3", "exp4"],
-        default=["greedy", "exp4"],
-        help="MAB sub-routines testing incrementally within the continuous environment space.",
+        [
+            "mabss-greedy",
+            "mabss-ucb",
+            "mabss-exp3",
+            "mabss-exp4",
+            "boss-ei",
+            "boss-ucb",
+        ],
+        default=["mabss-greedy", "mabss-exp4"],
+        help="Search algorithms: `mabss-*` are sequential bandit rank-increment policies; `boss-*` are global BO structure search.",
     )
+    has_mabss = any(p.startswith("mabss-") for p in policies_to_run)
+    has_boss = any(p.startswith("boss-") for p in policies_to_run)
+
+    if has_mabss:
+        mabss_decomp_method = st.sidebar.selectbox(
+            "MABSS Decomposition",
+            ["sgd", "pam", "als"],
+            index=0,
+            help="sgd: cuTN-SGD (default, gradient-based). pam: Proximal ALS. als: Standard ALS.",
+        )
+    if has_boss:
+        boss_decomp_method = st.sidebar.selectbox(
+            "BOSS Decomposition",
+            ["pam_legacy", "pam", "sgd", "als"],
+            index=0,
+            help="pam_legacy: Pure PyTorch PAM (no cuTN overhead, default). pam/sgd/als: via cuTensorNetwork.",
+        )
 
     st.sidebar.markdown("---")
     if policies_to_run:
         with st.sidebar.expander("Advanced Policy Tuning"):
-            has_ucb = "ucb" in policies_to_run or "exp4" in policies_to_run
-            if has_ucb:
-                st.markdown("**GP-UCB Surrogate**")
+            has_mabss_ucb = (
+                "mabss-ucb" in policies_to_run or "mabss-exp4" in policies_to_run
+            )
+            if has_mabss_ucb:
+                st.markdown("**MABSS · GP-UCB Surrogate**")
                 u1, u2 = st.columns(2)
                 kernel_name = u1.selectbox(
                     "Kernel",
@@ -171,80 +205,91 @@ if app_mode == "Run New Evaluation":
                     10.0,
                     5.0,
                     0.5,
-                    help=r"Upper Confidence Bound tuning scalar driving exploratory variance scaling: $\mu_{t}(x) + \beta \sigma_{t}(x)$.",
+                    help=r"Upper Confidence Bound tuning scalar: $\mu_{t}(x) + \beta \sigma_{t}(x)$.",
                 )
                 n1, n2 = st.columns(2)
-                learn_noise = n1.checkbox(
-                    "Learn Noise",
-                    value=False,
-                    help="Enable automatic likelihood optimization to fit homoscedastic observational noise limits.",
-                )
-                fixed_noise_str = n2.text_input(
-                    "Fixed Noise",
-                    "1e-6",
-                    help=r"Manually fixed scalar for homoscedastic intrinsic noise $\sigma^2_y$.",
-                )
+                learn_noise = n1.checkbox("Learn Noise", value=False)
+                fixed_noise_str = n2.text_input("Fixed Noise", "1e-6")
                 if not learn_noise:
                     try:
                         fixed_noise = float(fixed_noise_str)
                     except ValueError:
                         pass
 
-            if has_ucb and "exp3" in policies_to_run:
+            if has_mabss_ucb and "mabss-exp3" in policies_to_run:
                 st.markdown("---")
 
-            if "exp3" in policies_to_run:
-                st.markdown("**EXP3 Parameters**")
+            if "mabss-exp3" in policies_to_run:
+                st.markdown("**MABSS · EXP3 Parameters**")
                 e1, e2 = st.columns(2)
                 exp3_gamma = e1.slider(
-                    "EXP3 Mix (Gamma)",
+                    "EXP3 Gamma",
                     0.0,
                     1.0,
                     0.2,
-                    help=r"Probability smoothing subset $\gamma \in (0,1]$ balancing adversarial exploitation bounds.",
+                    help=r"$\gamma \in (0,1]$ smoothing parameter.",
                 )
-                exp3_decay = e2.number_input(
-                    "EXP3 Decay",
-                    value=0.95,
-                    step=0.01,
-                    help="Iterative discount momentum shrinkage metric preventing policy collapse.",
-                )
+                exp3_decay = e2.number_input("EXP3 Decay", value=0.95, step=0.01)
 
             if (
-                "ucb" in policies_to_run or "exp3" in policies_to_run
-            ) and "exp4" in policies_to_run:
+                has_mabss_ucb or "mabss-exp3" in policies_to_run
+            ) and "mabss-exp4" in policies_to_run:
                 st.markdown("---")
 
-            if "exp4" in policies_to_run:
-                st.markdown("**EXP4 Parameters**")
+            if "mabss-exp4" in policies_to_run:
+                st.markdown("**MABSS · EXP4 Parameters**")
                 e3, e4 = st.columns(2)
-                exp4_gamma = e3.slider(
-                    "EXP4 Mix (Gamma)",
-                    0.0,
-                    1.0,
-                    0.1,
-                    help="Agnostic mix proportion bounding algorithm uniform distributions limits.",
-                )
-                exp4_eta = e4.number_input(
-                    "EXP4 Learning Rate (Eta)",
-                    value=0.5,
-                    step=0.1,
-                    help=r"Non-stationary gradient tracking scalar optimization multiplier $\eta = \sqrt{2 \ln N / T K}$.",
-                )
-                st.markdown("**State Discretization (EXP4 Context)**")
+                exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, 0.1)
+                exp4_eta = e4.number_input("EXP4 Eta", value=0.5, step=0.1)
+                st.markdown("**EXP4 Context Discretization**")
                 b1, b2 = st.columns(2)
-                exp3_loss_bins = b1.number_input(
-                    "Loss Bins",
-                    value=4,
-                    min_value=1,
-                    help="Dimensional bounds structurally discretizing continuous objective loss manifolds.",
+                exp3_loss_bins = b1.number_input("Loss Bins", value=4, min_value=1)
+                exp3_cr_bins = b2.number_input("CR Bins", value=4, min_value=1)
+
+            has_boss = any(p.startswith("boss-") for p in policies_to_run)
+            if has_boss:
+                if (
+                    has_mabss_ucb
+                    or "mabss-exp3" in policies_to_run
+                    or "mabss-exp4" in policies_to_run
+                ):
+                    st.markdown("---")
+                st.markdown("**BOSS · Global Bayesian Optimization**")
+                ba1, ba2 = st.columns(2)
+                boss_n_init = ba1.number_input(
+                    "Init Points ($n_{\\text{init}}$)",
+                    value=10,
+                    min_value=2,
+                    help="Sobol quasi-random evaluations before BO loop starts.",
                 )
-                exp3_cr_bins = b2.number_input(
-                    "CR Bins",
-                    value=4,
+                boss_max_bond = ba2.number_input(
+                    "Max Bond Rank",
+                    value=10,
                     min_value=1,
-                    help=r"Discrete bins clustering compression tracking metric dimensions $CR \in [0, \epsilon]$.",
+                    help=r"Upper bound on each bond rank in the search space.",
                 )
+                bb1, bb2 = st.columns(2)
+                boss_min_rse = bb1.number_input(
+                    "Min RSE Target",
+                    value=0.01,
+                    format="%f",
+                    help="Early-stop threshold per TN evaluation.",
+                )
+                boss_maxiter_tn = bb2.number_input(
+                    "PAM Iterations",
+                    value=1000,
+                    min_value=10,
+                    help="FCTN-PAM iterations per structure evaluation.",
+                )
+                if "boss-ucb" in policies_to_run:
+                    boss_ucb_beta = st.slider(
+                        "BOSS UCB Beta ($\\beta$)",
+                        0.1,
+                        10.0,
+                        2.0,
+                        0.1,
+                        help=r"Exploration weight for UCB acquisition: $\mu(x) - \beta\sigma(x)$.",
+                    )
 
     st.sidebar.markdown("### Storage Options")
     run_name = st.sidebar.text_input("Run Name", value="streamlit_experiment")
@@ -291,49 +336,47 @@ import matplotlib.pyplot as plt
 import networkx as nx
 
 POLICY_COLORS = {
-    "greedy": "#4E79A7",
-    "ucb": "#E15759",
-    "exp3": "#59A14F",
-    "exp4": "#F28E2B",
+    "mabss-greedy": "#4E79A7",
+    "mabss-ucb": "#E15759",
+    "mabss-exp3": "#59A14F",
+    "mabss-exp4": "#F28E2B",
+    "boss-ei": "#9467BD",
+    "boss-ucb": "#8C564B",
 }
 
 
 def _load_artifact(out_dir: Path):
-    """Load results from all seed_* subdirs of out_dir.
-    Supports both legacy (traces.csv) and new per-policy segment files (traces_*.csv).
-    Returns (df_rows, summaries) or (None, []) if no traces found."""
+    """Load results from all seed_*/policy_name/ subdirs.
+    Falls back to flat seed_*/traces.csv for legacy runs."""
     traces, summaries = [], []
-    for d in sorted(out_dir.iterdir()):
-        if not (d.is_dir() and d.name.startswith("seed_")):
+    for seed_d in sorted(out_dir.iterdir()):
+        if not (seed_d.is_dir() and seed_d.name.startswith("seed_")):
             continue
-        seed_val = int(d.name.split("_")[1])
+        seed_val = int(seed_d.name.split("_")[1])
 
-        # Support segmented traces (traces_*.csv)
-        found_segmented = False
-        for tf in d.glob("traces_*.csv"):
-            df_p = pd.read_csv(tf)
-            df_p["Seed"] = seed_val
-            traces.append(df_p)
-            found_segmented = True
+        # New per-policy subdir layout: seed_1/boss_ei/traces.csv
+        pol_dirs = [d for d in seed_d.iterdir() if d.is_dir()]
+        for pol_d in sorted(pol_dirs):
+            pol_name = pol_d.name.replace("_", "-")  # boss_ei -> boss-ei
+            if (pol_d / "traces.csv").exists():
+                df_p = pd.read_csv(pol_d / "traces.csv")
+                df_p["Policy"] = pol_name
+                df_p["Seed"] = seed_val
+                traces.append(df_p)
+            if (pol_d / "summary.json").exists():
+                with open(pol_d / "summary.json") as f:
+                    for s in json.load(f):
+                        s["Seed"] = seed_val
+                        s["policy"] = pol_name
+                        summaries.append(s)
 
-        # Support legacy unified traces (traces.csv)
-        if not found_segmented and (d / "traces.csv").exists():
-            df_s = pd.read_csv(d / "traces.csv")
+        # Legacy flat layout: seed_1/traces.csv
+        if not pol_dirs and (seed_d / "traces.csv").exists():
+            df_s = pd.read_csv(seed_d / "traces.csv")
             df_s["Seed"] = seed_val
             traces.append(df_s)
-
-        # Support segmented summaries (summary_*.json)
-        found_segmented_sum = False
-        for sf in d.glob("summary_*.json"):
-            with open(sf, "r") as f:
-                for s in json.load(f):
-                    s["Seed"] = seed_val
-                    summaries.append(s)
-            found_segmented_sum = True
-
-        # Support legacy unified summaries (summary.json)
-        if not found_segmented_sum and (d / "summary.json").exists():
-            with open(d / "summary.json", "r") as f:
+        if not pol_dirs and (seed_d / "summary.json").exists():
+            with open(seed_d / "summary.json") as f:
                 for s in json.load(f):
                     s["Seed"] = seed_val
                     summaries.append(s)
@@ -557,79 +600,126 @@ if app_mode == "Run New Evaluation":
                 unsafe_allow_html=True,
             )
 
-        # Base CLI args shared across all seeds; seed-specific args appended per iteration
-        base_args = [
-            "conda",
-            "run",
-            "-n",
-            "tensors",
-            "python",
-            "scripts/experiments/run_mabss_experiment.py",
-            "--budget",
-            str(budget),
-            "--warm-start-epochs",
-            str(warm_start_epochs),
-            "--n-cores",
-            str(n_cores),
-            "--max-rank",
-            str(max_rank),
-            "--max-edge-rank",
-            str(max_edge_rank),
-            "--beta",
-            str(beta),
-            "--kernel-name",
-            kernel_name,
-            "--fixed-noise",
-            str(fixed_noise),
-            "--stopping-threshold",
-            "1e-5",
-            "--deterministic-eval",
-            "--exp3-gamma",
-            str(exp3_gamma),
-            "--exp3-decay",
-            str(exp3_decay),
-            "--exp3-reward-scale",
-            "0.05",
-            "--exp3-loss-bins",
-            str(exp3_loss_bins),
-            "--exp3-cr-bins",
-            str(exp3_cr_bins),
-            "--exp3-loss-cap",
-            "1.5",
-            "--exp3-log-cr-cap",
-            "8.0",
-            "--exp4-gamma",
-            str(exp4_gamma),
-            "--exp4-decay",
-            str(exp3_decay),
-            "--exp4-eta",
-            str(exp4_eta),
-            "--dtype",
-            "float32",
-        ]
-        if learn_noise:
-            base_args.append("--learn-noise")
+        def _mabss_cmd(seed, pol_name, pol_dir):
+            """Build CLI args for run_mabss_experiment.py."""
+            mabss_pol = pol_name.replace("mabss-", "")
+            cmd = [
+                "conda",
+                "run",
+                "-n",
+                "tensors",
+                "python",
+                "scripts/experiments/run_mabss_experiment.py",
+                "--budget",
+                str(budget),
+                "--warm-start-epochs",
+                str(warm_start_epochs),
+                "--n-cores",
+                str(n_cores),
+                "--max-rank",
+                str(max_rank),
+                "--max-edge-rank",
+                str(max_edge_rank),
+                "--beta",
+                str(beta),
+                "--kernel-name",
+                kernel_name,
+                "--fixed-noise",
+                str(fixed_noise),
+                "--stopping-threshold",
+                "1e-5",
+                "--deterministic-eval",
+                "--exp3-gamma",
+                str(exp3_gamma),
+                "--exp3-decay",
+                str(exp3_decay),
+                "--exp3-reward-scale",
+                "0.05",
+                "--exp3-loss-bins",
+                str(exp3_loss_bins),
+                "--exp3-cr-bins",
+                str(exp3_cr_bins),
+                "--exp3-loss-cap",
+                "1.5",
+                "--exp3-log-cr-cap",
+                "8.0",
+                "--exp4-gamma",
+                str(exp4_gamma),
+                "--exp4-decay",
+                str(exp3_decay),
+                "--exp4-eta",
+                str(exp4_eta),
+                "--dtype",
+                "float32",
+                "--decomp-method",
+                mabss_decomp_method,
+                "--seed",
+                str(seed),
+                "--policies",
+                mabss_pol,
+                "--out-dir",
+                str(pol_dir),
+            ]
+            if learn_noise:
+                cmd.append("--learn-noise")
+            return cmd
+
+        def _boss_cmd(seed, pol_name, pol_dir):
+            """Build CLI args for run_boss_experiment.py."""
+            acqf = pol_name.split("-")[1]  # boss-ei -> ei
+            cmd = [
+                "conda",
+                "run",
+                "-n",
+                "tensors",
+                "python",
+                "scripts/experiments/run_boss_experiment.py",
+                "--n-cores",
+                str(n_cores),
+                "--max-rank",
+                str(max_rank),
+                "--seed",
+                str(seed),
+                "--budget",
+                str(budget),
+                "--n-init",
+                str(boss_n_init),
+                "--max-bond",
+                str(boss_max_bond),
+                "--min-rse",
+                str(boss_min_rse),
+                "--maxiter-tn",
+                str(boss_maxiter_tn),
+                "--acqf",
+                acqf,
+                "--ucb-beta",
+                str(boss_ucb_beta),
+                "--decomp-method",
+                boss_decomp_method,
+                "--out-dir",
+                str(pol_dir),
+            ]
+            return cmd
+
+        import os as _os, fcntl as _fcntl
 
         for idx, seed in enumerate(seeds):
             seed_dir = out_dir / f"seed_{seed}"
             seed_dir.mkdir(exist_ok=True)
-            done_file = seed_dir / ".done"
-            if done_file.exists():
-                done_file.unlink()
 
-            for p_idx, p in enumerate(policies_to_run):
-                stale_prog = seed_dir / "progress.json"
-                if stale_prog.exists():
-                    stale_prog.unlink()
+            for p in policies_to_run:
+                pol_dir = seed_dir / p.replace("-", "_")
+                pol_dir.mkdir(exist_ok=True)
+                for stale in [pol_dir / ".done", pol_dir / "progress.json"]:
+                    if stale.exists():
+                        stale.unlink()
 
-                cmd = base_args + [
-                    "--seed",
-                    str(seed),
-                    "--policies",
-                    p,
-                    "--out-dir",
-                    str(seed_dir),
-                ]
+                is_boss = p.startswith("boss-")
+                cmd = (
+                    _boss_cmd(seed, p, pol_dir)
+                    if is_boss
+                    else _mabss_cmd(seed, p, pol_dir)
+                )
 
                 progress_bar.progress(
                     int((tasks_done / total_tasks) * 100),
@@ -644,19 +734,16 @@ if app_mode == "Run New Evaluation":
                     text=True,
                 )
 
-                progress_file = seed_dir / "progress.json"
-                last_policy_seen = None
+                progress_file = pol_dir / "progress.json"
                 full_stdout = ""
-                # --- POLLING LOOP: blocks Streamlit thread until subprocess exits ---
                 total_steps = total_tasks * budget
-                cur_pol, step_n, budget_n = p, 0, budget
+                step_n, budget_n = 0, budget
+
                 while proc.poll() is None:
                     _time.sleep(2)
 
-                    # Drain stdout to prevent pipe buffer hangs
+                    # Drain stdout (prevents pipe-buffer hang)
                     if proc.stdout:
-                        import os as _os, fcntl as _fcntl
-                        # Set non-blocking
                         _fd = proc.stdout.fileno()
                         _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
                         _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | _os.O_NONBLOCK)
@@ -669,34 +756,23 @@ if app_mode == "Run New Evaluation":
 
                     try:
                         if progress_file.exists():
-                            with open(progress_file, "r") as _pf:
+                            with open(progress_file) as _pf:
                                 prog = json.load(_pf)
-                            new_pol = prog.get("policy", p)
                             step_n = prog.get("step", 0)
                             budget_n = prog.get("budget", budget)
-
-                            # Detect policy transition (rare now as it's one policy per proc, but keeps code robust)
-                            if last_policy_seen and last_policy_seen != new_pol:
-                                label = f"Seed {seed} / {last_policy_seen.upper()}"
-                                if label not in completed_items:
-                                    tasks_done += 1
-                                    completed_items.append(label)
-                                    render_completed()
-                            cur_pol = new_pol
-                            last_policy_seen = cur_pol
-
                             pct = min(
-                                int(((tasks_done * budget + step_n) / total_steps) * 100),
+                                int(
+                                    ((tasks_done * budget + step_n) / total_steps) * 100
+                                ),
                                 99,
                             )
                             progress_bar.progress(
                                 pct,
-                                text=f"Seed {seed} — [{cur_pol.upper()}] Step {step_n}/{budget_n}",
+                                text=f"Seed {seed} — [{p.upper()}] Step {step_n}/{budget_n}",
                             )
                     except Exception:
                         pass
 
-                    # Poll RAM and GPU VRAM usage
                     ram_pct = psutil.virtual_memory().percent
                     gpu_pct = 0.0
                     try:
@@ -714,7 +790,6 @@ if app_mode == "Run New Evaluation":
                         }
                     )
 
-                    # Rebuild and push live memory chart to the placeholder column
                     xs = [m["x"] for m in mem_history]
                     fig = go.Figure(
                         [
@@ -756,29 +831,24 @@ if app_mode == "Run New Evaluation":
                 retcode = proc.returncode
                 if retcode != 0:
                     st.error(
-                        f"Seed {seed} Policy {p} failed (exit {retcode}):\n```\n{full_stdout[-2000:]}\n```"
+                        f"Seed {seed} / {p.upper()} failed (exit {retcode}):\n```\n{full_stdout[-2000:]}\n```"
                     )
                     continue
 
-                # Mark exact policy as done
                 label = f"Seed {seed} / {p.upper()}"
                 if label not in completed_items:
                     tasks_done += 1
                     completed_items.append(label)
                 render_completed()
 
-                # Load this policy's results from disk
-                traces_path = seed_dir / f"traces_{p}.csv"
-                summary_path = seed_dir / f"summary_{p}.json"
-                if traces_path.exists():
-                    df_pol = pd.read_csv(traces_path)
+                if (pol_dir / "traces.csv").exists():
+                    df_pol = pd.read_csv(pol_dir / "traces.csv")
+                    df_pol["Policy"] = p
                     all_traces.extend(df_pol.to_dict("records"))
-                if summary_path.exists():
-                    with open(summary_path, "r") as f:
-                        pol_summaries = json.load(f)
-                        all_summaries.extend(pol_summaries)
+                if (pol_dir / "summary.json").exists():
+                    with open(pol_dir / "summary.json") as f:
+                        all_summaries.extend(json.load(f))
 
-            # Signal whole seed completion
             with open(seed_dir / ".done", "w") as f:
                 f.write("ok")
 
