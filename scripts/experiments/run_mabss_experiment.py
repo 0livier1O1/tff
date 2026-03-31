@@ -492,7 +492,6 @@ def main() -> None:
 
     progress_file = out_dir / "progress.json"
 
-    all_rows, all_summaries = [], []
     for p in args.policies:
         print(f"[Seed {args.seed}] Running {p}...")
         summary, rows = run_policy(
@@ -502,8 +501,7 @@ def main() -> None:
             r["Policy"] = p
             r["Seed"] = args.seed
         summary["Seed"] = args.seed
-        all_summaries.append(summary)
-        all_rows.extend(rows)
+
         _draw_tn_graph_standalone(
             summary["A"],
             out_dir / f"tn_graph_{p}.png",
@@ -511,19 +509,17 @@ def main() -> None:
             node_color=POLICY_COLORS.get(p, "lightblue"),
         )
 
-    df = pd.DataFrame(all_rows)
-    if not df.empty:
-        for pol in df["Policy"].unique():
-            mask = df["Policy"] == pol
-            df.loc[mask, "cum_regret"] = df.loc[mask, "regret"].cumsum()
-    df.to_csv(out_dir / "traces.csv", index=False)
+        # Each policy call in this script now saves its own local results file 
+        # to prevent overwriting when multiple subprocess calls target the same seed folder.
+        df_p = pd.DataFrame(rows)
+        if not df_p.empty:
+            df_p["cum_regret"] = df_p["regret"].cumsum()
+        df_p.to_csv(out_dir / f"traces_{p}.csv", index=False)
 
-    clean = [{k: v for k, v in s.items() if k != "A"} for s in all_summaries]
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump(clean, f, indent=2)
+        clean_summary = {k: v for k, v in summary.items() if k != "A"}
+        with open(out_dir / f"summary_{p}.json", "w") as f:
+            json.dump([clean_summary], f, indent=2)
 
-    with open(out_dir / ".done", "w") as f:
-        f.write("ok")
     print(f"[Seed {args.seed}] Done -> {out_dir}")
 
 

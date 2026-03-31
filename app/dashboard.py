@@ -8,7 +8,7 @@ if str(ROOT) not in sys.path:
 import argparse
 import json
 import subprocess
-import time
+import time as _time
 import pandas as pd
 import psutil
 import streamlit as st
@@ -299,22 +299,45 @@ POLICY_COLORS = {
 
 
 def _load_artifact(out_dir: Path):
-    """Load traces.csv and summary.json from all seed_* subdirs of out_dir.
+    """Load results from all seed_* subdirs of out_dir.
+    Supports both legacy (traces.csv) and new per-policy segment files (traces_*.csv).
     Returns (df_rows, summaries) or (None, []) if no traces found."""
     traces, summaries = [], []
     for d in sorted(out_dir.iterdir()):
         if not (d.is_dir() and d.name.startswith("seed_")):
             continue
         seed_val = int(d.name.split("_")[1])
-        if (d / "traces.csv").exists():
+
+        # Support segmented traces (traces_*.csv)
+        found_segmented = False
+        for tf in d.glob("traces_*.csv"):
+            df_p = pd.read_csv(tf)
+            df_p["Seed"] = seed_val
+            traces.append(df_p)
+            found_segmented = True
+
+        # Support legacy unified traces (traces.csv)
+        if not found_segmented and (d / "traces.csv").exists():
             df_s = pd.read_csv(d / "traces.csv")
             df_s["Seed"] = seed_val
             traces.append(df_s)
-        if (d / "summary.json").exists():
+
+        # Support segmented summaries (summary_*.json)
+        found_segmented_sum = False
+        for sf in d.glob("summary_*.json"):
+            with open(sf, "r") as f:
+                for s in json.load(f):
+                    s["Seed"] = seed_val
+                    summaries.append(s)
+            found_segmented_sum = True
+
+        # Support legacy unified summaries (summary.json)
+        if not found_segmented_sum and (d / "summary.json").exists():
             with open(d / "summary.json", "r") as f:
                 for s in json.load(f):
                     s["Seed"] = seed_val
                     summaries.append(s)
+
     if not traces:
         return None, []
     return pd.concat(traces, ignore_index=True), summaries
@@ -593,167 +616,171 @@ if app_mode == "Run New Evaluation":
             done_file = seed_dir / ".done"
             if done_file.exists():
                 done_file.unlink()
-            stale_prog = seed_dir / "progress.json"
-            if stale_prog.exists():
-                stale_prog.unlink()
 
-            cmd = base_args + [
-                "--seed",
-                str(seed),
-                "--policies",
-                *policies_to_run,
-                "--out-dir",
-                str(seed_dir),
-            ]
+            for p_idx, p in enumerate(policies_to_run):
+                stale_prog = seed_dir / "progress.json"
+                if stale_prog.exists():
+                    stale_prog.unlink()
 
-            progress_bar.progress(
-                int((tasks_done / total_tasks) * 100),
-                text=f"Seed {seed} — launching...",
-            )
+                cmd = base_args + [
+                    "--seed",
+                    str(seed),
+                    "--policies",
+                    p,
+                    "--out-dir",
+                    str(seed_dir),
+                ]
 
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(ROOT),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
+                progress_bar.progress(
+                    int((tasks_done / total_tasks) * 100),
+                    text=f"Seed {seed} — [{p.upper()}] launching...",
+                )
 
-            progress_file = seed_dir / "progress.json"
-            last_policy_seen = None
-            full_stdout = ""
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
 
-            # --- POLLING LOOP: blocks Streamlit thread until subprocess exits ---
-            total_steps = total_tasks * budget
-            cur_pol, step_n, budget_n = "?", 0, budget
-            while proc.poll() is None:
-                _time.sleep(2)
+                progress_file = seed_dir / "progress.json"
+                last_policy_seen = None
+                full_stdout = ""
+                # --- POLLING LOOP: blocks Streamlit thread until subprocess exits ---
+                total_steps = total_tasks * budget
+                cur_pol, step_n, budget_n = p, 0, budget
+                while proc.poll() is None:
+                    _time.sleep(2)
 
-                # Drain stdout to prevent pipe buffer hangs
-                if proc.stdout:
-                    import os as _os, fcntl as _fcntl
-                    # Set non-blocking
-                    _fd = proc.stdout.fileno()
-                    _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
-                    _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | _os.O_NONBLOCK)
+                    # Drain stdout to prevent pipe buffer hangs
+                    if proc.stdout:
+                        import os as _os, fcntl as _fcntl
+                        # Set non-blocking
+                        _fd = proc.stdout.fileno()
+                        _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
+                        _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | _os.O_NONBLOCK)
+                        try:
+                            chunk = proc.stdout.read()
+                            if chunk:
+                                full_stdout += chunk
+                        except Exception:
+                            pass
+
                     try:
-                        chunk = proc.stdout.read()
-                        if chunk:
-                            full_stdout += chunk
+                        if progress_file.exists():
+                            with open(progress_file, "r") as _pf:
+                                prog = json.load(_pf)
+                            new_pol = prog.get("policy", p)
+                            step_n = prog.get("step", 0)
+                            budget_n = prog.get("budget", budget)
+
+                            # Detect policy transition (rare now as it's one policy per proc, but keeps code robust)
+                            if last_policy_seen and last_policy_seen != new_pol:
+                                label = f"Seed {seed} / {last_policy_seen.upper()}"
+                                if label not in completed_items:
+                                    tasks_done += 1
+                                    completed_items.append(label)
+                                    render_completed()
+                            cur_pol = new_pol
+                            last_policy_seen = cur_pol
+
+                            pct = min(
+                                int(((tasks_done * budget + step_n) / total_steps) * 100),
+                                99,
+                            )
+                            progress_bar.progress(
+                                pct,
+                                text=f"Seed {seed} — [{cur_pol.upper()}] Step {step_n}/{budget_n}",
+                            )
                     except Exception:
                         pass
 
-                try:
-                    if progress_file.exists():
-                        with open(progress_file, "r") as _pf:
-                            prog = json.load(_pf)
-                        new_pol = prog.get("policy", "?")
-                        step_n = prog.get("step", 0)
-                        budget_n = prog.get("budget", budget)
+                    # Poll RAM and GPU VRAM usage
+                    ram_pct = psutil.virtual_memory().percent
+                    gpu_pct = 0.0
+                    try:
+                        free_m, total_m = cp.cuda.Device().mem_info
+                        gpu_pct = ((total_m - free_m) / total_m) * 100.0
+                    except Exception:
+                        pass
 
-                        # Detect policy transition
-                        if last_policy_seen and last_policy_seen != new_pol:
-                            label = f"Seed {seed} / {last_policy_seen.upper()}"
-                            if label not in completed_items:
-                                tasks_done += 1
-                                completed_items.append(label)
-                                render_completed()
-                        cur_pol = new_pol
-                        last_policy_seen = cur_pol
+                    global_step = tasks_done * budget + step_n
+                    mem_history.append(
+                        {
+                            "x": global_step,
+                            "System RAM (%)": ram_pct,
+                            "GPU VRAM (%)": gpu_pct,
+                        }
+                    )
 
-                        pct = min(
-                            int(((tasks_done * budget + step_n) / total_steps) * 100),
-                            99,
-                        )
-                        progress_bar.progress(
-                            pct,
-                            text=f"Seed {seed} — [{cur_pol.upper()}] Step {step_n}/{budget_n}",
-                        )
-                except Exception:
-                    pass
+                    # Rebuild and push live memory chart to the placeholder column
+                    xs = [m["x"] for m in mem_history]
+                    fig = go.Figure(
+                        [
+                            go.Scatter(
+                                x=xs,
+                                y=[m["System RAM (%)"] for m in mem_history],
+                                mode="lines",
+                                name="System RAM",
+                                line=dict(color="#636EFA", width=2),
+                            ),
+                            go.Scatter(
+                                x=xs,
+                                y=[m["GPU VRAM (%)"] for m in mem_history],
+                                mode="lines",
+                                name="GPU VRAM",
+                                line=dict(color="#EF553B", width=2),
+                            ),
+                        ]
+                    )
+                    fig.add_hline(
+                        y=90,
+                        line_dash="dash",
+                        line_color="red",
+                        opacity=0.5,
+                        annotation_text="OOM Threshold (90%)",
+                    )
+                    fig.update_layout(
+                        yaxis=dict(range=[0, 100], title="Usage (%)"),
+                        xaxis=dict(range=[0, total_steps], title="Global Step"),
+                        height=350,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        template="plotly_white",
+                        legend=dict(orientation="h", y=1.15),
+                    )
+                    mem_ui.plotly_chart(
+                        fig, use_container_width=True, key=f"mem_{len(mem_history)}"
+                    )
 
-                # Poll RAM and GPU VRAM usage
-                ram_pct = psutil.virtual_memory().percent
-                gpu_pct = 0.0
-                try:
-                    free_m, total_m = cp.cuda.Device().mem_info
-                    gpu_pct = ((total_m - free_m) / total_m) * 100.0
-                except Exception:
-                    pass
+                retcode = proc.returncode
+                if retcode != 0:
+                    st.error(
+                        f"Seed {seed} Policy {p} failed (exit {retcode}):\n```\n{full_stdout[-2000:]}\n```"
+                    )
+                    continue
 
-                global_step = tasks_done * budget + step_n
-                mem_history.append(
-                    {
-                        "x": global_step,
-                        "System RAM (%)": ram_pct,
-                        "GPU VRAM (%)": gpu_pct,
-                    }
-                )
-
-                # Rebuild and push live memory chart to the placeholder column
-                xs = [m["x"] for m in mem_history]
-                fig = go.Figure(
-                    [
-                        go.Scatter(
-                            x=xs,
-                            y=[m["System RAM (%)"] for m in mem_history],
-                            mode="lines",
-                            name="System RAM",
-                            line=dict(color="#636EFA", width=2),
-                        ),
-                        go.Scatter(
-                            x=xs,
-                            y=[m["GPU VRAM (%)"] for m in mem_history],
-                            mode="lines",
-                            name="GPU VRAM",
-                            line=dict(color="#EF553B", width=2),
-                        ),
-                    ]
-                )
-                fig.add_hline(
-                    y=90,
-                    line_dash="dash",
-                    line_color="red",
-                    opacity=0.5,
-                    annotation_text="OOM Threshold (90%)",
-                )
-                fig.update_layout(
-                    yaxis=dict(range=[0, 100], title="Usage (%)"),
-                    xaxis=dict(range=[0, total_steps], title="Global Step"),
-                    height=350,
-                    margin=dict(l=0, r=0, t=10, b=0),
-                    template="plotly_white",
-                    legend=dict(orientation="h", y=1.15),
-                )
-                mem_ui.plotly_chart(
-                    fig, use_container_width=True, key=f"mem_{len(mem_history)}"
-                )
-
-            retcode = proc.returncode
-            if retcode != 0:
-                st.error(
-                    f"Seed {seed} failed (exit {retcode}):\n```\n{full_stdout[-2000:]}\n```"
-                )
-                continue
-
-            # Mark all remaining policies for this seed as done
-            for p in policies_to_run:
+                # Mark exact policy as done
                 label = f"Seed {seed} / {p.upper()}"
                 if label not in completed_items:
                     tasks_done += 1
                     completed_items.append(label)
-            render_completed()
+                render_completed()
 
-            # Load per-seed results from disk into aggregate lists
-            traces_path = seed_dir / "traces.csv"
-            summary_path = seed_dir / "summary.json"
-            if traces_path.exists():
-                df_seed = pd.read_csv(traces_path)
-                all_traces.extend(df_seed.to_dict("records"))
-            if summary_path.exists():
-                with open(summary_path, "r") as f:
-                    seed_summaries = json.load(f)
-                    all_summaries.extend(seed_summaries)
+                # Load this policy's results from disk
+                traces_path = seed_dir / f"traces_{p}.csv"
+                summary_path = seed_dir / f"summary_{p}.json"
+                if traces_path.exists():
+                    df_pol = pd.read_csv(traces_path)
+                    all_traces.extend(df_pol.to_dict("records"))
+                if summary_path.exists():
+                    with open(summary_path, "r") as f:
+                        pol_summaries = json.load(f)
+                        all_summaries.extend(pol_summaries)
+
+            # Signal whole seed completion
+            with open(seed_dir / ".done", "w") as f:
+                f.write("ok")
 
         # Bubble up
         df_rows = pd.DataFrame(all_traces)
