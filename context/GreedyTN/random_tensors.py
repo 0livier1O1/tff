@@ -2,7 +2,7 @@ import numpy as np
 import tensorly
 import torch
 
-import core_code as cc
+from context.GreedyTN import core_code as cc
 
 np.random.seed(1)
 torch.manual_seed(1)

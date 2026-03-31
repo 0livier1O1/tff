@@ -8,3 +8,6 @@ results/
 .copier-answers.yml
 README.md
 refs/
+artifacts/
+reports/
+.claude/
