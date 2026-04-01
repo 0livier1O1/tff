@@ -249,13 +249,16 @@ if app_mode == "Run New Evaluation":
         has_mabss = any(p.startswith("mabss-") for p in policies_to_run)
         has_boss = any(p.startswith("boss-") for p in policies_to_run)
 
+        decomp_method = st.sidebar.selectbox(
+            "Decomp Engine",
+            ["pam_legacy", "sgd", "adam", "pam", "als"],
+            index=0,
+            help="pam_legacy: Pure PyTorch PAM (CPU). sgd/adam/pam/als: via cuTensorNetwork (GPU).",
+        )
+        mabss_decomp_method = decomp_method
+        boss_decomp_method = decomp_method
+
         if has_mabss:
-            mabss_decomp_method = st.sidebar.selectbox(
-                "MABSS Engine",
-                ["sgd", "adam", "pam", "als"],
-                index=0,
-                help="sgd: cuTN-SGD. adam: cuTN-Adam. pam: Proximal ALS. als: Standard ALS.",
-            )
             ws_col1, ws_col2 = st.sidebar.columns(2)
             mabss_warm_start_method = ws_col1.selectbox(
                 "Warm Start",
@@ -271,19 +274,8 @@ if app_mode == "Run New Evaluation":
                 step=10,
             )
         else:
-            mabss_decomp_method = "sgd"
             mabss_warm_start_method = None
             mabss_warm_start_epochs = 0
-
-        if has_boss:
-            boss_decomp_method = st.sidebar.selectbox(
-                "BOSS Engine",
-                ["pam_legacy", "pam", "sgd", "adam", "als"],
-                index=0,
-                help="pam_legacy: Pure PyTorch PAM. pam/sgd/adam/als: via cuTensorNetwork.",
-            )
-        else:
-            boss_decomp_method = "pam_legacy"
 
     st.sidebar.markdown("---")
     if policies_to_run:
@@ -397,7 +389,7 @@ if app_mode == "Run New Evaluation":
     exp_src_label = (
         problem_source.lower()[:-1] if problem_source == "Images" else "synthetic"
     )
-    default_run_name = f"exp_{exp_src_label}_{budget}s_{warm_start_epochs}d"
+    default_run_name = f"exp_{}_{exp_src_label}_{budget}s_{warm_start_epochs}d"
     run_name = st.sidebar.text_input("Run Name", value=default_run_name)
 
 
@@ -1295,7 +1287,7 @@ if data_ready:
                         if p_graph.exists():
                             st.image(
                                 str(p_graph),
-                                caption=f"{pol_name.upper()} Structure",
+                                caption=f"{pol_name.upper()}",
                                 use_container_width=True,
                             )
 
