@@ -39,15 +39,17 @@ def _eval_tn(target: Tensor, A_int: Tensor, t_shape: Tensor,
     """Legacy eval using decomp_pam from fctn.py (no cuTN overhead)."""
     cr = _compute_cr(A_int.double(), target.numel())
     best_rse = float("inf")
+    best_recon = None
     t0 = time.time()
     for _ in range(n_runs):
-        rse_traj = decomp_pam(target, A_int, tol=None, iter=maxiter)
-        val = rse_traj[-1].item()
+        losses, recon = decomp_pam(target, A_int, iter=maxiter)
+        val = losses[-1].item() if len(losses) > 0 else float("inf")
         if val < best_rse:
             best_rse = val
+            best_recon = recon
         if best_rse < min_rse:
             break
-    return cr, best_rse, time.time() - t0
+    return cr, best_rse, time.time() - t0, best_recon
 
 
 def _eval_tn_cutn(target, A_int, maxiter, n_runs, min_rse, method="pam",
@@ -61,15 +63,17 @@ def _eval_tn_cutn(target, A_int, maxiter, n_runs, min_rse, method="pam",
     cr = float(ntwrk.network_size()) / float(ntwrk.target_size())
 
     best_rse = float("inf")
+    best_recon = None
     t0 = time.time()
     for _ in range(n_runs):
         losses = ntwrk.decompose(tgt_cp, max_epochs=maxiter, method=method)
         val = float(losses[-1]) if losses else float("inf")
         if val < best_rse:
             best_rse = val
+            best_recon = ntwrk.contract()
         if best_rse < min_rse:
             break
-    return cr, best_rse, time.time() - t0
+    return cr, best_rse, time.time() - t0, best_recon
 
 
 class BOSS:
@@ -142,6 +146,9 @@ class BOSS:
         # Results
         self.rows: list[dict] = []
         self._gp_state = None
+        self.best_recon = None
+        self.best_adj = None
+        self._best_rse = float("inf")
 
     # ------------------------------------------------------------------
     # Public API
@@ -157,7 +164,12 @@ class BOSS:
 
             x_int_flat = self._to_int(cand_std).squeeze(0)
             A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-            cr, rse, runtime = self._evaluate(A_int)
+            cr, rse, runtime, recon = self._evaluate(A_int)
+
+            if rse < self._best_rse:
+                self._best_rse = rse
+                self.best_recon = recon
+                self.best_adj = A_int.cpu()
 
             X = torch.cat([X, cand_std])
             Y_rse = torch.cat([Y_rse, torch.tensor([[rse]])])
@@ -168,7 +180,7 @@ class BOSS:
                 "step": self.n_init + b,
                 "phase": "bo",
                 "cr": cr, "rse": rse, "runtime_s": runtime,
-                "best_rse": Y_rse.min().item(),
+                "best_rse": self._best_rse,
                 "best_cr": Y_cr[Y_rse.argmin()].item(),
             }
             self.rows.append(row)
@@ -226,14 +238,20 @@ class BOSS:
         for i, x in enumerate(X):
             x_int_flat = self._to_int(x.unsqueeze(0)).squeeze(0)  # (D,) int ranks
             A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-            cr, rse, runtime = self._evaluate(A_int)
+            cr, rse, runtime, recon = self._evaluate(A_int)
+            
+            if rse < self._best_rse:
+                self._best_rse = rse
+                self.best_recon = recon
+                self.best_adj = A_int.cpu()
+                
             rse_list.append(rse)
             cr_list.append(cr)
             t_list.append(runtime)
 
             row = {"step": i, "phase": "init", "cr": cr, "rse": rse,
                    "runtime_s": runtime,
-                   "best_rse": min(rse_list),
+                   "best_rse": self._best_rse,
                    "best_cr": cr_list[int(np.argmin(rse_list))]}
             self.rows.append(row)
             if self.verbose:

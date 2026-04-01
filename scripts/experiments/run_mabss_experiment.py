@@ -91,7 +91,13 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.utils import random_adj_matrix, make_problem
+from scripts.utils import (
+    random_adj_matrix,
+    make_problem,
+    save_tensor,
+    save_image,
+    draw_tn_graph,
+)
 from tnss.algo.mabs.env import TNSearchEnv
 from tnss.algo.mabs.encoders import LocalEncoder
 from tnss.algo.mabs.policies import (
@@ -125,8 +131,6 @@ def _entropy(values, k: int) -> float:
     probs = probs[probs > 0]
     h = float(-(probs * np.log(probs)).sum())
     return h / math.log(k)
-
-
 
 
 def check_and_flush_memory(mem_history=None, mem_ui=None, threshold=90.0):
@@ -213,7 +217,7 @@ def run_policy(
     mem_ui=None,
     mem_history=None,
     progress_file=None,
-) -> tuple[dict, list[dict]]:
+) -> tuple[dict, list[dict], cp.ndarray]:
     _seed_all(args.seed)
     env = TNSearchEnv(
         target=target,
@@ -388,7 +392,16 @@ def run_policy(
     summary["stop_reason"] = stop_reason
     summary["stopping_threshold"] = float(args.stopping_threshold)
     summary["A"] = env.adj.copy()
-    return summary, rows
+
+    # Final reconstruction for visualization
+    from tensors.networks.cutensor_network import cuTensorNetwork
+
+    ntwrk = cuTensorNetwork(
+        env.adj, cores=env.cores, backend=env.backend, dtype=env.dtype
+    )
+    best_recon = ntwrk.contract()
+
+    return summary, rows, best_recon
 
 
 def _summarize_policy(rows: list[dict], n_arms: int, budget: int, policy: str) -> dict:
@@ -441,17 +454,33 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--dtype", type=str, default="float32")
     parser.add_argument("--stopping-threshold", type=float, default=1e-5)
-    parser.add_argument("--target-path", type=str, default=None,
-                        help="Path to an image .npz for real-world data experiments")
+    parser.add_argument(
+        "--target-path",
+        type=str,
+        default=None,
+        help="Path to an image .npz for real-world data experiments",
+    )
     parser.add_argument("--deterministic-eval", action="store_true", default=True)
-    parser.add_argument("--decomp-method", type=str, default="sgd",
-                        choices=["sgd", "pam", "als"],
-                        help="Decomposition method: sgd (cuTN-SGD), pam (proximal ALS), als (standard ALS)")
-    parser.add_argument("--warm-start-method", type=str, default=None,
-                        choices=["pam", "als", "sgd"],
-                        help="Optional warm-start decomposition before main method")
-    parser.add_argument("--warm-start-decomp-epochs", type=int, default=0,
-                        help="Number of warm-start iterations (0 = disabled)")
+    parser.add_argument(
+        "--decomp-method",
+        type=str,
+        default="sgd",
+        choices=["sgd", "adam", "pam", "als"],
+        help="sgd=cuTN-SGD, adam=cuTN-Adam, pam=Proximal ALS, als=Standard ALS.",
+    )
+    parser.add_argument(
+        "--warm-start-method",
+        type=str,
+        default=None,
+        choices=["pam", "als", "sgd"],
+        help="Optional warm-start decomposition before main method",
+    )
+    parser.add_argument(
+        "--warm-start-decomp-epochs",
+        type=int,
+        default=0,
+        help="Number of warm-start iterations (0 = disabled)",
+    )
     parser.add_argument(
         "--objective", type=str, default="reward", choices=["reward", "loss"]
     )
@@ -487,13 +516,22 @@ def main() -> None:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Heuristic: If out_dir is a policy subdirectory, save shared target artifacts one level up
+    seed_dir = out_dir.parent if out_dir.name.startswith("mabss_") else out_dir
+
     init_adj, target = make_problem(args)
-    _draw_tn_graph_standalone(
-        init_adj,
-        out_dir / "target_graph.png",
-        f"Synthetic Base [Seed {args.seed}]",
-        node_color="lightblue",
-    )
+
+    # Save target artifacts ONCE at the seed root
+    if not (seed_dir / "target_tensor.npz").exists():
+        save_tensor(seed_dir / "target_tensor.npz", target)
+    if args.target_path and not (seed_dir / "target_image.png").exists():
+        save_image(seed_dir / "target_image.png", target)
+    if not (seed_dir / "target_graph.png").exists():
+        draw_tn_graph(
+            init_adj,
+            seed_dir / "target_graph.png",
+            title="Target Structure",
+        )
 
     import pandas as pd
 
@@ -501,139 +539,52 @@ def main() -> None:
 
     for p in args.policies:
         print(f"[Seed {args.seed}] Running {p}...")
-        summary, rows = run_policy(
+        summary, rows, best_recon = run_policy(
             args, target, policy_str=p, progress_file=progress_file
         )
+
+        # Save reconstruction
+        save_tensor(out_dir / "reconstruction.npz", best_recon)
+        if args.target_path:  # Image experiment
+            save_image(out_dir / "reconstruction.png", best_recon)
+
         for r in rows:
             r["Policy"] = p
             r["Seed"] = args.seed
+        summary["policy"] = p
         summary["Seed"] = args.seed
 
-        _draw_tn_graph_standalone(
+        draw_tn_graph(
             summary["A"],
             out_dir / f"tn_graph_{p}.png",
-            f"[{p.upper()}] Post-Search Topology",
-            node_color=POLICY_COLORS.get(p, "lightblue"),
+            title=f"[{p.upper()}] Post-Search Topology",
         )
 
-        # Each policy call in this script now saves its own local results file 
+        # Each policy call in this script now saves its own local results file
+        # Each policy call in this script now saves its own local results file
         # to prevent overwriting when multiple subprocess calls target the same seed folder.
         df_p = pd.DataFrame(rows)
         if not df_p.empty:
             df_p["cum_regret"] = df_p["regret"].cumsum()
-        df_p.to_csv(out_dir / f"traces_{p}.csv", index=False)
+        df_p.to_csv(out_dir / "traces.csv", index=False)
 
         clean_summary = {k: v for k, v in summary.items() if k != "A"}
-        with open(out_dir / f"summary_{p}.json", "w") as f:
+        with open(out_dir / "summary.json", "w") as f:
             json.dump([clean_summary], f, indent=2)
 
     print(f"[Seed {args.seed}] Done -> {out_dir}")
 
 
-POLICY_COLORS = {
-    "greedy": "#4E79A7",
-    "ucb": "#E15759",
-    "exp3": "#59A14F",
-    "exp4": "#F28E2B",
-}
+def _seed_all(seed: int) -> None:
+    import torch
+    import numpy as np
+    import cupy as cp
 
-
-def _draw_tn_graph_standalone(A, out_path, title, node_color="lightblue"):
-    import networkx as nx
-
-    A_np = cp.asnumpy(A).astype(int)
-    n = A_np.shape[0]
-    G = nx.Graph()
-    for i in range(n):
-        G.add_node(f"C{i}")
-    for i in range(n):
-        for j in range(i + 1, n):
-            if A_np[i, j] > 0:
-                G.add_edge(f"C{i}", f"C{j}", label=str(A_np[i, j]))
-    for i in range(n):
-        if A_np[i, i] > 0:
-            G.add_node(f"P{i}")
-            G.add_edge(f"C{i}", f"P{i}", label=str(A_np[i, i]))
-    core_nodes = [nd for nd in G.nodes() if nd.startswith("C")]
-    pos = nx.circular_layout(core_nodes)
-    for i in range(n):
-        pn = f"P{i}"
-        if pn in G.nodes():
-            v = np.array(pos[f"C{i}"])
-            norm = np.linalg.norm(v)
-            d = np.array([0.0, 1.0]) if norm < 1e-5 else v / norm
-            pos[pn] = pos[f"C{i}"] + d * 0.5
-    fig, ax = plt.subplots(figsize=(8, 7))
-    nx.draw_networkx_nodes(
-        G,
-        pos,
-        nodelist=core_nodes,
-        node_color=node_color,
-        node_size=2500,
-        ax=ax,
-        edgecolors="gray",
-        linewidths=2,
-    )
-    ie = [(u, v) for u, v in G.edges() if u.startswith("C") and v.startswith("C")]
-    ee = [(u, v) for u, v in G.edges() if not (u.startswith("C") and v.startswith("C"))]
-    nx.draw_networkx_edges(
-        G, pos, edgelist=ie, width=3.0, ax=ax, alpha=0.9, edge_color="slategray"
-    )
-    nx.draw_networkx_edges(
-        G,
-        pos,
-        edgelist=ee,
-        width=2.5,
-        ax=ax,
-        style="dashed",
-        alpha=0.5,
-        edge_color="forestgreen",
-    )
-    nx.draw_networkx_labels(
-        G,
-        pos,
-        labels={nd: nd for nd in core_nodes},
-        font_size=15,
-        font_weight="bold",
-        ax=ax,
-    )
-    el = nx.get_edge_attributes(G, "label")
-    nx.draw_networkx_edge_labels(
-        G,
-        pos,
-        edge_labels={e: el[e] for e in ie if e in el},
-        ax=ax,
-        font_color="firebrick",
-        font_size=16,
-        font_weight="bold",
-        rotate=False,
-    )
-    for e in ee:
-        u, v = e
-        if u.startswith("P"):
-            u, v = v, u
-        lbl = el.get((u, v), el.get((v, u), ""))
-        x = pos[u][0] + (pos[v][0] - pos[u][0]) * 0.9
-        y = pos[u][1] + (pos[v][1] - pos[u][1]) * 0.9
-        ax.text(
-            x,
-            y,
-            str(lbl),
-            color="darkgreen",
-            fontsize=15,
-            fontweight="bold",
-            ha="center",
-            va="center",
-            bbox=dict(
-                facecolor="white", edgecolor="none", alpha=0.7, boxstyle="round,pad=0.1"
-            ),
-        )
-    ax.set_aspect("equal")
-    ax.axis("off")
-    ax.set_title(title, fontweight="bold", fontsize=18)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.3)
-    plt.close(fig)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    cp.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 if __name__ == "__main__":

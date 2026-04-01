@@ -46,7 +46,7 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tensors") not in sys.path:
     sys.path.insert(0, str(ROOT / "tensors"))
 
-from scripts.utils import random_adj_matrix, make_problem
+from scripts.utils import random_adj_matrix, make_problem, save_tensor, save_image, draw_tn_graph
 from tnss.algo.boss import BOSS
 
 
@@ -72,8 +72,8 @@ def main():
     parser.add_argument("--acqf",      type=str,   default="ei", choices=["ei", "ucb"])
     parser.add_argument("--ucb-beta",  type=float, default=2.0)
     parser.add_argument("--decomp-method", type=str, default="pam_legacy",
-                        choices=["pam_legacy", "pam", "sgd", "als"],
-                        help="pam_legacy=fctn.py, pam/sgd/als=cuTensorNetwork")
+                        choices=["pam_legacy", "pam", "sgd", "adam", "als"],
+                        help="pam_legacy=fctn.py, pam/sgd/adam/als=cuTensorNetwork")
     parser.add_argument("--out-dir",   type=str,   default="artifacts/debug_boss")
     parser.add_argument("--target-path", type=str, default=None,
                         help="Path to an image .npz for real-world data experiments")
@@ -82,13 +82,29 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Heuristic: If out_dir is a policy subdirectory, save shared target artifacts one level up
+    seed_dir = out_dir.parent if out_dir.name.startswith("boss_") else out_dir
+
     progress_file = out_dir / "progress.json"
 
     _seed_all(args.seed)
 
     print(f"--- BOSS Experiment [Seed {args.seed}] ---")
-    _, target_cp = make_problem(args)
+    init_adj, target_cp = make_problem(args)
     target = torch.from_numpy(cp.asnumpy(target_cp)).to(torch.double)
+    
+    # Save target artifacts ONCE at the seed root
+    if not (seed_dir / "target_tensor.npz").exists():
+        save_tensor(seed_dir / "target_tensor.npz", target)
+    if args.target_path and not (seed_dir / "target_image.png").exists():
+        save_image(seed_dir / "target_image.png", target)
+    if not (seed_dir / "target_graph.png").exists():
+        draw_tn_graph(
+            init_adj,
+            seed_dir / "target_graph.png",
+            title="Target Structure",
+        )
 
     boss = BOSS(
         target,
@@ -109,6 +125,12 @@ def main():
     summary["total_time_s"] = time.time() - t0
     summary["Seed"] = args.seed
 
+    # Save best reconstruction
+    if boss.best_recon is not None:
+        save_tensor(out_dir / "reconstruction.npz", boss.best_recon)
+        if args.target_path: # Image experiment
+             save_image(out_dir / "reconstruction.png", boss.best_recon)
+
     # Persist traces
     df = pd.DataFrame(rows)
     df["Policy"] = f"boss-{args.acqf}"
@@ -117,6 +139,13 @@ def main():
 
     with open(out_dir / "summary.json", "w") as f:
         json.dump([summary], f, indent=2)
+
+    if boss.best_adj is not None:
+        draw_tn_graph(
+            boss.best_adj,
+            out_dir / f"tn_graph_{args.acqf}.png",
+            title=f"[{args.acqf.upper()}] Post-Search Topology",
+        )
 
     res = boss.get_results()
     np.savez(out_dir / "boss_results.npz",

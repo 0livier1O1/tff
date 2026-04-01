@@ -15,6 +15,13 @@ import streamlit as st
 import cupy as cp
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scripts.utils import (
+    random_adj_matrix,
+    make_problem,
+    save_tensor,
+    save_image,
+    draw_tn_graph,
+)
 
 # Force page to wide layout, premium title
 st.set_page_config(page_title="Boss | TNSS Dashboard", layout="wide")
@@ -110,8 +117,10 @@ policies_to_run = []
 run_name = "historical_load"
 
 if app_mode == "Run New Evaluation":
-    st.sidebar.markdown("### Search Context")
-    problem_source = st.sidebar.radio("Problem Source", ["Synthetic", "Images"], horizontal=True)
+    st.sidebar.markdown("### General Settings")
+    problem_source = st.sidebar.radio(
+        "Target Source", ["Synthetic", "Images"], horizontal=True
+    )
 
     target_path = None
     col1, col2 = st.sidebar.columns(2)
@@ -125,7 +134,7 @@ if app_mode == "Run New Evaluation":
             help=r"Total number of discrete cores in the target tensor graph.",
         )
         max_rank = col2.number_input(
-            "Ground Truth Rank",
+            "Synthetic Max Rank",
             min_value=2,
             max_value=15,
             value=6,
@@ -140,111 +149,135 @@ if app_mode == "Run New Evaluation":
                 st.stop()
             selected_img = st.sidebar.selectbox("Select Target Image", img_files)
             target_path = str(img_dir / selected_img)
-            
-            n_cores = col1.selectbox("Cores ($N$)", [4, 6, 8, 10, 12, 16], index=2, help="Reshape image into N cores.")
-            max_rank = col2.number_input("Initialization Rank", min_value=1, max_value=20, value=1, help="Starting rank for the initial search topology.")
+
+            n_cores = col1.selectbox(
+                "Cores ($N$)",
+                [4, 6, 8, 10, 12, 16],
+                index=2,
+                help="Reshape image into N cores.",
+            )
+            # For images, we always start search with Rank 1.
+            max_rank = 1
 
             # Visual Preview
             try:
                 import scripts.utils as utils
                 import importlib
+
                 importlib.reload(utils)
-                
+
                 _, target_cp = utils.load_target_tensor(target_path)
-                
+
                 # If n_cores changed from file default (usually 8), simulate the reshape result
                 if n_cores != target_cp.ndim:
                     img_2d = utils.reconstruct_image(target_cp)
                     target_display = utils.retensorize_image(img_2d, n_cores)
                 else:
                     target_display = target_cp
-                
+
                 st.sidebar.markdown(f"**Shape**: `{target_display.shape}`")
                 with st.sidebar.expander("Show Preview", expanded=False):
-                    img_preview = utils.reconstruct_image(target_cp) # always show original 2D for preview
+                    img_preview = utils.reconstruct_image(
+                        target_cp
+                    )  # always show original 2D for preview
                     st.image(img_preview, use_container_width=True)
             except Exception as e:
                 st.sidebar.warning(f"Could not preview image: {e}")
 
-            st.sidebar.info(f"Re-tensorizing {selected_img} to $N={n_cores}$. Mode sizes are powers of 2 mapping to 256x256 pixels.")
+            st.sidebar.info(
+                f"Re-tensorizing {selected_img} to $N={n_cores}$. Mode sizes are powers of 2 mapping to 256x256 pixels."
+            )
         else:
             st.sidebar.error("data/images directory not found.")
             st.stop()
 
+    seeds_default = "1, 2, 3" if problem_source == "Synthetic" else "1"
     seeds_str = st.sidebar.text_input(
         "Random Seeds (csv)",
-        "1, 2, 3",
+        seeds_default,
         help="Comma-separated string defining execution iteration arrays.",
     )
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### Execution Settings")
-    budget = st.sidebar.slider(
-        "Steps Budget",
-        min_value=1,
-        max_value=50,
-        value=15,
-        help="Number of topological search steps (MABSS) or BO evaluations (BOSS).",
-    )
-    warm_start_epochs = st.sidebar.slider(
-        "Decomp Epochs",
-        min_value=10,
-        max_value=400,
-        value=60,
-        step=10,
-        help="Epochs for each local tensor decomposition evaluation.",
-    )
-    max_edge_rank = st.sidebar.number_input(
-        "Max Edge Rank Limit",
-        value=10,
-        help=r"Global search constraint: The maximal allowed bond dimension $\chi$ for any edge in the network.",
-    )
-    policies_to_run = st.sidebar.multiselect(
-        "Active Policies",
-        [
-            "mabss-greedy",
-            "mabss-ucb",
-            "mabss-exp3",
-            "mabss-exp4",
-            "boss-ei",
-            "boss-ucb",
-        ],
-        default=["mabss-greedy", "mabss-exp4"],
-        help="Search algorithms: `mabss-*` are sequential bandit rank-increment policies; `boss-*` are global BO structure search.",
-    )
-    has_mabss = any(p.startswith("mabss-") for p in policies_to_run)
-    has_boss = any(p.startswith("boss-") for p in policies_to_run)
-
-    if has_mabss:
-        mabss_decomp_method = st.sidebar.selectbox(
-            "MABSS Decomposition",
-            ["sgd", "pam", "als"],
-            index=0,
-            help="sgd: cuTN-SGD (default, gradient-based). pam: Proximal ALS. als: Standard ALS.",
+    st.sidebar.markdown("#### Algorithm Settings")
+    with st.sidebar.container():
+        budget = st.sidebar.slider(
+            "Steps Budget",
+            min_value=1,
+            max_value=50,
+            value=15,
+            help="Number of topological search steps (MABSS) or BO evaluations (BOSS).",
         )
-        ws_col1, ws_col2 = st.sidebar.columns(2)
-        mabss_warm_start_method = ws_col1.selectbox(
-            "Warm Start",
-            ["None", "pam", "als"],
-            index=0,
-            help="Run a fast decomposition first to initialize cores before the main method.",
+        policies_to_run = st.sidebar.multiselect(
+            "Active Policies",
+            [
+                "mabss-greedy",
+                "mabss-ucb",
+                "mabss-exp3",
+                "mabss-exp4",
+                "boss-ei",
+                "boss-ucb",
+            ],
+            default=["mabss-greedy", "mabss-exp4"],
+            help="Search algorithms: `mabss-*` are sequential bandit rank-increment policies; `boss-*` are global BO structure search.",
         )
-        if mabss_warm_start_method == "None":
-            mabss_warm_start_method = None
-        mabss_warm_start_epochs = ws_col2.number_input(
-            "Warm Iters",
-            value=0,
-            min_value=0,
+        max_edge_rank = st.sidebar.number_input(
+            "Max Search Rank (Hard Limit)",
+            min_value=2,
+            max_value=100,
+            value=10,
+            help=r"Global search constraint: The maximal allowed bond dimension $\chi$ for any edge in the network.",
+        )
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("#### Decomposition Settings")
+    with st.sidebar.container():
+        warm_start_epochs = st.sidebar.slider(
+            "Decomp Epochs",
+            min_value=10,
+            max_value=400,
+            value=60,
             step=10,
-            help="Number of warm-start iterations (0 = disabled).",
+            help="Epochs for each local tensor decomposition evaluation.",
         )
-    if has_boss:
-        boss_decomp_method = st.sidebar.selectbox(
-            "BOSS Decomposition",
-            ["pam_legacy", "pam", "sgd", "als"],
-            index=0,
-            help="pam_legacy: Pure PyTorch PAM (no cuTN overhead, default). pam/sgd/als: via cuTensorNetwork.",
-        )
+
+        has_mabss = any(p.startswith("mabss-") for p in policies_to_run)
+        has_boss = any(p.startswith("boss-") for p in policies_to_run)
+
+        if has_mabss:
+            mabss_decomp_method = st.sidebar.selectbox(
+                "MABSS Engine",
+                ["sgd", "adam", "pam", "als"],
+                index=0,
+                help="sgd: cuTN-SGD. adam: cuTN-Adam. pam: Proximal ALS. als: Standard ALS.",
+            )
+            ws_col1, ws_col2 = st.sidebar.columns(2)
+            mabss_warm_start_method = ws_col1.selectbox(
+                "Warm Start",
+                ["None", "pam", "als"],
+                index=0,
+            )
+            if mabss_warm_start_method == "None":
+                mabss_warm_start_method = None
+            mabss_warm_start_epochs = ws_col2.number_input(
+                "Warm Iters",
+                value=0,
+                min_value=0,
+                step=10,
+            )
+        else:
+            mabss_decomp_method = "sgd"
+            mabss_warm_start_method = None
+            mabss_warm_start_epochs = 0
+
+        if has_boss:
+            boss_decomp_method = st.sidebar.selectbox(
+                "BOSS Engine",
+                ["pam_legacy", "pam", "sgd", "adam", "als"],
+                index=0,
+                help="pam_legacy: Pure PyTorch PAM. pam/sgd/adam/als: via cuTensorNetwork.",
+            )
+        else:
+            boss_decomp_method = "pam_legacy"
 
     st.sidebar.markdown("---")
     if policies_to_run:
@@ -354,7 +387,10 @@ if app_mode == "Run New Evaluation":
                     )
 
     st.sidebar.markdown("### Storage Options")
-    run_name = st.sidebar.text_input("Run Name", value="streamlit_experiment")
+    # exp_{synthetic/image}_{budget}s_{epochs}d
+    exp_src_label = problem_source.lower()[:-1] if problem_source == "Images" else "synthetic"
+    default_run_name = f"exp_{exp_src_label}_{budget}s_{warm_start_epochs}d"
+    run_name = st.sidebar.text_input("Run Name", value=default_run_name)
 
 
 def get_args():
@@ -407,6 +443,23 @@ POLICY_COLORS = {
 }
 
 
+def get_policy_color(name: str):
+    """Robust color lookup for policy naming variations."""
+    if not name:
+        return "#888888"
+    n = name.lower().replace("_", "-")
+    if n in POLICY_COLORS:
+        return POLICY_COLORS[n]
+    # Map short names back to standard colors
+    for suffix in ["greedy", "ucb", "exp3", "exp4", "ei"]:
+        if n.endswith(suffix):
+            # Find the first key that ends with this suffix
+            for k in POLICY_COLORS:
+                if k.endswith(suffix):
+                    return POLICY_COLORS[k]
+    return "#888888"
+
+
 def _load_artifact(out_dir: Path):
     """Load results from all seed_*/policy_name/ subdirs.
     Falls back to flat seed_*/traces.csv for legacy runs."""
@@ -420,183 +473,41 @@ def _load_artifact(out_dir: Path):
         pol_dirs = [d for d in seed_d.iterdir() if d.is_dir()]
         for pol_d in sorted(pol_dirs):
             pol_name = pol_d.name.replace("_", "-")  # boss_ei -> boss-ei
-            if (pol_d / "traces.csv").exists():
-                df_p = pd.read_csv(pol_d / "traces.csv")
+
+            # Strict lookup for traces.csv and summary.json
+            t_path = pol_d / "traces.csv"
+            if not t_path.exists():
+                # Fallback to single match for traces_*.csv if renamed during run
+                t_files = list(pol_d.glob("traces*.csv"))
+                if t_files:
+                    t_path = t_files[0]
+                else:
+                    t_path = None
+
+            if t_path and t_path.exists():
+                df_p = pd.read_csv(t_path)
                 df_p["Policy"] = pol_name
                 df_p["Seed"] = seed_val
                 traces.append(df_p)
-            if (pol_d / "summary.json").exists():
-                with open(pol_d / "summary.json") as f:
+
+            s_path = pol_d / "summary.json"
+            if not s_path.exists():
+                s_files = list(pol_d.glob("summary*.json"))
+                if s_files:
+                    s_path = s_files[0]
+                else:
+                    s_path = None
+
+            if s_path and s_path.exists():
+                with open(s_path) as f:
                     for s in json.load(f):
                         s["Seed"] = seed_val
                         s["policy"] = pol_name
                         summaries.append(s)
 
-        # Legacy flat layout: seed_1/traces.csv
-        if not pol_dirs and (seed_d / "traces.csv").exists():
-            df_s = pd.read_csv(seed_d / "traces.csv")
-            df_s["Seed"] = seed_val
-            traces.append(df_s)
-        if not pol_dirs and (seed_d / "summary.json").exists():
-            with open(seed_d / "summary.json") as f:
-                for s in json.load(f):
-                    s["Seed"] = seed_val
-                    summaries.append(s)
-
     if not traces:
         return None, []
     return pd.concat(traces, ignore_index=True), summaries
-
-
-def draw_tn_graph(A, out_path, title):
-    import cupy as cp
-
-    A_np = cp.asnumpy(A).astype(int)
-    n_cores = A_np.shape[0]
-
-    G = nx.Graph()
-    for i in range(n_cores):
-        G.add_node(f"C{i}", color="lightblue")
-
-    for i in range(n_cores):
-        for j in range(i + 1, n_cores):
-            rank = A_np[i, j]
-            if rank > 0:
-                G.add_edge(f"C{i}", f"C{j}", label=str(rank), style="solid")
-
-    for i in range(n_cores):
-        dim = A_np[i, i]
-        if dim > 0:
-            p_node = f"P{i}"
-            G.add_node(p_node, color="lightgreen")
-            G.add_edge(f"C{i}", p_node, label=str(dim), style="dashed")
-
-    # 1. We rigidly establish mathematically perfect geometric symmetry for the Cores
-    core_nodes = [n for n in G.nodes() if str(n).startswith("C")]
-    pos = nx.circular_layout(core_nodes)
-
-    # 2. Vector projections: physical arms strictly project radially out from their core to prevent tangles
-    import numpy as np
-
-    for i in range(n_cores):
-        core = f"C{i}"
-        p_node = f"P{i}"
-        if p_node in G.nodes():
-            v = np.array(pos[core])
-            norm = np.linalg.norm(v)
-            v_dir = np.array([0.0, 1.0]) if norm < 1e-5 else v / norm
-            # Place dangling node exactly 0.5 units away straight outward
-            pos[p_node] = pos[core] + v_dir * 0.5
-
-    fig_g, ax_g = plt.subplots(figsize=(8, 7))
-
-    # Draw exclusively the cores (massive hardware nodes)
-    nx.draw_networkx_nodes(
-        G,
-        pos,
-        nodelist=core_nodes,
-        node_color="lightblue",
-        node_size=2500,
-        ax=ax_g,
-        edgecolors="gray",
-        linewidths=2,
-    )
-
-    # Segregate tensor dimension links
-    internal_edges = [
-        (u, v)
-        for u, v in G.edges()
-        if str(u).startswith("C") and str(v).startswith("C")
-    ]
-    external_edges = [
-        (u, v)
-        for u, v in G.edges()
-        if not (str(u).startswith("C") and str(v).startswith("C"))
-    ]
-
-    # Render edges
-    nx.draw_networkx_edges(
-        G,
-        pos,
-        edgelist=internal_edges,
-        width=3.0,
-        ax=ax_g,
-        alpha=0.9,
-        edge_color="slategray",
-    )
-    nx.draw_networkx_edges(
-        G,
-        pos,
-        edgelist=external_edges,
-        width=2.5,
-        ax=ax_g,
-        style="dashed",
-        alpha=0.5,
-        edge_color="forestgreen",
-    )
-
-    # Massive Core labels
-    nx.draw_networkx_labels(
-        G,
-        pos,
-        labels={n: n for n in core_nodes},
-        font_size=15,
-        font_weight="bold",
-        ax=ax_g,
-    )
-
-    # Internal learned Ranks (red)
-    internal_labels = {
-        e: nx.get_edge_attributes(G, "label")[e]
-        for e in internal_edges
-        if e in nx.get_edge_attributes(G, "label")
-    }
-    nx.draw_networkx_edge_labels(
-        G,
-        pos,
-        edge_labels=internal_labels,
-        ax=ax_g,
-        font_color="firebrick",
-        font_size=16,
-        font_weight="bold",
-        label_pos=0.5,
-        rotate=False,
-    )
-
-    # Physical standard dimensions (green text explicit geometry bounding)
-    edge_attr = nx.get_edge_attributes(G, "label")
-    for e in external_edges:
-        u, v = e
-        if str(u).startswith("P"):
-            u, v = v, u  # Mandate vector u (core) -> v (dangling)
-        label = edge_attr.get((u, v), edge_attr.get((v, u), ""))
-
-        # Explicitly peg to exactly 90% along the visible radius outwards
-        x = pos[u][0] + (pos[v][0] - pos[u][0]) * 0.90
-        y = pos[u][1] + (pos[v][1] - pos[u][1]) * 0.90
-
-        # Draw with a slight alpha white backdrop so lines don't strike through integers
-        ax_g.text(
-            x,
-            y,
-            str(label),
-            color="darkgreen",
-            fontsize=15,
-            fontweight="bold",
-            ha="center",
-            va="center",
-            bbox=dict(
-                facecolor="white", edgecolor="none", alpha=0.7, boxstyle="round,pad=0.1"
-            ),
-        )
-
-    ax_g.set_aspect("equal")
-    ax_g.axis("off")
-    ax_g.set_title(title, fontweight="bold", fontsize=18)
-    plt.tight_layout()
-    # Apply generous padding to prevent radial labels cutting off
-    plt.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.3)
-    plt.close(fig_g)
 
 
 # --- EXECUTION OR LOAD PIPELINE ---
@@ -725,10 +636,14 @@ if app_mode == "Run New Evaluation":
             if learn_noise:
                 cmd.append("--learn-noise")
             if mabss_warm_start_method and mabss_warm_start_epochs > 0:
-                cmd.extend([
-                    "--warm-start-method", mabss_warm_start_method,
-                    "--warm-start-decomp-epochs", str(mabss_warm_start_epochs),
-                ])
+                cmd.extend(
+                    [
+                        "--warm-start-method",
+                        mabss_warm_start_method,
+                        "--warm-start-decomp-epochs",
+                        str(mabss_warm_start_epochs),
+                    ]
+                )
             if target_path:
                 cmd.extend(["--target-path", target_path])
             return cmd
@@ -777,6 +692,22 @@ if app_mode == "Run New Evaluation":
         for idx, seed in enumerate(seeds):
             seed_dir = out_dir / f"seed_{seed}"
             seed_dir.mkdir(exist_ok=True)
+
+            # Pre-save target artifacts at the seed level (shared by all policies)
+            from scripts.utils import make_problem, save_tensor, save_image
+
+            _class_args = argparse.Namespace(
+                n_cores=n_cores,
+                max_rank=max_rank,
+                target_path=target_path,
+                dtype="float32",
+                seed=seed,
+            )
+            _, target = make_problem(_class_args)
+
+            save_tensor(seed_dir / "target_tensor.npz", target)
+            if problem_source == "Images":
+                save_image(seed_dir / "target_image.png", target)
 
             for p in policies_to_run:
                 pol_dir = seed_dir / p.replace("-", "_")
@@ -923,13 +854,13 @@ if app_mode == "Run New Evaluation":
             with open(seed_dir / ".done", "w") as f:
                 f.write("ok")
 
-        # Bubble up
-        df_rows = pd.DataFrame(all_traces)
-        summaries = all_summaries
+        # Bubble up and persist to session state for immediate rendering
+        st.session_state["df_rows"] = pd.DataFrame(all_traces)
+        st.session_state["summaries"] = all_summaries
+        st.session_state["loaded_run"] = run_name
 
         progress_bar.progress(100, text="All tasks completed.")
         st.sidebar.success(f"Artifacts dumped to `artifacts/{run_name}`")
-        st.session_state["loaded_run"] = run_name
         data_ready = True
 else:
     # LOAD PAST ARTIFACT MODE
@@ -1018,7 +949,7 @@ else:
             st.sidebar.markdown("### Static Configuration")
             c1, c2 = st.sidebar.columns(2)
             c1.metric("Cores ($N$)", cfg.get("n_cores", "-"))
-            c2.metric("Target Rank", cfg.get("max_rank", "-"))
+            c2.metric("Max Search Rank", cfg.get("max_edge_rank", "-"))
             b1, b2 = st.sidebar.columns(2)
             b1.metric("Steps Budget", cfg.get("budget", "-"))
             b2.metric("Decomp Epochs", cfg.get("warm_start_epochs", "-"))
@@ -1046,6 +977,12 @@ if (
 
 # --- UNIFIED RENDERING PHASE ---
 if data_ready:
+    # Pull from locals or session state
+    if "df_rows" not in locals() or df_rows is None:
+        df_rows = st.session_state.get("df_rows", pd.DataFrame())
+    if "summaries" not in locals() or summaries is None:
+        summaries = st.session_state.get("summaries", [])
+
     if "df_summary" not in locals():
         df_summary = pd.DataFrame(summaries)
 
@@ -1203,6 +1140,7 @@ if data_ready:
             import numpy as np
 
             seed_summaries = [s for s in summaries if s.get("Seed") == seed]
+            pol_names = [s["policy"] for s in seed_summaries]
             s_dir = (
                 out_dir / f"seed_{seed}"
                 if (out_dir / f"seed_{seed}").exists()
@@ -1245,11 +1183,11 @@ if data_ready:
                 df_sum["Arm Entropy"] = df_sum["Arm Entropy"].round(3)
 
                 def _style_row(row):
-                    c = POLICY_COLORS.get(row["Policy"].lower(), "#888888")
-                    light = c + "22"
+                    c = get_policy_color(row["Policy"])
+                    light = c + "15"  # Even lighter for better readability
                     styles = [f"background-color: {light}"] * len(row)
                     styles[0] = (
-                        f"background-color: {c}; color: white; font-weight: bold"
+                        f"background-color: {c}; color: white; font-weight: bold; padding-left: 10px;"
                     )
                     return styles
 
@@ -1258,40 +1196,160 @@ if data_ready:
                     hide_index=True,
                     use_container_width=True,
                 )
-
             st.divider()
 
-            # --- Topology Grids ---
-            st.markdown("#### Topology Grids")
-            _, tc, _ = st.columns([2, 2, 2])
-            if (s_dir / "target_graph.png").exists():
-                tc.image(
-                    str(s_dir / "target_graph.png"),
-                    caption="Synthetic Base",
-                    use_container_width=True,
-                )
+            # --- Qualitative Analysis (Visual Fidelity & Topology) ---
+            st.markdown("#### Visualizing Tensor and Topology")
 
-            pol_names = [s["policy"] for s in seed_summaries]
-            if pol_names:
-                if len(pol_names) == 1:
-                    _, pcenter, _ = st.columns([2, 2, 2])
-                    p_path = s_dir / f"tn_graph_{pol_names[0]}.png"
-                    if p_path.exists():
-                        pcenter.image(
-                            str(p_path),
-                            caption=pol_names[0].upper(),
-                            use_container_width=True,
-                        )
-                else:
-                    pcols = st.columns(len(pol_names))
-                    for pcol, pol_name in zip(pcols, pol_names):
-                        p_path = s_dir / f"tn_graph_{pol_name}.png"
-                        if p_path.exists():
-                            pcol.image(
-                                str(p_path),
+            # Ground Truth / Target indicators (with nested search)
+            target_img_path = s_dir / "target_image.png"
+            target_graph_path = s_dir / "target_graph.png"
+
+            # Peek into policy subdirs if top-level missing (common with isolated runner calls)
+            if not target_graph_path.exists() and pol_names:
+                for p_name in pol_names:
+                    p_base = p_name.replace("-", "_")
+                    for pfx in ["", "mabss_", "boss_"]:
+                        cand = s_dir / f"{pfx}{p_base}" / "target_graph.png"
+                        if cand.exists():
+                            target_graph_path = cand
+                            break
+                    if target_graph_path.exists():
+                        break
+
+            if not target_img_path.exists() and pol_names:
+                for p_name in pol_names:
+                    p_base = p_name.replace("-", "_")
+                    for pfx in ["", "mabss_", "boss_"]:
+                        cand = s_dir / f"{pfx}{p_base}" / "target_image.png"
+                        if cand.exists():
+                            target_img_path = cand
+                            break
+                    if target_img_path.exists():
+                        break
+
+            has_gt_img = target_img_path.exists()
+            has_gt_graph = target_graph_path.exists()
+
+            if has_gt_img and pol_names:
+                # --- IMAGE MODE LAYOUT ---
+                n_cols = len(pol_names) + 1
+                row1 = st.columns(n_cols)
+
+                # 1. Target Image
+                with row1[0]:
+                    st.image(
+                        str(target_img_path), caption="Target", use_container_width=True
+                    )
+
+                # 2. Reconstructions (Row 1)
+                for i, pol_name in enumerate(pol_names):
+                    p_base = pol_name.replace("-", "_")
+                    p_subdir = s_dir / p_base
+                    if not p_subdir.exists():
+                        # Standard fallbacks for naming inconsistencies
+                        for pfx in ["mabss_", "boss_"]:
+                            if (s_dir / f"{pfx}{p_base}").exists():
+                                p_subdir = s_dir / f"{pfx}{p_base}"
+                                break
+
+                    p_img = p_subdir / "reconstruction.png"
+                    if not p_img.exists():
+                        p_img = s_dir / f"reconstruction_{p_base}.png"
+
+                    with row1[i + 1]:
+                        if p_img.exists():
+                            st.image(
+                                str(p_img),
                                 caption=pol_name.upper(),
                                 use_container_width=True,
                             )
+                        else:
+                            st.info(f"No {pol_name} recon")
+
+                # 3. Topology Row (Row 2)
+                st.markdown("<br>", unsafe_allow_html=True)  # Subtle spacer
+                row2 = st.columns(n_cols)
+                # row2[0] is empty (Target does not have a discovered TN)
+
+                for i, pol_name in enumerate(pol_names):
+                    p_base = pol_name.replace("-", "_")
+                    p_subdir = s_dir / p_base
+                    if not p_subdir.exists():
+                        for pfx in ["mabss_", "boss_"]:
+                            if (s_dir / f"{pfx}{p_base}").exists():
+                                p_subdir = s_dir / f"{pfx}{p_base}"
+                                break
+
+                    p_graph = p_subdir / f"tn_graph_{pol_name}.png"
+                    if not p_graph.exists():
+                        short_p = pol_name.split("-")[-1]
+                        # Try short-name / underscore variations
+                        for cand in [
+                            f"tn_graph_{short_p}.png",
+                            f"tn_graph_{p_base}.png",
+                        ]:
+                            if (p_subdir / cand).exists():
+                                p_graph = p_subdir / cand
+                                break
+
+                    with row2[i + 1]:
+                        if p_graph.exists():
+                            st.image(
+                                str(p_graph),
+                                caption=f"{pol_name.upper()} Structure",
+                                use_container_width=True,
+                            )
+
+            else:
+                # --- SYNTHETIC MODE LAYOUT ---
+                # Row 1: Target in the middle
+                if has_gt_graph:
+                    t_c1, t_c2, t_c3 = st.columns([1, 2, 1])
+                    with t_c2:
+                        st.image(
+                            str(target_graph_path),
+                            caption="Target Ground Truth Structure",
+                            use_container_width=True,
+                        )
+
+                # Row 2: Policy findings side-by-side
+                if pol_names:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    n_pols = len(pol_names)
+                    p_cols = st.columns(n_pols)
+                    for i, pol_name in enumerate(pol_names):
+                        p_base = pol_name.replace("-", "_")
+                        p_subdir = s_dir / p_base
+                        if not p_subdir.exists():
+                            for pfx in ["mabss_", "boss_"]:
+                                if (s_dir / f"{pfx}{p_base}").exists():
+                                    p_subdir = s_dir / f"{pfx}{p_base}"
+                                    break
+
+                        p_graph = p_subdir / f"tn_graph_{pol_name}.png"
+                        if not p_graph.exists():
+                            short_p = pol_name.split("-")[-1]
+                            for cand in [
+                                f"tn_graph_{short_p}.png",
+                                f"tn_graph_{p_base}.png",
+                            ]:
+                                if (p_subdir / cand).exists():
+                                    p_graph = p_subdir / cand
+                                    break
+                                elif (s_dir / cand).exists():
+                                    p_graph = s_dir / cand
+                                    break
+
+                        with p_cols[i]:
+                            if p_graph.exists():
+                                st.image(
+                                    str(p_graph),
+                                    caption=f"Found: {pol_name.upper()}",
+                                    use_container_width=True,
+                                )
+                            else:
+                                st.info(f"No {pol_name} structure")
 
             st.divider()
 
@@ -1300,7 +1358,7 @@ if data_ready:
             for s in seed_summaries:
                 pol_name = s["policy"]
                 pol_upper = pol_name.upper()
-                c = POLICY_COLORS.get(pol_name, "#888888")
+                c = get_policy_color(pol_name)
                 sub = seed_df[seed_df["Policy"] == pol_name]
                 if sub.empty:
                     continue

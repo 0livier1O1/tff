@@ -18,6 +18,7 @@ class TNSearchEnv:
         stopping_threshold: float = 1e-5,
         deterministic_eval: bool = True,
         seed: int = 0,
+        **kwargs,
     ):
         self.target = target
         self.Z_dim = cp.asarray(target.shape)
@@ -28,6 +29,8 @@ class TNSearchEnv:
         self.stopping_threshold = stopping_threshold
         self.deterministic_eval = deterministic_eval
         self.decomp_method = kwargs.get("decomp_method", "sgd")
+        self.warm_start_method = kwargs.get("warm_start_method", None)
+        self.warm_start_decomp_epochs = kwargs.get("warm_start_decomp_epochs", 0)
         self.seed = int(seed)
 
         k = len(self.Z_dim)
@@ -102,7 +105,12 @@ class TNSearchEnv:
         cores[j] = increment_mode_rank(cores[j], i)
 
         ntwrk = cuTensorNetwork(A, cores=cores, backend=self.backend, dtype=self.dtype)
-        decomp_losses = ntwrk.decompose(self.target, max_epochs=self.warm_start_epochs, method=self.decomp_method)
+        decomp_losses = ntwrk.decompose(
+            self.target, max_epochs=self.warm_start_epochs,
+            method=self.decomp_method,
+            warm_start_method=self.warm_start_method,
+            warm_start_epochs=self.warm_start_decomp_epochs,
+        )
         losses = torch.tensor(decomp_losses, dtype=torch.double).cpu()
 
         if inplace:

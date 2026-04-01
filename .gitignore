@@ -11,3 +11,4 @@ refs/
 artifacts/
 reports/
 .claude/
+decomp_tests/
