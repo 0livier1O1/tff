@@ -114,21 +114,22 @@ if app_mode == "Run New Evaluation":
     problem_source = st.sidebar.radio("Problem Source", ["Synthetic", "Images"], horizontal=True)
 
     target_path = None
+    col1, col2 = st.sidebar.columns(2)
+
     if problem_source == "Synthetic":
-        col1, col2 = st.sidebar.columns(2)
         n_cores = col1.number_input(
             "Cores ($N$)",
             min_value=3,
             max_value=8,
             value=5,
-            help=r"Total number of discrete cores in the dynamically synthesized tensor graph $\mathcal{G}_{target}$.",
+            help=r"Total number of discrete cores in the target tensor graph.",
         )
         max_rank = col2.number_input(
-            "Target Rank",
+            "Ground Truth Rank",
             min_value=2,
             max_value=15,
             value=6,
-            help=r"Optimal bond dimension limit bounding $\chi$.",
+            help=r"Rank of the synthetic 'goal' tensor. The algorithm will try to find this complexity.",
         )
     else:
         img_dir = Path("data/images")
@@ -139,9 +140,33 @@ if app_mode == "Run New Evaluation":
                 st.stop()
             selected_img = st.sidebar.selectbox("Select Target Image", img_files)
             target_path = str(img_dir / selected_img)
-            st.sidebar.info(f"Using {selected_img}. Cores and rank will be inferred.")
-            n_cores = 5  # dummy for UI consistency
-            max_rank = 6 # dummy for UI consistency
+            
+            n_cores = col1.selectbox("Cores ($N$)", [4, 6, 8, 10, 12, 16], index=2, help="Reshape image into N cores.")
+            max_rank = col2.number_input("Initialization Rank", min_value=1, max_value=20, value=1, help="Starting rank for the initial search topology.")
+
+            # Visual Preview
+            try:
+                import scripts.utils as utils
+                import importlib
+                importlib.reload(utils)
+                
+                _, target_cp = utils.load_target_tensor(target_path)
+                
+                # If n_cores changed from file default (usually 8), simulate the reshape result
+                if n_cores != target_cp.ndim:
+                    img_2d = utils.reconstruct_image(target_cp)
+                    target_display = utils.retensorize_image(img_2d, n_cores)
+                else:
+                    target_display = target_cp
+                
+                st.sidebar.markdown(f"**Shape**: `{target_display.shape}`")
+                with st.sidebar.expander("Show Preview", expanded=False):
+                    img_preview = utils.reconstruct_image(target_cp) # always show original 2D for preview
+                    st.image(img_preview, use_container_width=True)
+            except Exception as e:
+                st.sidebar.warning(f"Could not preview image: {e}")
+
+            st.sidebar.info(f"Re-tensorizing {selected_img} to $N={n_cores}$. Mode sizes are powers of 2 mapping to 256x256 pixels.")
         else:
             st.sidebar.error("data/images directory not found.")
             st.stop()
@@ -159,7 +184,7 @@ if app_mode == "Run New Evaluation":
         min_value=1,
         max_value=50,
         value=15,
-        help="Exploration bounds $T$ halting the search constraints.",
+        help="Number of topological search steps (MABSS) or BO evaluations (BOSS).",
     )
     warm_start_epochs = st.sidebar.slider(
         "Decomp Epochs",
@@ -167,12 +192,12 @@ if app_mode == "Run New Evaluation":
         max_value=400,
         value=60,
         step=10,
-        help="Convergence epochs explicitly allocated for $Q_{\text{warm}}$ local heuristic tensor factorization priors.",
+        help="Epochs for each local tensor decomposition evaluation.",
     )
     max_edge_rank = st.sidebar.number_input(
         "Max Edge Rank Limit",
         value=10,
-        help=r"Theoretical continuous upper bound strictly clipping dimensional feature arrays $\chi_{\text{max}}$.",
+        help=r"Global search constraint: The maximal allowed bond dimension $\chi$ for any edge in the network.",
     )
     policies_to_run = st.sidebar.multiselect(
         "Active Policies",
