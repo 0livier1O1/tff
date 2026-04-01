@@ -97,6 +97,7 @@ from scripts.utils import (
     save_tensor,
     save_image,
     draw_tn_graph,
+    POLICY_COLORS,
 )
 from tnss.algo.mabs.env import TNSearchEnv
 from tnss.algo.mabs.encoders import LocalEncoder
@@ -558,9 +559,9 @@ def main() -> None:
             summary["A"],
             out_dir / f"tn_graph_{p}.png",
             title=f"[{p.upper()}] Post-Search Topology",
+            node_color=POLICY_COLORS.get(f"mabss-{p}", "#888888"),
         )
 
-        # Each policy call in this script now saves its own local results file
         # Each policy call in this script now saves its own local results file
         # to prevent overwriting when multiple subprocess calls target the same seed folder.
         df_p = pd.DataFrame(rows)

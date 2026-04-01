@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Union
+import math
 import numpy as np
 import cupy as cp
 import torch
@@ -11,6 +12,15 @@ import networkx as nx
 
 from tnss.utils import triu_to_adj_matrix
 from botorch.utils.transforms import unnormalize
+
+POLICY_COLORS = {
+    "mabss-greedy": "#4E79A7",
+    "mabss-ucb": "#E15759",
+    "mabss-exp3": "#59A14F",
+    "mabss-exp4": "#F28E2B",
+    "boss-ei": "#9467BD",
+    "boss-ucb": "#8C564B",
+}
 
 
 def draw_tn_graph(A, out_path, title, node_color="lightblue"):
@@ -40,18 +50,23 @@ def draw_tn_graph(A, out_path, title, node_color="lightblue"):
             G.add_edge(f"C{i}", pn, label=str(A_np[i, i]))
 
     core_nodes = [nd for nd in G.nodes() if nd.startswith("C")]
-    pos = nx.circular_layout(core_nodes)
 
-    # Position physical nodes "outside" the circle
+    # Place C0 at 12 o'clock, remaining nodes clockwise
+    pos = {}
+    for i in range(n):
+        angle = math.pi / 2 - 2 * math.pi * i / n
+        pos[f"C{i}"] = np.array([math.cos(angle), math.sin(angle)])
+
+    # Position physical nodes radially outside their core node
     for i in range(n):
         pn = f"P{i}"
         if pn in G.nodes():
-            v = np.array(pos[f"C{i}"])
+            v = pos[f"C{i}"]
             norm = np.linalg.norm(v)
             d = np.array([0.0, 1.0]) if norm < 1e-5 else v / norm
             pos[pn] = pos[f"C{i}"] + d * 0.5
 
-    fig, ax = plt.subplots(figsize=(8, 7))
+    fig, ax = plt.subplots(figsize=(8, 8))
     nx.draw_networkx_nodes(
         G,
         pos,
@@ -77,16 +92,8 @@ def draw_tn_graph(A, out_path, title, node_color="lightblue"):
         width=2.5,
         ax=ax,
         style="dashed",
-        alpha=0.5,
+        alpha=0.75,
         edge_color="forestgreen",
-    )
-    nx.draw_networkx_labels(
-        G,
-        pos,
-        labels={nd: nd for nd in core_nodes},
-        font_size=22,
-        font_weight="bold",
-        ax=ax,
     )
 
     el = nx.get_edge_attributes(G, "label")

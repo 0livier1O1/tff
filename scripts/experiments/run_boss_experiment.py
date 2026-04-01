@@ -46,7 +46,14 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tensors") not in sys.path:
     sys.path.insert(0, str(ROOT / "tensors"))
 
-from scripts.utils import random_adj_matrix, make_problem, save_tensor, save_image, draw_tn_graph
+from scripts.utils import (
+    random_adj_matrix,
+    make_problem,
+    save_tensor,
+    save_image,
+    draw_tn_graph,
+    POLICY_COLORS,
+)
 from tnss.algo.boss import BOSS
 
 
@@ -60,24 +67,32 @@ def _seed_all(seed: int) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n-cores",   type=int,   default=5)
-    parser.add_argument("--max-rank",  type=int,   default=6)
-    parser.add_argument("--seed",      type=int,   default=1)
-    parser.add_argument("--budget",    type=int,   default=20)
-    parser.add_argument("--n-init",    type=int,   default=10)
-    parser.add_argument("--max-bond",  type=int,   default=10)
-    parser.add_argument("--min-rse",   type=float, default=0.01)
-    parser.add_argument("--maxiter-tn",type=int,   default=1000)
-    parser.add_argument("--n-runs",    type=int,   default=1)
-    parser.add_argument("--acqf",      type=str,   default="ei", choices=["ei", "ucb"])
-    parser.add_argument("--ucb-beta",  type=float, default=2.0)
-    parser.add_argument("--decomp-method", type=str, default="pam_legacy",
-                        choices=["pam_legacy", "pam", "sgd", "adam", "als"],
-                        help="pam_legacy=fctn.py, pam/sgd/adam/als=cuTensorNetwork")
-    parser.add_argument("--out-dir",   type=str,   default="artifacts/debug_boss")
-    parser.add_argument("--target-path", type=str, default=None,
-                        help="Path to an image .npz for real-world data experiments")
-    parser.add_argument("--dtype",     type=str,   default="float32")
+    parser.add_argument("--n-cores", type=int, default=5)
+    parser.add_argument("--max-rank", type=int, default=6)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--budget", type=int, default=20)
+    parser.add_argument("--n-init", type=int, default=10)
+    parser.add_argument("--max-bond", type=int, default=10)
+    parser.add_argument("--min-rse", type=float, default=0.01)
+    parser.add_argument("--maxiter-tn", type=int, default=1000)
+    parser.add_argument("--n-runs", type=int, default=1)
+    parser.add_argument("--acqf", type=str, default="ei", choices=["ei", "ucb"])
+    parser.add_argument("--ucb-beta", type=float, default=2.0)
+    parser.add_argument(
+        "--decomp-method",
+        type=str,
+        default="pam_legacy",
+        choices=["pam_legacy", "pam", "sgd", "adam", "als"],
+        help="pam_legacy=fctn.py, pam/sgd/adam/als=cuTensorNetwork",
+    )
+    parser.add_argument("--out-dir", type=str, default="artifacts/debug_boss")
+    parser.add_argument(
+        "--target-path",
+        type=str,
+        default=None,
+        help="Path to an image .npz for real-world data experiments",
+    )
+    parser.add_argument("--dtype", type=str, default="float32")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -93,7 +108,7 @@ def main():
     print(f"--- BOSS Experiment [Seed {args.seed}] ---")
     init_adj, target_cp = make_problem(args)
     target = torch.from_numpy(cp.asnumpy(target_cp)).to(torch.double)
-    
+
     # Save target artifacts ONCE at the seed root
     if not (seed_dir / "target_tensor.npz").exists():
         save_tensor(seed_dir / "target_tensor.npz", target)
@@ -128,8 +143,8 @@ def main():
     # Save best reconstruction
     if boss.best_recon is not None:
         save_tensor(out_dir / "reconstruction.npz", boss.best_recon)
-        if args.target_path: # Image experiment
-             save_image(out_dir / "reconstruction.png", boss.best_recon)
+        if args.target_path:  # Image experiment
+            save_image(out_dir / "reconstruction.png", boss.best_recon)
 
     # Persist traces
     df = pd.DataFrame(rows)
@@ -145,14 +160,17 @@ def main():
             boss.best_adj,
             out_dir / f"tn_graph_{args.acqf}.png",
             title=f"[{args.acqf.upper()}] Post-Search Topology",
+            node_color=POLICY_COLORS.get(f"boss-{args.acqf}", "#888888"),
         )
 
     res = boss.get_results()
-    np.savez(out_dir / "boss_results.npz",
-             X_int=res["X_int"].numpy(),
-             Y_rse=res["Y_rse"].numpy(),
-             Y_cr=res["Y_cr"].numpy(),
-             t=res["t"].numpy())
+    np.savez(
+        out_dir / "boss_results.npz",
+        X_int=res["X_int"].numpy(),
+        Y_rse=res["Y_rse"].numpy(),
+        Y_cr=res["Y_cr"].numpy(),
+        t=res["t"].numpy(),
+    )
 
     with open(out_dir / ".done", "w") as f:
         f.write("ok")

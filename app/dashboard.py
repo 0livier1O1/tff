@@ -191,11 +191,17 @@ if app_mode == "Run New Evaluation":
             st.sidebar.error("data/images directory not found.")
             st.stop()
 
-    seeds_default = "1, 2, 3" if problem_source == "Synthetic" else "1"
+    seeds_default = "1" if problem_source == "Synthetic" else "1"
     seeds_str = st.sidebar.text_input(
         "Random Seeds (csv)",
         seeds_default,
         help="Comma-separated string defining execution iteration arrays.",
+    )
+    cuda_device = st.sidebar.selectbox(
+        "CUDA Device",
+        [0, 1],
+        index=0,
+        help="GPU device index passed as CUDA_VISIBLE_DEVICES to all subprocesses.",
     )
 
     st.sidebar.markdown("---")
@@ -388,7 +394,9 @@ if app_mode == "Run New Evaluation":
 
     st.sidebar.markdown("### Storage Options")
     # exp_{synthetic/image}_{budget}s_{epochs}d
-    exp_src_label = problem_source.lower()[:-1] if problem_source == "Images" else "synthetic"
+    exp_src_label = (
+        problem_source.lower()[:-1] if problem_source == "Images" else "synthetic"
+    )
     default_run_name = f"exp_{exp_src_label}_{budget}s_{warm_start_epochs}d"
     run_name = st.sidebar.text_input("Run Name", value=default_run_name)
 
@@ -734,6 +742,7 @@ if app_mode == "Run New Evaluation":
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    env={**_os.environ, "CUDA_VISIBLE_DEVICES": str(cuda_device)},
                 )
 
                 progress_file = pol_dir / "progress.json"
@@ -778,7 +787,7 @@ if app_mode == "Run New Evaluation":
                     ram_pct = psutil.virtual_memory().percent
                     gpu_pct = 0.0
                     try:
-                        free_m, total_m = cp.cuda.Device().mem_info
+                        free_m, total_m = cp.cuda.Device(cuda_device).mem_info
                         gpu_pct = ((total_m - free_m) / total_m) * 100.0
                     except Exception:
                         pass
@@ -849,7 +858,10 @@ if app_mode == "Run New Evaluation":
                     all_traces.extend(df_pol.to_dict("records"))
                 if (pol_dir / "summary.json").exists():
                     with open(pol_dir / "summary.json") as f:
-                        all_summaries.extend(json.load(f))
+                        for entry in json.load(f):
+                            entry["Seed"] = seed
+                            entry["policy"] = p
+                            all_summaries.append(entry)
 
             with open(seed_dir / ".done", "w") as f:
                 f.write("ok")
@@ -990,22 +1002,8 @@ if data_ready:
 
     # --- MACRO PLOTS: mean ± std loss and cumulative regret across all seeds ---
     if not df_rows.empty:
-        # Color mapping across dynamic arrays
-        color_palette = [
-            "#636EFA",
-            "#EF553B",
-            "#00CC96",
-            "#AB63FA",
-            "#FFA15A",
-            "#19D3F3",
-            "#FF6692",
-            "#B6E880",
-        ]
         unique_policies = df_rows["Policy"].unique()
-        pol_colors = {
-            pol: color_palette[i % len(color_palette)]
-            for i, pol in enumerate(unique_policies)
-        }
+        pol_colors = {pol: get_policy_color(pol) for pol in unique_policies}
 
         fig = make_subplots(
             rows=1,
