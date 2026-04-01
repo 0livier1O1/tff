@@ -105,26 +105,47 @@ boss_n_init, boss_max_bond, boss_min_rse, boss_maxiter_tn, boss_ucb_beta = (
     2.0,
 )
 mabss_decomp_method, boss_decomp_method = "sgd", "pam_legacy"
+mabss_warm_start_method, mabss_warm_start_epochs = None, 0
 policies_to_run = []
 run_name = "historical_load"
 
 if app_mode == "Run New Evaluation":
     st.sidebar.markdown("### Search Context")
-    col1, col2 = st.sidebar.columns(2)
-    n_cores = col1.number_input(
-        "Cores ($N$)",
-        min_value=3,
-        max_value=8,
-        value=5,
-        help=r"Total number of discrete cores in the dynamically synthesized tensor graph $\mathcal{G}_{target}$.",
-    )
-    max_rank = col2.number_input(
-        "Target Rank",
-        min_value=2,
-        max_value=15,
-        value=6,
-        help=r"Optimal bond dimension limit bounding $\chi$.",
-    )
+    problem_source = st.sidebar.radio("Problem Source", ["Synthetic", "Images"], horizontal=True)
+
+    target_path = None
+    if problem_source == "Synthetic":
+        col1, col2 = st.sidebar.columns(2)
+        n_cores = col1.number_input(
+            "Cores ($N$)",
+            min_value=3,
+            max_value=8,
+            value=5,
+            help=r"Total number of discrete cores in the dynamically synthesized tensor graph $\mathcal{G}_{target}$.",
+        )
+        max_rank = col2.number_input(
+            "Target Rank",
+            min_value=2,
+            max_value=15,
+            value=6,
+            help=r"Optimal bond dimension limit bounding $\chi$.",
+        )
+    else:
+        img_dir = Path("data/images")
+        if img_dir.exists():
+            img_files = sorted([f.name for f in img_dir.glob("*.npz")])
+            if not img_files:
+                st.sidebar.error("No .npz files found in data/images")
+                st.stop()
+            selected_img = st.sidebar.selectbox("Select Target Image", img_files)
+            target_path = str(img_dir / selected_img)
+            st.sidebar.info(f"Using {selected_img}. Cores and rank will be inferred.")
+            n_cores = 5  # dummy for UI consistency
+            max_rank = 6 # dummy for UI consistency
+        else:
+            st.sidebar.error("data/images directory not found.")
+            st.stop()
+
     seeds_str = st.sidebar.text_input(
         "Random Seeds (csv)",
         "1, 2, 3",
@@ -175,6 +196,22 @@ if app_mode == "Run New Evaluation":
             ["sgd", "pam", "als"],
             index=0,
             help="sgd: cuTN-SGD (default, gradient-based). pam: Proximal ALS. als: Standard ALS.",
+        )
+        ws_col1, ws_col2 = st.sidebar.columns(2)
+        mabss_warm_start_method = ws_col1.selectbox(
+            "Warm Start",
+            ["None", "pam", "als"],
+            index=0,
+            help="Run a fast decomposition first to initialize cores before the main method.",
+        )
+        if mabss_warm_start_method == "None":
+            mabss_warm_start_method = None
+        mabss_warm_start_epochs = ws_col2.number_input(
+            "Warm Iters",
+            value=0,
+            min_value=0,
+            step=10,
+            help="Number of warm-start iterations (0 = disabled).",
         )
     if has_boss:
         boss_decomp_method = st.sidebar.selectbox(
@@ -662,6 +699,13 @@ if app_mode == "Run New Evaluation":
             ]
             if learn_noise:
                 cmd.append("--learn-noise")
+            if mabss_warm_start_method and mabss_warm_start_epochs > 0:
+                cmd.extend([
+                    "--warm-start-method", mabss_warm_start_method,
+                    "--warm-start-decomp-epochs", str(mabss_warm_start_epochs),
+                ])
+            if target_path:
+                cmd.extend(["--target-path", target_path])
             return cmd
 
         def _boss_cmd(seed, pol_name, pol_dir):
@@ -699,6 +743,8 @@ if app_mode == "Run New Evaluation":
                 "--out-dir",
                 str(pol_dir),
             ]
+            if target_path:
+                cmd.extend(["--target-path", target_path])
             return cmd
 
         import os as _os, fcntl as _fcntl

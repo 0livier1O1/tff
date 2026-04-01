@@ -46,8 +46,7 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tensors") not in sys.path:
     sys.path.insert(0, str(ROOT / "tensors"))
 
-from scripts.utils import random_adj_matrix
-from tensors.networks.cutensor_network import sim_tensor_from_adj
+from scripts.utils import random_adj_matrix, make_problem
 from tnss.algo.boss import BOSS
 
 
@@ -75,7 +74,9 @@ def main():
     parser.add_argument("--decomp-method", type=str, default="pam_legacy",
                         choices=["pam_legacy", "pam", "sgd", "als"],
                         help="pam_legacy=fctn.py, pam/sgd/als=cuTensorNetwork")
-    parser.add_argument("--out-dir",   type=str,   required=True)
+    parser.add_argument("--out-dir",   type=str,   default="artifacts/debug_boss")
+    parser.add_argument("--target-path", type=str, default=None,
+                        help="Path to an image .npz for real-world data experiments")
     parser.add_argument("--dtype",     type=str,   default="float32")
     args = parser.parse_args()
 
@@ -86,10 +87,7 @@ def main():
     _seed_all(args.seed)
 
     print(f"--- BOSS Experiment [Seed {args.seed}] ---")
-    target_cp, _ = sim_tensor_from_adj(
-        random_adj_matrix(args.n_cores, args.max_rank),
-        backend="cupy", dtype=args.dtype
-    )
+    _, target_cp = make_problem(args)
     target = torch.from_numpy(cp.asnumpy(target_cp)).to(torch.double)
 
     boss = BOSS(

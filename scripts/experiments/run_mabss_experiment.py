@@ -91,8 +91,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.utils import random_adj_matrix
-from tensors.networks.cutensor_network import sim_tensor_from_adj
+from scripts.utils import random_adj_matrix, make_problem
 from tnss.algo.mabs.env import TNSearchEnv
 from tnss.algo.mabs.encoders import LocalEncoder
 from tnss.algo.mabs.policies import (
@@ -128,11 +127,6 @@ def _entropy(values, k: int) -> float:
     return h / math.log(k)
 
 
-def _make_problem(args: argparse.Namespace):
-    _seed_all(args.seed)
-    adj = random_adj_matrix(args.n_cores, args.max_rank)
-    target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype)
-    return adj, target
 
 
 def check_and_flush_memory(mem_history=None, mem_ui=None, threshold=90.0):
@@ -230,6 +224,8 @@ def run_policy(
         deterministic_eval=args.deterministic_eval,
         seed=args.seed,
         decomp_method=getattr(args, "decomp_method", "sgd"),
+        warm_start_method=getattr(args, "warm_start_method", None),
+        warm_start_decomp_epochs=getattr(args, "warm_start_decomp_epochs", 0),
     )
     encoder = LocalEncoder(
         include_arm=args.include_arm_feature,
@@ -445,10 +441,17 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--dtype", type=str, default="float32")
     parser.add_argument("--stopping-threshold", type=float, default=1e-5)
+    parser.add_argument("--target-path", type=str, default=None,
+                        help="Path to an image .npz for real-world data experiments")
     parser.add_argument("--deterministic-eval", action="store_true", default=True)
     parser.add_argument("--decomp-method", type=str, default="sgd",
                         choices=["sgd", "pam", "als"],
                         help="Decomposition method: sgd (cuTN-SGD), pam (proximal ALS), als (standard ALS)")
+    parser.add_argument("--warm-start-method", type=str, default=None,
+                        choices=["pam", "als", "sgd"],
+                        help="Optional warm-start decomposition before main method")
+    parser.add_argument("--warm-start-decomp-epochs", type=int, default=0,
+                        help="Number of warm-start iterations (0 = disabled)")
     parser.add_argument(
         "--objective", type=str, default="reward", choices=["reward", "loss"]
     )
@@ -484,7 +487,7 @@ def main() -> None:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    init_adj, target = _make_problem(args)
+    init_adj, target = make_problem(args)
     _draw_tn_graph_standalone(
         init_adj,
         out_dir / "target_graph.png",
