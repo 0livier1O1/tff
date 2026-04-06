@@ -9,17 +9,22 @@ from botorch.models.transforms import Normalize, Standardize
 
 
 class BasePolicy:
+    """Abstract base for all MABSS policies."""
+
     def __init__(self, K: int):
         self.K = K
 
     def act(self, env, valid_mask):
+        """Select an arm index given the current environment state and valid mask."""
         raise NotImplementedError
 
     def update(self, env, action, reward, next_env_state=None, oracle_rewards=None):
+        """Update internal policy state after observing a reward."""
         pass
 
     @staticmethod
     def _mask_probs(probs: Tensor, valid_mask: Tensor):
+        """Zero out invalid arms and renormalize. Falls back to uniform if all zero."""
         probs = probs.to(dtype=torch.double).detach().cpu().flatten()
         valid = valid_mask.to(dtype=torch.bool).detach().cpu().flatten()
         masked = probs.clone()
@@ -35,7 +40,10 @@ class BasePolicy:
 
 
 class GreedyOraclePolicy(BasePolicy):
+    """Always selects the arm with the highest reward (full oracle evaluation)."""
+
     def act(self, env, valid_mask, precomputed_rewards=None):
+        """Evaluate all arms (or use precomputed rewards) and pick the best."""
         if precomputed_rewards is None:
             rewards, _, _ = env.evaluate_all_arms()
         else:
@@ -46,6 +54,12 @@ class GreedyOraclePolicy(BasePolicy):
 
 
 class GPUCBPolicy(BasePolicy):
+    """
+    GP-UCB surrogate policy. Fits a GP on observed (feature, reward) pairs
+    and selects the arm maximising mean + beta * std.
+    Falls back to uniform sampling before the first observation.
+    """
+
     def __init__(
         self,
         K: int,
@@ -67,6 +81,7 @@ class GPUCBPolicy(BasePolicy):
         self.model = None
 
     def _fit(self):
+        """Fit the GP on the current training set. No-op if no data yet."""
         if self.train_X is None or self.train_Y is None or len(self.train_X) == 0:
             self.model = None
             return
@@ -105,6 +120,10 @@ class GPUCBPolicy(BasePolicy):
         self.model = gp
 
     def act(self, env, valid_mask, return_all_scores=False):
+        """
+        Encode all valid arms, query the GP posterior, return arm with highest UCB.
+        If return_all_scores=True, also returns a dict of per-arm mean/ucb tensors.
+        """
         if self.model is None:
             # Fallback uniform
             probs = self._mask_probs(
@@ -148,6 +167,7 @@ class GPUCBPolicy(BasePolicy):
         X_batch=None,
         Y_batch=None,
     ):
+        """Append new (X, Y) observations to the training set and refit the GP."""
         if X_batch is not None and Y_batch is not None:
             self.train_X = (
                 X_batch
@@ -163,6 +183,13 @@ class GPUCBPolicy(BasePolicy):
 
 
 class EXP3Policy(BasePolicy):
+    """
+    EXP3 (Exponential-weight algorithm for Exploration and Exploitation).
+    Maintains log-weights over arms; mixes between the softmax distribution
+    and a uniform exploration term controlled by gamma.
+    Supports optional decay of weights and oracle reward injection.
+    """
+
     def __init__(self, K: int, gamma: float, decay: float, reward_scale: float):
         super().__init__(K)
         self.gamma = gamma
@@ -172,11 +199,13 @@ class EXP3Policy(BasePolicy):
         self.last_probs = None
 
     def _normalize(self, r: Tensor):
+        """Clip negative rewards and scale to [0, 1]."""
         r = torch.clamp(r.to(dtype=torch.double).detach().cpu().flatten(), min=0.0)
         s = max(float(r.max().item()), self.scale, 1e-8)
         return torch.clamp(r / s, 0.0, 1.0)
 
     def act(self, env, valid_mask):
+        """Sample an arm from the gamma-mixed softmax distribution."""
         w = torch.softmax(self.log_weights, dim=0)
         g = min(max(self.gamma, 0.0), 1.0)
         probs = (1.0 - g) * w + g / self.K
@@ -185,6 +214,10 @@ class EXP3Policy(BasePolicy):
         return int(torch.multinomial(probs, 1).item())
 
     def update(self, env, action, reward, next_env_state=None, oracle_rewards=None):
+        """
+        Decay weights, then update with importance-weighted reward for the chosen arm.
+        If oracle_rewards are provided, use them directly (full-information update).
+        """
         self.log_weights.mul_(self.decay)
         if oracle_rewards is not None:
             self.log_weights.add_(self._normalize(oracle_rewards))
@@ -196,6 +229,18 @@ class EXP3Policy(BasePolicy):
 
 
 class EXP4Policy(BasePolicy):
+    """
+    EXP4 (Exponential-weight algorithm with Expert advice).
+    Maintains a context-indexed weight vector over a fixed set of expert distributions:
+      - Uniform
+      - GP-UCB mean
+      - GP-UCB ucb score
+      - Empirical arm reward average (per context)
+      - Recency bias (last chosen arm)
+    Context is a (loss_bin, CR_bin) tuple computed from the current env state.
+    The GP policy is shared and updated alongside the expert weights.
+    """
+
     def __init__(
         self,
         K: int,
@@ -227,6 +272,7 @@ class EXP4Policy(BasePolicy):
         self.last_weights = None
 
     def _ctx(self, env):
+        """Discretise (loss, CR) into a (loss_bin, cr_bin) context tuple."""
         loss = float(torch.as_tensor(env.cur_loss, dtype=torch.double).item())
         cr = float(torch.as_tensor(env.current_cr(), dtype=torch.double).item())
         lb = min(
@@ -243,11 +289,13 @@ class EXP4Policy(BasePolicy):
         return (lb, cb)
 
     def _normalize(self, r: Tensor):
+        """Clip negative rewards and scale to [0, 1]."""
         r = torch.clamp(r.to(dtype=torch.double).detach().cpu().flatten(), min=0.0)
         s = max(float(r.max().item()), self.scale, 1e-8)
         return torch.clamp(r / s, 0.0, 1.0)
 
     def _softmax_scores(self, scores, valid):
+        """Convert raw GP scores to a valid probability distribution via softmax."""
         valid = valid.to(dtype=torch.bool).detach().cpu().flatten() & torch.isfinite(
             scores
         )
@@ -263,6 +311,10 @@ class EXP4Policy(BasePolicy):
         return probs
 
     def act(self, env, valid_mask, pre_gp_scores=None):
+        """
+        Compute context, build expert distributions, mix with context weights,
+        sample an arm. Returns (arm_index, info_dict).
+        """
         ctx = self._ctx(env)
         if ctx not in self.log_weights:
             self.log_weights[ctx] = torch.zeros(self.n_experts, dtype=torch.double)
@@ -291,6 +343,7 @@ class EXP4Policy(BasePolicy):
             else uniform.clone()
         )
 
+        # Recency expert: concentrate 60% on last arm, spread rest uniformly
         rec = uniform.clone()
         if self.last_arm is not None:
             rec = torch.full((self.K,), 0.4 / max(self.K - 1, 1), dtype=torch.double)
@@ -313,6 +366,11 @@ class EXP4Policy(BasePolicy):
         return action, {"expert_weights": w.tolist(), "gp_scores": pre_gp_scores}
 
     def update(self, env, action, reward, next_env_state=None, oracle_rewards=None):
+        """
+        Update context-specific expert weights and empirical arm reward estimates.
+        Uses importance-weighted single-arm update, or full-information oracle update
+        if oracle_rewards are provided.
+        """
         ctx = getattr(self, "last_ctx", self._ctx(env))
 
         if ctx not in self.log_weights:

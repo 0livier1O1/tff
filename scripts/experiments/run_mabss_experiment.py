@@ -307,15 +307,14 @@ def run_policy(
             stop_reason = "max_edge_rank_reached"
             break
 
-        # Precompute Oracle properties for benchmark tracking and bootstrapping
+        # Oracle evaluation — always needed for regret; IS the selection cost for greedy
         oracle_t0 = time.time()
         oracle_rewards, oracle_losses, _ = env.evaluate_all_arms()
         oracle_best_reward, oracle_best_arm = torch.max(oracle_rewards, dim=0)
         oracle_sorted_indices = torch.argsort(oracle_rewards, descending=True)
         oracle_time = time.time() - oracle_t0
 
-        fit_t0 = time.time()
-        # Bootstrap handling
+        # Bootstrap handling (UCB/EXP4 only, uses oracle losses already computed)
         if policy_str in {"ucb", "exp4"} and step < args.warm_start_full_steps:
             X_batch, _ = encoder.encode_all_valid(env, valid_mask)
             policy.update(
@@ -326,10 +325,8 @@ def run_policy(
                 Y_batch=oracle_losses[valid_mask].unsqueeze(-1),
             )
 
-        fit_time = time.time() - fit_t0
-
+        # Arm selection — policy.act() only (posterior query / weight sampling)
         pick_t0 = time.time()
-        # Action formulation
         if step < args.bootstrap_oracle_steps:
             action = int(oracle_best_arm.item())
         else:
@@ -343,12 +340,15 @@ def run_policy(
                 action = policy.act(env, valid_mask)
         pick_time = time.time() - pick_t0
 
-        # Step Environment
+        # Decomposition — env.step() performs the actual rank increment + fit
+        decomp_t0 = time.time()
         _, reward, done, info = env.step(action)
+        decomp_time = time.time() - decomp_t0
         cur_loss = info["parent_loss"]
         chosen_loss = info["losses"][-1].item()
 
-        # Update Policies
+        # GP fitting — policy.update() refits the surrogate on new observations
+        gp_fit_t0 = time.time()
         if policy_str in {"exp3", "exp4"}:
             if step < args.warm_start_full_steps:
                 policy.update(env, None, None, oracle_rewards=oracle_rewards)
@@ -357,6 +357,7 @@ def run_policy(
             X_chosen = encoder.encode(env, action, info["adj"]).unsqueeze(0)
             Y_chosen = info["losses"][-1].unsqueeze(0).unsqueeze(0)
             policy.update(env, action, reward, X_batch=X_chosen, Y_batch=Y_chosen)
+        gp_fit_time = time.time() - gp_fit_t0
 
         chosen_arm_rank = (
             int((oracle_sorted_indices == action).nonzero(as_tuple=True)[0].item()) + 1
@@ -377,8 +378,9 @@ def run_policy(
             "regret": float(oracle_best_reward.item() - reward.item()),
             "arm_match": bool(int(action) == int(oracle_best_arm.item())),
             "fit_ok": True,
-            "fit_time_s": fit_time,
             "pick_time_s": pick_time,
+            "decomp_time_s": decomp_time,
+            "gp_fit_time_s": gp_fit_time,
             "oracle_time_s": oracle_time,
             "step_time_s": time.time() - t_step,
         }

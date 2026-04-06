@@ -15,6 +15,7 @@ import streamlit as st
 import cupy as cp
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from app.plots import plot_loss_and_regret, plot_arm_trace, plot_loss_vs_runtime_seed, plot_step_time_breakdown
 from scripts.utils import (
     random_adj_matrix,
     make_problem,
@@ -111,7 +112,7 @@ boss_n_init, boss_max_bond, boss_min_rse, boss_maxiter_tn, boss_ucb_beta = (
     1000,
     2.0,
 )
-mabss_decomp_method, boss_decomp_method = "sgd", "pam_legacy"
+mabss_decomp_method, boss_decomp_method = "adam", "adam"
 mabss_warm_start_method, mabss_warm_start_epochs = None, 0
 policies_to_run = []
 run_name = "historical_load"
@@ -251,9 +252,9 @@ if app_mode == "Run New Evaluation":
 
         decomp_method = st.sidebar.selectbox(
             "Decomp Engine",
-            ["pam_legacy", "sgd", "adam", "pam", "als"],
+            ["adam", "sgd", "pam", "als", "pam (torch)"],
             index=0,
-            help="pam_legacy: Pure PyTorch PAM (CPU). sgd/adam/pam/als: via cuTensorNetwork (GPU).",
+            help="pam (torch). sgd/adam/pam/als: via cuTensorNetwork (GPU).",
         )
         mabss_decomp_method = decomp_method
         boss_decomp_method = decomp_method
@@ -389,7 +390,9 @@ if app_mode == "Run New Evaluation":
     exp_src_label = (
         problem_source.lower()[:-1] if problem_source == "Images" else "synthetic"
     )
-    default_run_name = f"exp_{}_{exp_src_label}_{budget}s_{warm_start_epochs}d"
+    default_run_name = (
+        f"exp_{exp_src_label}_{budget}s_{warm_start_epochs}d_{decomp_method}"
+    )
     run_name = st.sidebar.text_input("Run Name", value=default_run_name)
 
 
@@ -997,121 +1000,7 @@ if data_ready:
         unique_policies = df_rows["Policy"].unique()
         pol_colors = {pol: get_policy_color(pol) for pol in unique_policies}
 
-        fig = make_subplots(
-            rows=1,
-            cols=2,
-            subplot_titles=(
-                "Mean Post-Step Loss (± 1 Std Dev)",
-                "Cumulative Oracle Regret (± 1 Std Dev)",
-            ),
-        )
-
-        for policy in unique_policies:
-            sub = df_rows[df_rows["Policy"] == policy]
-            gb = sub.groupby("step")
-            steps = list(gb.groups.keys())
-
-            mean_loss = gb["chosen_loss"].mean()
-            std_loss = gb["chosen_loss"].std().fillna(0)
-
-            mean_regret = gb["cum_regret"].mean()
-            std_regret = gb["cum_regret"].std().fillna(0)
-
-            color = pol_colors[policy]
-            rgb = f"rgba({int(color[1:3],16)}, {int(color[3:5],16)}, {int(color[5:7],16)}, 0.2)"
-
-            # Loss plotting
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_loss + std_loss,
-                    mode="lines",
-                    line=dict(width=0),
-                    showlegend=False,
-                    hoverinfo="skip",
-                ),
-                row=1,
-                col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_loss - std_loss,
-                    mode="lines",
-                    line=dict(width=0),
-                    fill="tonexty",
-                    fillcolor=rgb,
-                    showlegend=False,
-                    hoverinfo="skip",
-                ),
-                row=1,
-                col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_loss,
-                    mode="lines",
-                    line=dict(color=color, width=2),
-                    showlegend=False,
-                    name=policy.upper(),
-                ),
-                row=1,
-                col=1,
-            )
-
-            # Regret plotting
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_regret + std_regret,
-                    mode="lines",
-                    line=dict(width=0),
-                    showlegend=False,
-                    hoverinfo="skip",
-                ),
-                row=1,
-                col=2,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_regret - std_regret,
-                    mode="lines",
-                    line=dict(width=0),
-                    fill="tonexty",
-                    fillcolor=rgb,
-                    showlegend=False,
-                    hoverinfo="skip",
-                ),
-                row=1,
-                col=2,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_regret,
-                    mode="lines",
-                    line=dict(color=color, width=2),
-                    showlegend=True,
-                    name=policy.upper(),
-                ),
-                row=1,
-                col=2,
-            )
-
-        fig.update_layout(
-            margin=dict(l=0, r=0, t=30, b=0),
-            height=350,
-            template="plotly_white",
-            hovermode="x unified",
-        )
-        fig.update_xaxes(title_text="Search Step", row=1, col=1)
-        fig.update_yaxes(title_text="Normalized Loss", row=1, col=1)
-        fig.update_xaxes(title_text="Search Step", row=1, col=2)
-        fig.update_yaxes(title_text="Regret", row=1, col=2)
-
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(plot_loss_and_regret(df_rows), use_container_width=True)
 
     st.divider()
     st.markdown("## Seed-Specific Analysis Maps")
@@ -1126,8 +1015,6 @@ if data_ready:
 
             # Policy discrete layout
             policies = seed_df["Policy"].unique()
-
-            import numpy as np
 
             seed_summaries = [s for s in summaries if s.get("Seed") == seed]
             pol_names = [s["policy"] for s in seed_summaries]
@@ -1343,69 +1230,30 @@ if data_ready:
 
             st.divider()
 
+            # --- Loss vs Runtime + Step Time Breakdown (side by side) ---
+            st.markdown("#### Computational Cost")
+            _col_rt, _col_bd = st.columns(2)
+            with _col_rt:
+                st.plotly_chart(
+                    plot_loss_vs_runtime_seed(seed_df),
+                    use_container_width=True,
+                )
+            with _col_bd:
+                st.plotly_chart(
+                    plot_step_time_breakdown(seed_df),
+                    use_container_width=True,
+                )
+
             # --- Trace Vectors (Plotly) ---
             st.markdown("#### Mathematical Trace Vectors")
             for s in seed_summaries:
                 pol_name = s["policy"]
-                pol_upper = pol_name.upper()
                 c = get_policy_color(pol_name)
                 sub = seed_df[seed_df["Policy"] == pol_name]
                 if sub.empty:
                     continue
-                steps_v = sub["step"].values
-                chosen_arm = sub["selected_arm"].values
-                greedy_oracle = sub["oracle_best_arm"].values
-                rank_minus = (
-                    (sub["oracle_arm_rank"].values - 1)
-                    if "oracle_arm_rank" in sub.columns
-                    else np.zeros(len(sub))
-                )
-                hit_rate = sub["arm_match"].mean()
-                unique_arms = len(set(chosen_arm))
-
-                fig_t = go.Figure()
-                fig_t.add_trace(
-                    go.Scatter(
-                        x=steps_v,
-                        y=greedy_oracle,
-                        mode="lines",
-                        line=dict(color="#222222", width=1.5, shape="hv"),
-                        name="Greedy oracle arm",
-                    )
-                )
-                fig_t.add_trace(
-                    go.Scatter(
-                        x=steps_v,
-                        y=chosen_arm,
-                        mode="lines+markers",
-                        marker=dict(symbol="x", size=7, color=c),
-                        line=dict(color=c, width=2),
-                        name="Chosen arm",
-                    )
-                )
-                fig_t.add_trace(
-                    go.Scatter(
-                        x=steps_v,
-                        y=rank_minus,
-                        mode="lines",
-                        line=dict(color="#AAAAAA", width=2, dash="dash"),
-                        name="Oracle arm rank − 1",
-                    )
-                )
-                fig_t.update_layout(
-                    title=dict(
-                        text=f"{pol_upper} — hit rate={hit_rate:.2f}, unique arms={unique_arms}",
-                        font=dict(size=12),
-                    ),
-                    height=300,
-                    margin=dict(l=0, r=0, t=100, b=0),
-                    template="plotly_white",
-                    legend=dict(orientation="h", y=1.25, font=dict(size=10)),
-                    yaxis=dict(title="Arm id / rank−1", dtick=1),
-                    xaxis=dict(title="Search step", tickvals=steps_v.tolist()),
-                )
                 st.plotly_chart(
-                    fig_t,
+                    plot_arm_trace(sub, pol_name, c),
                     use_container_width=True,
                 )
 
