@@ -91,9 +91,7 @@ def _interpolate_on_time_grid(
     Grid runs 0 → earliest seed finish to avoid extrapolation.
     """
     pol = df_rows[df_rows["Policy"] == policy].copy().sort_values(["Seed", "step"])
-    pol["_eff_t"] = pol.groupby("Seed", group_keys=False).apply(
-        lambda g: _effective_step_time(g, policy)
-    )
+    pol["_eff_t"] = _effective_step_time(pol, policy)
     pol["cum_time_s"] = pol.groupby("Seed")["_eff_t"].cumsum()
     seeds = pol["Seed"].unique()
     t_max = min(pol[pol["Seed"] == s]["cum_time_s"].max() for s in seeds)
@@ -417,9 +415,7 @@ def plot_loss_vs_runtime_per_seed(df_rows: pd.DataFrame) -> go.Figure:
     for policy in sorted(df_rows["Policy"].unique()):
         c = get_policy_color(policy)
         pol = df_rows[df_rows["Policy"] == policy].copy().sort_values(["Seed", "step"])
-        pol["_eff_t"] = pol.groupby("Seed", group_keys=False).apply(
-            lambda g: _effective_step_time(g, policy)
-        )
+        pol["_eff_t"] = _effective_step_time(pol, policy)
         pol["cum_time_s"] = pol.groupby("Seed")["_eff_t"].cumsum()
         seeds = sorted(pol["Seed"].unique())
         n_seeds = len(seeds)
