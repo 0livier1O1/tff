@@ -14,11 +14,12 @@ def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1000, tol=None):
     
     N = len(adj_matrix)
     X = target.clone().to(device)
-    G = [torch.rand(adj_matrix[i].tolist()).to(X) for i in range(N)]
+    G = [torch.randn(adj_matrix[i].tolist()).to(X) * 0.1 for i in range(N)]
     
     rho = 0.1
     failed = False
     rse = []
+    X_comp = target # fallback
     for i in range(iter):
         for k in range(N):
             Xk = unfold(X, k)
@@ -33,13 +34,13 @@ def decomp_pam(target: Tensor, adj_matrix: Tensor, iter=1000, tol=None):
             except:
                 failed = True
                 break        
-                        
+        
         X_comp = fctn_comp(G)
-        rse.append(torch.norm(X - X_comp)/torch.norm(X))
-        # print(rse[-1])
+        rse.append((torch.norm(X - X_comp)/torch.norm(X)).item())
         if rse[-1] < tol or failed:
             break
-    return torch.tensor(rse)
+            
+    return torch.tensor(rse), X_comp
 
             
 def fctn_comp(G: list[Tensor]):

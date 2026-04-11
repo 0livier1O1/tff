@@ -6,6 +6,80 @@ import cupy as cp
 from torch import Tensor
 from cuquantum import tensornet as cutn
 
+
+# ---------------------------------------------------------------------------
+# Backend-agnostic PAM helpers (xp = torch or cupy)
+# ---------------------------------------------------------------------------
+
+
+def _td(a, b, axes, xp):
+    """tensordot with uniform signature across backends."""
+    if xp is torch:
+        return torch.tensordot(a, b, dims=axes)
+    return xp.tensordot(a, b, axes=axes)
+
+
+def _perm(arr, perm, xp):
+    """transpose/permute with uniform signature across backends."""
+    if xp is torch:
+        return arr.permute(perm)
+    return xp.transpose(arr, perm)
+
+
+def _pam_unfold(X, k, xp):
+    return xp.moveaxis(X, k, 0).reshape(X.shape[k], -1)
+
+
+def _pam_fold(mat, k, shape, xp):
+    return xp.moveaxis(mat.reshape([shape[k], *shape[:k], *shape[k + 1 :]]), 0, k)
+
+
+def _pam_gen_unfold(tensor, k, N, xp):
+    m = [2 * j + 1 if j < k else 2 * j for j in range(N - 1)]
+    n = [2 * j if j < k else 2 * j + 1 for j in range(N - 1)]
+    dim1 = int(np.prod([tensor.shape[i] for i in m]))
+    dim2 = int(np.prod([tensor.shape[i] for i in n]))
+    return _perm(tensor, m + n, xp).reshape(dim1, dim2)
+
+
+def _pam_fctn_comp(G, xp):
+    N = len(G)
+    n, m = [0], [1]
+    out = G[0]
+    for i in range(N - 1):
+        out = _td(out, G[i + 1], (m, n), xp)
+        n.append(i + 1)
+        if i > 0:
+            m = [m[0]] + [m[j] - j for j in range(1, i + 1)]
+        m.append(1 + (i + 1) * (N - (i + 1)))
+    return out
+
+
+def _pam_fctn_comp_partial(G, skip, xp):
+    N = len(G)
+    n_list = [i for i in range(N - 1) if i != skip]
+    m1 = [1 + i * N for i in range(N - 2)]
+    m2 = [2 + i * N for i in range(N - 2)]
+    if skip == 0:
+        out = G[1]
+        for i in range(1, N - 1):
+            out = _td(out, G[i + 1], (m2[:i], n_list[:i]), xp)
+            m2 = [m2[0]] + [m2[j] - j for j in range(1, N - 2)]
+    else:
+        out, j = G[0], 0
+        for i in range(N - 1):
+            if i + 1 < skip:
+                out = _td(out, G[i + 1], (m1[: j + 1], n_list[: j + 1]), xp)
+                m1 = [m1[0]] + [m1[j] - j for j in range(1, N - 2)]
+                m2 = [m2[0]] + [m2[j] - j for j in range(1, N - 2)]
+                j += 1
+            elif i + 1 > skip:
+                out = _td(out, G[i + 1], (m2[: j + 1], n_list[: j + 1]), xp)
+                m2 = [m2[0]] + [m2[j] - j for j in range(1, N - 2)]
+                j += 1
+    return out
+
+
 from scripts.utils import random_adj_matrix
 from typing import Union
 
@@ -14,27 +88,28 @@ device = torch.device("cpu")
 
 
 def letter_range(n):
-	for c in range(97, 97+n):
-		yield chr(c)
+    for c in range(97, 97 + n):
+        yield chr(c)
+
 
 def random_tensor(shape, device, std_dev, backend, backend_dtype):
     if backend == "torch":
         core = torch.nn.init.normal_(
-                torch.nn.Parameter(torch.empty(*shape, dtype=backend_dtype, device=device)), 
-                mean=0.0, 
-                std=std_dev
-            )
+            torch.nn.Parameter(torch.empty(*shape, dtype=backend_dtype, device=device)),
+            mean=0.0,
+            std=std_dev,
+        )
     else:
-        core = cp.random.normal(
-            loc=0.0,
-            scale=std_dev,
-            size=tuple(shape)
-        ).astype(backend_dtype)
+        core = cp.random.normal(loc=0.0, scale=std_dev, size=tuple(shape)).astype(
+            backend_dtype
+        )
     return core
+
 
 def _random_cores_from_adj(adj_matrix, std_dev, backend, backend_dtype):
     cores = []
     rows = adj_matrix.unbind(0) if hasattr(adj_matrix, "unbind") else adj_matrix
+    device = getattr(adj_matrix, "device", None)
     for row in rows:
         shape = row.tolist()
         core = random_tensor(shape, device, std_dev, backend, backend_dtype)
@@ -44,24 +119,30 @@ def _random_cores_from_adj(adj_matrix, std_dev, backend, backend_dtype):
 
 def increment_mode_rank(tensor, i):
     if isinstance(tensor, Tensor):
-        backend = "torch" 
-        new_tensor = tensor.clone() 
+        backend = "torch"
+        new_tensor = tensor.clone()
     else:
-        backend ="cupy"
-        new_tensor = tensor.copy() 
+        backend = "cupy"
+        new_tensor = tensor.copy()
     backend_dtype = tensor.dtype
     new_shape = list(tensor.shape)
     new_shape[i] += 1
 
     padding_shape = list(tensor.shape)
     padding_shape[i] = 1
-    padding = random_tensor(shape=padding_shape, device=tensor.device, std_dev=0.1, backend=backend, backend_dtype=backend_dtype)
-    
-    if backend=="torch":
-        new_tensor = torch.concat([tensor, padding], dim=i)   
-    elif backend=="cupy":
+    padding = random_tensor(
+        shape=padding_shape,
+        device=tensor.device,
+        std_dev=0.1,
+        backend=backend,
+        backend_dtype=backend_dtype,
+    )
+
+    if backend == "torch":
+        new_tensor = torch.concat([tensor, padding], dim=i)
+    elif backend == "cupy":
         new_tensor = cp.concat([tensor, padding], axis=i)
-    
+
     assert list(new_tensor.shape) == new_shape
 
     return new_tensor
@@ -70,17 +151,28 @@ def increment_mode_rank(tensor, i):
 class cuTensorNetwork:
     _DTYPE_OPTIONS = ("float16", "float32", "float64")
 
-    def __init__(self, adj_matrix: Union[Tensor, cp.ndarray]=None, cores=None, init_std=0.1, backend="cupy", dtype="float32") -> None:
+    def __init__(
+        self,
+        adj_matrix: Union[Tensor, cp.ndarray] = None,
+        cores=None,
+        init_std=0.1,
+        backend="cupy",
+        dtype="float32",
+    ) -> None:
         if adj_matrix is None:
             if cores is None:
-                raise ValueError("Must provide at least one of adj_matrix or cores to initialize cuTensorNetwork.")
+                raise ValueError(
+                    "Must provide at least one of adj_matrix or cores to initialize cuTensorNetwork."
+                )
             adj_matrix = np.array([core.shape for core in cores], dtype=np.int32)
-            
+
         # TODO What about ranks?
         self.backend = backend.lower()
         self.dtype_name = dtype.lower()
         if self.backend == "torch":
-            self.adj_matrix = torch.maximum(adj_matrix, adj_matrix.T).to(dtype=torch.int)  # Ensures symmetric adjacency matrix
+            self.adj_matrix = torch.maximum(adj_matrix, adj_matrix.T).to(
+                dtype=torch.int
+            )  # Ensures symmetric adjacency matrix
             backend_dtype = {
                 "float16": torch.float16,
                 "float32": torch.float32,
@@ -88,18 +180,18 @@ class cuTensorNetwork:
             }[self.dtype_name]
         else:
             adj_matrix = cp.asarray(adj_matrix)
-            self.adj_matrix = cp.maximum(adj_matrix, adj_matrix.T).astype(dtype=cp.int8)  
+            self.adj_matrix = cp.maximum(adj_matrix, adj_matrix.T).astype(dtype=cp.int8)
             backend_dtype = {
                 "float16": cp.float16,
                 "float32": cp.float32,
                 "float64": cp.float64,
             }[self.dtype_name]
-        
+
         self.shape = self.adj_matrix.shape
         self.eq = einsum_expr(self.adj_matrix)
 
-        assert self.shape[0] == self.shape[1], 'adj_matrix must be a square matrix.'
-        
+        assert self.shape[0] == self.shape[1], "adj_matrix must be a square matrix."
+
         self.dim = self.shape[0]
 
         self.cores = []
@@ -109,7 +201,10 @@ class cuTensorNetwork:
                 self.adj_matrix, init_std, self.backend, backend_dtype
             )
         else:
-            self.cores = [core.copy() for core in cores]
+            if self.backend == "torch":
+                self.cores = [core.clone().to(self.adj_matrix.device) for core in cores]
+            else:
+                self.cores = [core.copy() for core in cores]
         self._rebuild_network()
 
     def _build_cupy_qualifiers(self):
@@ -128,10 +223,16 @@ class cuTensorNetwork:
             self.ntwrk = cutn.Network(self.eq, *self.cores, qualifiers=self._qualifiers)
         else:
             self.ntwrk = cutn.Network(self.eq, *self.cores)
-    
-    def contract_ntwrk(self):
+        
+        # Native cuTensorNet optimizer is sufficient on a dedicated A5000.
         self.ntwrk.contract_path()
+
+    def contract_ntwrk(self):
         return self.ntwrk.contract()
+
+    def contract(self) -> Union[Tensor, cp.ndarray]:
+        """Alias for contract_ntwrk() to provide a more standard API."""
+        return self.contract_ntwrk()
 
     def network_size(self, adj=None) -> int:
         """Compute TN parameter count directly from ``self.adj_matrix``.
@@ -179,7 +280,9 @@ class cuTensorNetwork:
         tn_numel = self.network_size(adj)
 
         if tn_numel <= 0:
-            raise ValueError("TN parameter count from adjacency matrix must be positive.")
+            raise ValueError(
+                "TN parameter count from adjacency matrix must be positive."
+            )
 
         return original_numel / tn_numel
 
@@ -188,15 +291,54 @@ class cuTensorNetwork:
         target,
         tol=None,
         pct_loss_improvment=0.025,
-        init_lr=0.05,
+        init_lr=None,
         loss_patience=2500,
         lr_patience=250,
         max_epochs=25000,
         momentum=0.5,
         method="sgd",
-        **kwargs
+        warm_start_method=None,
+        warm_start_epochs=0,
+        **kwargs,
     ):
-        kwargs = dict(
+        # Automatically toggle Adam if requested via method string
+        use_adam = kwargs.get("use_adam", False) or (method == "adam")
+        kwargs["use_adam"] = use_adam
+
+        if init_lr is None:
+            init_lr = 0.002 if use_adam else 0.01
+
+        # --- Optional warm-start pass (modifies self.cores in-place) ---
+        warm_losses = []
+        if warm_start_method and warm_start_epochs > 0:
+            warm_kw = dict(
+                target=target, tol=tol, max_epochs=warm_start_epochs, **kwargs
+            )
+            if warm_start_method == "pam":
+                warm_losses = self._decompose_pam(**warm_kw)
+            elif warm_start_method == "als":
+                warm_losses = self._decompose_als_cp(**warm_kw)
+            elif warm_start_method == "sgd":
+                sgd_kw = dict(
+                    target=target,
+                    tol=tol,
+                    max_epochs=warm_start_epochs,
+                    init_lr=init_lr,
+                    loss_patience=loss_patience,
+                    lr_patience=lr_patience,
+                    momentum=momentum,
+                    pct_loss_improvment=pct_loss_improvment,
+                    **kwargs,
+                )
+                if self.backend == "torch":
+                    warm_losses = self._decompose_torch_sgd(**sgd_kw)
+                else:
+                    warm_losses = self._decompose_cupy_cutn_sgd(**sgd_kw)
+            # Rebuild network after warm-start mutated cores
+            self._rebuild_network()
+
+        # --- Main decomposition pass ---
+        main_kwargs = dict(
             target=target,
             tol=tol,
             pct_loss_improvment=pct_loss_improvment,
@@ -205,15 +347,24 @@ class cuTensorNetwork:
             lr_patience=lr_patience,
             max_epochs=max_epochs,
             momentum=momentum,
-            **kwargs
+            **kwargs,
         )
         if method == "als":
-            return self._decompose_als_cp(**kwargs)
-        if self.backend == "torch":
-            return self._decompose_torch_sgd(**kwargs)
-        if self.backend == "cupy":
-            return self._decompose_cupy_cutn_sgd(**kwargs)
-        raise ValueError(f"Unsupported backend '{self.backend}'.")
+            main_losses = self._decompose_als_cp(**main_kwargs)
+        elif method == "pam":
+            main_losses = self._decompose_pam(**main_kwargs)
+        elif method in ("sgd", "adam"):
+            if self.backend == "torch":
+                main_losses = self._decompose_torch_sgd(**main_kwargs)
+            else:
+                main_losses = self._decompose_cupy_cutn_sgd(**main_kwargs)
+        else:
+            raise ValueError(f"Unsupported method '{method}' or backend '{self.backend}'.")
+
+        # Concatenate warm-start + main losses for full history
+        if isinstance(warm_losses, list) and isinstance(main_losses, list):
+            return warm_losses + main_losses
+        return main_losses
 
     def _decompose_torch_sgd(
         self,
@@ -225,7 +376,7 @@ class cuTensorNetwork:
         lr_patience=250,
         max_epochs=25000,
         momentum=0.5,
-        **kwargs
+        **kwargs,
     ):
         if self.backend != "torch":
             raise NotImplementedError(
@@ -265,10 +416,10 @@ class cuTensorNetwork:
 
         while epoch < max_epochs:
             optimizer.zero_grad(set_to_none=True)
-            
+
             contracted_t = cutn.contract(self.eq, *self.cores, optimize=optimize_cfg)
             loss = torch.norm(target - contracted_t) / target_norm
-            
+
             loss.backward()
             optimizer.step()
 
@@ -308,12 +459,18 @@ class cuTensorNetwork:
         lr_patience=250,
         max_epochs=25000,
         momentum=0.55,
-        **kwargs
+        beta1=0.9,
+        beta2=0.999,
+        eps=1e-8,
+        **kwargs,
     ):
+        optimizer = "adam" if kwargs.get("use_adam", False) else "sgd"
         if not self.cores:
             raise ValueError("Network has no tensors to optimize.")
         if self._qualifiers is None:
-            raise RuntimeError("CuPy qualifiers were not initialized for gradient computation.")
+            raise RuntimeError(
+                "CuPy qualifiers were not initialized for gradient computation."
+            )
         if not hasattr(self.ntwrk, "gradients"):
             raise NotImplementedError(
                 "This cuTensorNet build does not expose Network.gradients(). "
@@ -329,6 +486,8 @@ class cuTensorNetwork:
 
         lr = float(init_lr)
         velocity = [cp.zeros_like(node) for node in self.cores]
+        m = [cp.zeros_like(node) for node in self.cores]  # Adam 1st moment
+        v = [cp.zeros_like(node) for node in self.cores]  # Adam 2nd moment
         epoch = 0
         wait = 0
         best_loss = float("inf")
@@ -361,26 +520,40 @@ class cuTensorNetwork:
             loss = cp.linalg.norm(residual) / target_norm
             loss_history.append(loss.item())
 
-            residual_norm = cp.maximum(cp.linalg.norm(residual), cp.finfo(residual.dtype).eps)
+            residual_norm = cp.maximum(
+                cp.linalg.norm(residual), cp.finfo(residual.dtype).eps
+            )
             output_grad = residual / (target_norm * residual_norm)
 
             grads = self.ntwrk.gradients(output_gradient=output_grad)
 
             if len(grads) != len(self.cores):
-                raise RuntimeError("Gradient count mismatch with number of network cores.")
+                raise RuntimeError(
+                    "Gradient count mismatch with number of network cores."
+                )
 
             for idx, grad in enumerate(grads):
                 if epoch < max_epochs // 2 and unfrozen_edge is not None:
                     active = active_masks[idx]
                     if active is not None:
-                        velocity[idx][active] = momentum * velocity[idx][active] + grad[active]
+                        # Fallback to SGD for masked updates if needed, though Adam works too
+                        velocity[idx][active] = (
+                            momentum * velocity[idx][active] + grad[active]
+                        )
                         self.cores[idx][active] -= lr * velocity[idx][active]
                         velocity[idx][~active] = 0
                     else:
                         velocity[idx].fill(0)
                 else:
-                    velocity[idx] = momentum * velocity[idx] + grad
-                    self.cores[idx] -= lr * velocity[idx]
+                    if optimizer == "adam":
+                        m[idx] = beta1 * m[idx] + (1 - beta1) * grad
+                        v[idx] = beta2 * v[idx] + (1 - beta2) * (grad**2)
+                        m_hat = m[idx] / (1 - beta1 ** (epoch + 1))
+                        v_hat = v[idx] / (1 - beta2 ** (epoch + 1))
+                        self.cores[idx] -= lr * m_hat / (cp.sqrt(v_hat) + eps)
+                    else:
+                        velocity[idx] = momentum * velocity[idx] + grad
+                        self.cores[idx] -= lr * velocity[idx]
 
             epoch += 1
 
@@ -404,19 +577,17 @@ class cuTensorNetwork:
 
             if epoch % 100 == 0:
                 sys.stdout.flush()
-                print(f"\rEpoch {epoch}, Loss: {loss_history[-1]:0.5f}, Learning Rate: {lr:0.6f}")
+                print(
+                    f"\rEpoch {epoch}, Loss: {loss_history[-1]:0.5f}, Learning Rate: {lr:0.6f}"
+                )
 
         return loss_history
 
-    def _decompose_als_cp(
-            self,
-        target,
-        tol=0.01,
-        pct_loss_improvment=0.025,
-        **kwargs
-    ):
+    def _decompose_als_cp(self, target, tol=0.01, pct_loss_improvment=0.025, **kwargs):
         if self.backend != "cupy":
-            raise NotImplementedError("ALS decomposition is implemented only for backend='cupy'.")
+            raise NotImplementedError(
+                "ALS decomposition is implemented only for backend='cupy'."
+            )
         if not self.cores:
             raise ValueError("Network has no tensors to optimize.")
 
@@ -432,7 +603,8 @@ class cuTensorNetwork:
         provided_unfold = kwargs.get("target_unfold_list")
         if provided_unfold is None:
             target_unfold_list = [
-                cp.moveaxis(target, v, 0).reshape(target.shape[v], -1) for v in range(len(self.cores))
+                cp.moveaxis(target, v, 0).reshape(target.shape[v], -1)
+                for v in range(len(self.cores))
             ]
         else:
             target_unfold_list = [cp.asarray(tu) for tu in provided_unfold]
@@ -442,15 +614,21 @@ class cuTensorNetwork:
         num_cores = len(self.cores)
 
         used_labels = set(lhs.replace(",", "") + rhs)
-        label_pool = [c for c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in used_labels]
+        label_pool = [
+            c
+            for c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            if c not in used_labels
+        ]
 
         env_specs = {}
         for v in vertices:
             operand_ids = tuple(i for i in range(num_cores) if i != v)
             if len(label_pool) < len(operand_ids):
-                raise ValueError("Not enough einsum labels to build ALS environment contractions.")
+                raise ValueError(
+                    "Not enough einsum labels to build ALS environment contractions."
+                )
 
-            aux_labels = label_pool[:len(operand_ids)]
+            aux_labels = label_pool[: len(operand_ids)]
             env_terms = []
             for k, i in enumerate(operand_ids):
                 term = list(input_terms[i])
@@ -459,31 +637,44 @@ class cuTensorNetwork:
 
             env_out = "".join(rhs[i] for i in operand_ids) + "".join(aux_labels)
             env_eq = f"{','.join(env_terms)}->{env_out}"
-            env_operands = [self.cores[i] for i in operand_ids]
-            env_path, env_info = cutn.contract_path(env_eq, *env_operands)
-            env_opt = {"path": env_path, "slicing": getattr(env_info, "slices", None)}
 
-            n_rows = int(np.prod([int(target.shape[i]) for i in operand_ids], dtype=np.int64))
-            n_cols = int(np.prod([int(self.cores[i].shape[v]) for i in operand_ids], dtype=np.int64))
+            # Pre-compute optimal contraction path once for ALS environment
+            # Use np.empty shapes to avoid host copies
+            np_env_ops = [np.empty(self.cores[i].shape) for i in operand_ids]
+            env_path = np.einsum_path(env_eq, *np_env_ops, optimize="optimal")[0]
+
+            n_rows = int(
+                np.prod([int(target.shape[i]) for i in operand_ids], dtype=np.int64)
+            )
+            n_cols = int(
+                np.prod(
+                    [int(self.cores[i].shape[v]) for i in operand_ids], dtype=np.int64
+                )
+            )
             solve_shape = list(self.cores[v].shape)
             solve_shape.insert(0, solve_shape.pop(v))
-            env_specs[v] = (env_eq, env_operands, env_opt, n_rows, n_cols, solve_shape)
+            env_specs[v] = (env_eq, env_path, n_rows, n_cols, solve_shape)
 
-        full_path, full_info = cutn.contract_path(self.eq, *self.cores)
-        full_opt = {"path": full_path, "slicing": getattr(full_info, "slices", None)}
+        # Pre-compute full reconstruction path for ALS loop
+        np_full_ops = [np.empty(c.shape) for c in self.cores]
+        full_recon_path = np.einsum_path(self.eq, *np_full_ops, optimize="optimal")[0]
 
         prev_loss = float("inf")
         loss_history = []
 
         for it in range(max_iter):
             for v in vertices:
-                env_eq, env_operands, env_opt, n_rows, n_cols, solve_shape = env_specs[v]
-                env = cutn.contract(env_eq, *env_operands, optimize=env_opt).reshape(n_rows, n_cols)
+                env_eq, env_path, n_rows, n_cols, solve_shape = env_specs[v]
+                env = cp.einsum(
+                    env_eq,
+                    *[self.cores[i] for i in range(num_cores) if i != v],
+                    optimize=env_path,
+                ).reshape(n_rows, n_cols)
                 sol = cp.linalg.lstsq(env, target_unfold_list[v].T, rcond=None)[0].T
                 updated = cp.moveaxis(sol.reshape(solve_shape), 0, v)
                 self.cores[v][...] = updated
 
-            recon = cutn.contract(self.eq, *self.cores, optimize=full_opt)
+            recon = cp.einsum(self.eq, *self.cores, optimize=full_recon_path)
             loss = float((cp.linalg.norm(recon - target) / target_norm).item())
             loss_history.append(loss)
 
@@ -501,11 +692,95 @@ class cuTensorNetwork:
 
         return loss_history
 
+    def _decompose_pam(self, target, tol=None, max_epochs=1000, rho=0.1, **kwargs):
+        """PAM — optimized CuPy/Torch port of decomp_pam.
+
+        Same algorithm as decomp_pam / _pam_fctn_comp_partial + pinv, but faster:
+          - xp.einsum(optimize=path) replaces sequential tensordot for env contraction
+          - xp.linalg.solve replaces pinv (tempA is symmetric PD; LU >> SVD)
+        """
+        if self.backend != "cupy":
+            raise NotImplementedError(
+                f"PAM decomposition requires backend='cupy', got '{self.backend}'."
+            )
+
+        xp = cp
+        target = xp.asarray(target).astype(self.cores[0].dtype, copy=False)
+        eps = xp.finfo(target.dtype).eps
+        target_norm = xp.maximum(xp.linalg.norm(target), eps)
+        N = len(self.cores)
+
+        # Pre-compute per-core environment equations and paths once
+        lhs, rhs = self.eq.split("->")
+        input_terms = lhs.split(",")
+        label_to_dim = {
+            label: int(dim)
+            for i in range(self.dim)
+            for label, dim in zip(input_terms[i], self.cores[i].shape)
+        }
+
+        env_specs = []
+        for k in range(self.dim):
+            other_ids = [i for i in range(self.dim) if i != k]
+            env_terms = [input_terms[i] for i in other_ids]
+            shared_bonds = "".join(
+                [
+                    c
+                    for c in input_terms[k]
+                    if any(c in input_terms[j] for j in other_ids)
+                ]
+            )
+            other_phys = "".join([c for c in rhs if c != rhs[k]])
+            env_eq = ",".join(env_terms) + "->" + other_phys + shared_bonds
+
+            n_rows = int(np.prod([label_to_dim[c] for c in other_phys]))
+            n_cols = int(np.prod([label_to_dim[c] for c in shared_bonds]))
+
+            # Find path once using numpy (CPU-side is fast for N=6)
+            path_info = np.einsum_path(
+                env_eq,
+                *[np.empty(self.cores[i].shape) for i in other_ids],
+                optimize="optimal",
+            )
+            path = path_info[0]
+            env_specs.append((env_eq, other_ids, n_rows, n_cols, path))
+
+        full_path_info = np.einsum_path(
+            self.eq, *[np.empty(c.shape) for c in self.cores], optimize="optimal"
+        )
+        full_path = full_path_info[0]
+
+        loss_history = []
+        for _ in range(max_epochs):
+            for k in range(N):
+                env_eq, other_ids, n_rows, n_cols, path_arg = env_specs[k]
+                Xk = _pam_unfold(target, k, xp)
+                Gk = _pam_unfold(self.cores[k], k, xp)
+
+                M = xp.einsum(
+                    env_eq, *[self.cores[i] for i in other_ids], optimize=path_arg
+                ).reshape(n_rows, n_cols)
+                tempC = Xk @ M + rho * Gk
+                tempA = M.T @ M + rho * xp.eye(n_cols, dtype=Gk.dtype)
+
+                core_shape = [int(x) for x in self.adj_matrix[k].tolist()]
+                self.cores[k] = _pam_fold(
+                    xp.linalg.solve(tempA, tempC.T).T, k, core_shape, xp
+                )
+
+            recon = xp.einsum(self.eq, *self.cores, optimize=full_path)
+            loss_val = xp.linalg.norm(recon - target) / target_norm
+            loss_history.append(float(loss_val.item()))
+            if tol is not None and loss_history[-1] <= tol:
+                break
+
+        return loss_history
+
 
 def einsum_expr(adj_matrix, keep_rank1=True):
     dim = adj_matrix.shape[0]
     labels = iter("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    edge_labels = {}   # key: (min(i,j), max(i,j)) -> einsum char
+    edge_labels = {}  # key: (min(i,j), max(i,j)) -> einsum char
 
     input_terms = []
     output_labels = []
@@ -565,9 +840,9 @@ def sim_tensor_from_adj(A, std_dev=0.1, backend="torch", dtype="float32"):
     return ntwrk.contract_ntwrk(), cores
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     torch.manual_seed(1)
-    
+
     N = 5
     max_rank = 7
     A = random_adj_matrix(N, max_rank)

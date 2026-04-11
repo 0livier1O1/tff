@@ -8,13 +8,21 @@ if str(ROOT) not in sys.path:
 import argparse
 import json
 import subprocess
-import time
+import time as _time
 import pandas as pd
 import psutil
 import streamlit as st
 import cupy as cp
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from app.plots import plot_loss_and_regret, plot_arm_trace, plot_loss_vs_runtime_seed, plot_step_time_breakdown
+from scripts.utils import (
+    random_adj_matrix,
+    make_problem,
+    save_tensor,
+    save_image,
+    draw_tn_graph,
+)
 
 # Force page to wide layout, premium title
 st.set_page_config(page_title="Boss | TNSS Dashboard", layout="wide")
@@ -50,6 +58,11 @@ st.markdown(
     /* Ensure outer BaseWeb overlay inherits background erasure */
     div[data-baseweb="tooltip"] > div {
         background-color: transparent !important;
+    }
+
+    /* Compact vertical spacing between plotly charts */
+    div[data-testid="stPlotlyChart"] {
+        margin-bottom: -1rem;
     }
     </style>
     """,
@@ -92,67 +105,187 @@ beta, kernel_name, learn_noise, fixed_noise = (
 exp3_gamma, exp4_gamma, exp3_decay, exp4_eta = 0.2, 0.1, 0.95, 0.5
 exp3_loss_bins, exp3_cr_bins = 4, 4
 n_cores, max_rank, seed, budget, warm_start_epochs, max_edge_rank = 5, 6, 1, 15, 60, 10
+boss_n_init, boss_max_bond, boss_min_rse, boss_maxiter_tn, boss_ucb_beta = (
+    10,
+    10,
+    0.01,
+    1000,
+    2.0,
+)
+mabss_decomp_method, boss_decomp_method = "adam", "adam"
+mabss_warm_start_method, mabss_warm_start_epochs = None, 0
 policies_to_run = []
 run_name = "historical_load"
 
 if app_mode == "Run New Evaluation":
-    st.sidebar.markdown("### Search Context")
+    st.sidebar.markdown("### General Settings")
+    problem_source = st.sidebar.radio(
+        "Target Source", ["Synthetic", "Images"], horizontal=True
+    )
+
+    target_path = None
     col1, col2 = st.sidebar.columns(2)
-    n_cores = col1.number_input(
-        "Cores ($N$)",
-        min_value=3,
-        max_value=8,
-        value=5,
-        help=r"Total number of discrete cores in the dynamically synthesized tensor graph $\mathcal{G}_{target}$.",
-    )
-    max_rank = col2.number_input(
-        "Target Rank",
-        min_value=2,
-        max_value=15,
-        value=6,
-        help=r"Optimal bond dimension limit bounding $\chi$.",
-    )
+
+    if problem_source == "Synthetic":
+        n_cores = col1.number_input(
+            "Cores ($N$)",
+            min_value=3,
+            max_value=8,
+            value=5,
+            help=r"Total number of discrete cores in the target tensor graph.",
+        )
+        max_rank = col2.number_input(
+            "Synthetic Max Rank",
+            min_value=2,
+            max_value=15,
+            value=6,
+            help=r"Rank of the synthetic 'goal' tensor. The algorithm will try to find this complexity.",
+        )
+    else:
+        img_dir = Path("data/images")
+        if img_dir.exists():
+            img_files = sorted([f.name for f in img_dir.glob("*.npz")])
+            if not img_files:
+                st.sidebar.error("No .npz files found in data/images")
+                st.stop()
+            selected_img = st.sidebar.selectbox("Select Target Image", img_files)
+            target_path = str(img_dir / selected_img)
+
+            n_cores = col1.selectbox(
+                "Cores ($N$)",
+                [4, 6, 8, 10, 12, 16],
+                index=2,
+                help="Reshape image into N cores.",
+            )
+            # For images, we always start search with Rank 1.
+            max_rank = 1
+
+            # Visual Preview
+            try:
+                import scripts.utils as utils
+                import importlib
+
+                importlib.reload(utils)
+
+                _, target_cp = utils.load_target_tensor(target_path)
+
+                # If n_cores changed from file default (usually 8), simulate the reshape result
+                if n_cores != target_cp.ndim:
+                    img_2d = utils.reconstruct_image(target_cp)
+                    target_display = utils.retensorize_image(img_2d, n_cores)
+                else:
+                    target_display = target_cp
+
+                st.sidebar.markdown(f"**Shape**: `{target_display.shape}`")
+                with st.sidebar.expander("Show Preview", expanded=False):
+                    img_preview = utils.reconstruct_image(
+                        target_cp
+                    )  # always show original 2D for preview
+                    st.image(img_preview, use_container_width=True)
+            except Exception as e:
+                st.sidebar.warning(f"Could not preview image: {e}")
+
+            st.sidebar.info(
+                f"Re-tensorizing {selected_img} to $N={n_cores}$. Mode sizes are powers of 2 mapping to 256x256 pixels."
+            )
+        else:
+            st.sidebar.error("data/images directory not found.")
+            st.stop()
+
+    seeds_default = "1" if problem_source == "Synthetic" else "1"
     seeds_str = st.sidebar.text_input(
         "Random Seeds (csv)",
-        "1, 2, 3",
+        seeds_default,
         help="Comma-separated string defining execution iteration arrays.",
+    )
+    cuda_device = st.sidebar.selectbox(
+        "CUDA Device",
+        [0, 1],
+        index=0,
+        help="GPU device index passed as CUDA_VISIBLE_DEVICES to all subprocesses.",
     )
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### Execution Settings")
-    budget = st.sidebar.slider(
-        "Steps Budget",
-        min_value=1,
-        max_value=50,
-        value=15,
-        help="Exploration bounds $T$ halting the search constraints.",
-    )
-    warm_start_epochs = st.sidebar.slider(
-        "Decomp Epochs",
-        min_value=10,
-        max_value=400,
-        value=60,
-        step=10,
-        help="Convergence epochs explicitly allocated for $Q_{\text{warm}}$ local heuristic tensor factorization priors.",
-    )
-    max_edge_rank = st.sidebar.number_input(
-        "Max Edge Rank Limit",
-        value=10,
-        help=r"Theoretical continuous upper bound strictly clipping dimensional feature arrays $\chi_{\text{max}}$.",
-    )
-    policies_to_run = st.sidebar.multiselect(
-        "Active Policies",
-        ["greedy", "ucb", "exp3", "exp4"],
-        default=["greedy", "exp4"],
-        help="MAB sub-routines testing incrementally within the continuous environment space.",
-    )
+    st.sidebar.markdown("#### Algorithm Settings")
+    with st.sidebar.container():
+        budget = st.sidebar.slider(
+            "Steps Budget",
+            min_value=1,
+            max_value=50,
+            value=15,
+            help="Number of topological search steps (MABSS) or BO evaluations (BOSS).",
+        )
+        policies_to_run = st.sidebar.multiselect(
+            "Active Policies",
+            [
+                "mabss-greedy",
+                "mabss-ucb",
+                "mabss-exp3",
+                "mabss-exp4",
+                "boss-ei",
+                "boss-ucb",
+            ],
+            default=["mabss-greedy", "mabss-exp4"],
+            help="Search algorithms: `mabss-*` are sequential bandit rank-increment policies; `boss-*` are global BO structure search.",
+        )
+        max_edge_rank = st.sidebar.number_input(
+            "Max Search Rank (Hard Limit)",
+            min_value=2,
+            max_value=100,
+            value=10,
+            help=r"Global search constraint: The maximal allowed bond dimension $\chi$ for any edge in the network.",
+        )
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("#### Decomposition Settings")
+    with st.sidebar.container():
+        warm_start_epochs = st.sidebar.slider(
+            "Decomp Epochs",
+            min_value=10,
+            max_value=400,
+            value=60,
+            step=10,
+            help="Epochs for each local tensor decomposition evaluation.",
+        )
+
+        has_mabss = any(p.startswith("mabss-") for p in policies_to_run)
+        has_boss = any(p.startswith("boss-") for p in policies_to_run)
+
+        decomp_method = st.sidebar.selectbox(
+            "Decomp Engine",
+            ["adam", "sgd", "pam", "als", "pam (torch)"],
+            index=0,
+            help="pam (torch). sgd/adam/pam/als: via cuTensorNetwork (GPU).",
+        )
+        mabss_decomp_method = decomp_method
+        boss_decomp_method = decomp_method
+
+        if has_mabss:
+            ws_col1, ws_col2 = st.sidebar.columns(2)
+            mabss_warm_start_method = ws_col1.selectbox(
+                "Warm Start",
+                ["None", "pam", "als"],
+                index=0,
+            )
+            if mabss_warm_start_method == "None":
+                mabss_warm_start_method = None
+            mabss_warm_start_epochs = ws_col2.number_input(
+                "Warm Iters",
+                value=0,
+                min_value=0,
+                step=10,
+            )
+        else:
+            mabss_warm_start_method = None
+            mabss_warm_start_epochs = 0
 
     st.sidebar.markdown("---")
     if policies_to_run:
         with st.sidebar.expander("Advanced Policy Tuning"):
-            has_ucb = "ucb" in policies_to_run or "exp4" in policies_to_run
-            if has_ucb:
-                st.markdown("**GP-UCB Surrogate**")
+            has_mabss_ucb = (
+                "mabss-ucb" in policies_to_run or "mabss-exp4" in policies_to_run
+            )
+            if has_mabss_ucb:
+                st.markdown("**MABSS · GP-UCB Surrogate**")
                 u1, u2 = st.columns(2)
                 kernel_name = u1.selectbox(
                     "Kernel",
@@ -166,83 +299,101 @@ if app_mode == "Run New Evaluation":
                     10.0,
                     5.0,
                     0.5,
-                    help=r"Upper Confidence Bound tuning scalar driving exploratory variance scaling: $\mu_{t}(x) + \beta \sigma_{t}(x)$.",
+                    help=r"Upper Confidence Bound tuning scalar: $\mu_{t}(x) + \beta \sigma_{t}(x)$.",
                 )
                 n1, n2 = st.columns(2)
-                learn_noise = n1.checkbox(
-                    "Learn Noise",
-                    value=False,
-                    help="Enable automatic likelihood optimization to fit homoscedastic observational noise limits.",
-                )
-                fixed_noise_str = n2.text_input(
-                    "Fixed Noise",
-                    "1e-6",
-                    help=r"Manually fixed scalar for homoscedastic intrinsic noise $\sigma^2_y$.",
-                )
+                learn_noise = n1.checkbox("Learn Noise", value=False)
+                fixed_noise_str = n2.text_input("Fixed Noise", "1e-6")
                 if not learn_noise:
                     try:
                         fixed_noise = float(fixed_noise_str)
                     except ValueError:
                         pass
 
-            if has_ucb and "exp3" in policies_to_run:
+            if has_mabss_ucb and "mabss-exp3" in policies_to_run:
                 st.markdown("---")
 
-            if "exp3" in policies_to_run:
-                st.markdown("**EXP3 Parameters**")
+            if "mabss-exp3" in policies_to_run:
+                st.markdown("**MABSS · EXP3 Parameters**")
                 e1, e2 = st.columns(2)
                 exp3_gamma = e1.slider(
-                    "EXP3 Mix (Gamma)",
+                    "EXP3 Gamma",
                     0.0,
                     1.0,
                     0.2,
-                    help=r"Probability smoothing subset $\gamma \in (0,1]$ balancing adversarial exploitation bounds.",
+                    help=r"$\gamma \in (0,1]$ smoothing parameter.",
                 )
-                exp3_decay = e2.number_input(
-                    "EXP3 Decay",
-                    value=0.95,
-                    step=0.01,
-                    help="Iterative discount momentum shrinkage metric preventing policy collapse.",
-                )
+                exp3_decay = e2.number_input("EXP3 Decay", value=0.95, step=0.01)
 
             if (
-                "ucb" in policies_to_run or "exp3" in policies_to_run
-            ) and "exp4" in policies_to_run:
+                has_mabss_ucb or "mabss-exp3" in policies_to_run
+            ) and "mabss-exp4" in policies_to_run:
                 st.markdown("---")
 
-            if "exp4" in policies_to_run:
-                st.markdown("**EXP4 Parameters**")
+            if "mabss-exp4" in policies_to_run:
+                st.markdown("**MABSS · EXP4 Parameters**")
                 e3, e4 = st.columns(2)
-                exp4_gamma = e3.slider(
-                    "EXP4 Mix (Gamma)",
-                    0.0,
-                    1.0,
-                    0.1,
-                    help="Agnostic mix proportion bounding algorithm uniform distributions limits.",
-                )
-                exp4_eta = e4.number_input(
-                    "EXP4 Learning Rate (Eta)",
-                    value=0.5,
-                    step=0.1,
-                    help=r"Non-stationary gradient tracking scalar optimization multiplier $\eta = \sqrt{2 \ln N / T K}$.",
-                )
-                st.markdown("**State Discretization (EXP4 Context)**")
+                exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, 0.1)
+                exp4_eta = e4.number_input("EXP4 Eta", value=0.5, step=0.1)
+                st.markdown("**EXP4 Context Discretization**")
                 b1, b2 = st.columns(2)
-                exp3_loss_bins = b1.number_input(
-                    "Loss Bins",
-                    value=4,
-                    min_value=1,
-                    help="Dimensional bounds structurally discretizing continuous objective loss manifolds.",
+                exp3_loss_bins = b1.number_input("Loss Bins", value=4, min_value=1)
+                exp3_cr_bins = b2.number_input("CR Bins", value=4, min_value=1)
+
+            has_boss = any(p.startswith("boss-") for p in policies_to_run)
+            if has_boss:
+                if (
+                    has_mabss_ucb
+                    or "mabss-exp3" in policies_to_run
+                    or "mabss-exp4" in policies_to_run
+                ):
+                    st.markdown("---")
+                st.markdown("**BOSS · Global Bayesian Optimization**")
+                ba1, ba2 = st.columns(2)
+                boss_n_init = ba1.number_input(
+                    "Init Points ($n_{\\text{init}}$)",
+                    value=10,
+                    min_value=2,
+                    help="Sobol quasi-random evaluations before BO loop starts.",
                 )
-                exp3_cr_bins = b2.number_input(
-                    "CR Bins",
-                    value=4,
+                boss_max_bond = ba2.number_input(
+                    "Max Bond Rank",
+                    value=10,
                     min_value=1,
-                    help=r"Discrete bins clustering compression tracking metric dimensions $CR \in [0, \epsilon]$.",
+                    help=r"Upper bound on each bond rank in the search space.",
                 )
+                bb1, bb2 = st.columns(2)
+                boss_min_rse = bb1.number_input(
+                    "Min RSE Target",
+                    value=0.01,
+                    format="%f",
+                    help="Early-stop threshold per TN evaluation.",
+                )
+                boss_maxiter_tn = bb2.number_input(
+                    "PAM Iterations",
+                    value=1000,
+                    min_value=10,
+                    help="FCTN-PAM iterations per structure evaluation.",
+                )
+                if "boss-ucb" in policies_to_run:
+                    boss_ucb_beta = st.slider(
+                        "BOSS UCB Beta ($\\beta$)",
+                        0.1,
+                        10.0,
+                        2.0,
+                        0.1,
+                        help=r"Exploration weight for UCB acquisition: $\mu(x) - \beta\sigma(x)$.",
+                    )
 
     st.sidebar.markdown("### Storage Options")
-    run_name = st.sidebar.text_input("Run Name", value="streamlit_experiment")
+    # exp_{synthetic/image}_{budget}s_{epochs}d
+    exp_src_label = (
+        problem_source.lower()[:-1] if problem_source == "Images" else "synthetic"
+    )
+    default_run_name = (
+        f"exp_{exp_src_label}_{budget}s_{warm_start_epochs}d_{decomp_method}"
+    )
+    run_name = st.sidebar.text_input("Run Name", value=default_run_name)
 
 
 def get_args():
@@ -286,184 +437,80 @@ import matplotlib.pyplot as plt
 import networkx as nx
 
 POLICY_COLORS = {
-    "greedy": "#4E79A7",
-    "ucb": "#E15759",
-    "exp3": "#59A14F",
-    "exp4": "#F28E2B",
+    "mabss-greedy": "#4E79A7",
+    "mabss-ucb": "#E15759",
+    "mabss-exp3": "#59A14F",
+    "mabss-exp4": "#F28E2B",
+    "boss-ei": "#9467BD",
+    "boss-ucb": "#8C564B",
 }
 
 
+def get_policy_color(name: str):
+    """Robust color lookup for policy naming variations."""
+    if not name:
+        return "#888888"
+    n = name.lower().replace("_", "-")
+    if n in POLICY_COLORS:
+        return POLICY_COLORS[n]
+    # Map short names back to standard colors
+    for suffix in ["greedy", "ucb", "exp3", "exp4", "ei"]:
+        if n.endswith(suffix):
+            # Find the first key that ends with this suffix
+            for k in POLICY_COLORS:
+                if k.endswith(suffix):
+                    return POLICY_COLORS[k]
+    return "#888888"
+
+
 def _load_artifact(out_dir: Path):
-    """Load traces.csv and summary.json from all seed_* subdirs of out_dir.
-    Returns (df_rows, summaries) or (None, []) if no traces found."""
+    """Load results from all seed_*/policy_name/ subdirs.
+    Falls back to flat seed_*/traces.csv for legacy runs."""
     traces, summaries = [], []
-    for d in sorted(out_dir.iterdir()):
-        if not (d.is_dir() and d.name.startswith("seed_")):
+    for seed_d in sorted(out_dir.iterdir()):
+        if not (seed_d.is_dir() and seed_d.name.startswith("seed_")):
             continue
-        seed_val = int(d.name.split("_")[1])
-        if (d / "traces.csv").exists():
-            df_s = pd.read_csv(d / "traces.csv")
-            df_s["Seed"] = seed_val
-            traces.append(df_s)
-        if (d / "summary.json").exists():
-            with open(d / "summary.json", "r") as f:
-                for s in json.load(f):
-                    s["Seed"] = seed_val
-                    summaries.append(s)
+        seed_val = int(seed_d.name.split("_")[1])
+
+        # New per-policy subdir layout: seed_1/boss_ei/traces.csv
+        pol_dirs = [d for d in seed_d.iterdir() if d.is_dir()]
+        for pol_d in sorted(pol_dirs):
+            pol_name = pol_d.name.replace("_", "-")  # boss_ei -> boss-ei
+
+            # Strict lookup for traces.csv and summary.json
+            t_path = pol_d / "traces.csv"
+            if not t_path.exists():
+                # Fallback to single match for traces_*.csv if renamed during run
+                t_files = list(pol_d.glob("traces*.csv"))
+                if t_files:
+                    t_path = t_files[0]
+                else:
+                    t_path = None
+
+            if t_path and t_path.exists():
+                df_p = pd.read_csv(t_path)
+                df_p["Policy"] = pol_name
+                df_p["Seed"] = seed_val
+                traces.append(df_p)
+
+            s_path = pol_d / "summary.json"
+            if not s_path.exists():
+                s_files = list(pol_d.glob("summary*.json"))
+                if s_files:
+                    s_path = s_files[0]
+                else:
+                    s_path = None
+
+            if s_path and s_path.exists():
+                with open(s_path) as f:
+                    for s in json.load(f):
+                        s["Seed"] = seed_val
+                        s["policy"] = pol_name
+                        summaries.append(s)
+
     if not traces:
         return None, []
     return pd.concat(traces, ignore_index=True), summaries
-
-
-def draw_tn_graph(A, out_path, title):
-    import cupy as cp
-
-    A_np = cp.asnumpy(A).astype(int)
-    n_cores = A_np.shape[0]
-
-    G = nx.Graph()
-    for i in range(n_cores):
-        G.add_node(f"C{i}", color="lightblue")
-
-    for i in range(n_cores):
-        for j in range(i + 1, n_cores):
-            rank = A_np[i, j]
-            if rank > 0:
-                G.add_edge(f"C{i}", f"C{j}", label=str(rank), style="solid")
-
-    for i in range(n_cores):
-        dim = A_np[i, i]
-        if dim > 0:
-            p_node = f"P{i}"
-            G.add_node(p_node, color="lightgreen")
-            G.add_edge(f"C{i}", p_node, label=str(dim), style="dashed")
-
-    # 1. We rigidly establish mathematically perfect geometric symmetry for the Cores
-    core_nodes = [n for n in G.nodes() if str(n).startswith("C")]
-    pos = nx.circular_layout(core_nodes)
-
-    # 2. Vector projections: physical arms strictly project radially out from their core to prevent tangles
-    import numpy as np
-
-    for i in range(n_cores):
-        core = f"C{i}"
-        p_node = f"P{i}"
-        if p_node in G.nodes():
-            v = np.array(pos[core])
-            norm = np.linalg.norm(v)
-            v_dir = np.array([0.0, 1.0]) if norm < 1e-5 else v / norm
-            # Place dangling node exactly 0.5 units away straight outward
-            pos[p_node] = pos[core] + v_dir * 0.5
-
-    fig_g, ax_g = plt.subplots(figsize=(8, 7))
-
-    # Draw exclusively the cores (massive hardware nodes)
-    nx.draw_networkx_nodes(
-        G,
-        pos,
-        nodelist=core_nodes,
-        node_color="lightblue",
-        node_size=2500,
-        ax=ax_g,
-        edgecolors="gray",
-        linewidths=2,
-    )
-
-    # Segregate tensor dimension links
-    internal_edges = [
-        (u, v)
-        for u, v in G.edges()
-        if str(u).startswith("C") and str(v).startswith("C")
-    ]
-    external_edges = [
-        (u, v)
-        for u, v in G.edges()
-        if not (str(u).startswith("C") and str(v).startswith("C"))
-    ]
-
-    # Render edges
-    nx.draw_networkx_edges(
-        G,
-        pos,
-        edgelist=internal_edges,
-        width=3.0,
-        ax=ax_g,
-        alpha=0.9,
-        edge_color="slategray",
-    )
-    nx.draw_networkx_edges(
-        G,
-        pos,
-        edgelist=external_edges,
-        width=2.5,
-        ax=ax_g,
-        style="dashed",
-        alpha=0.5,
-        edge_color="forestgreen",
-    )
-
-    # Massive Core labels
-    nx.draw_networkx_labels(
-        G,
-        pos,
-        labels={n: n for n in core_nodes},
-        font_size=15,
-        font_weight="bold",
-        ax=ax_g,
-    )
-
-    # Internal learned Ranks (red)
-    internal_labels = {
-        e: nx.get_edge_attributes(G, "label")[e]
-        for e in internal_edges
-        if e in nx.get_edge_attributes(G, "label")
-    }
-    nx.draw_networkx_edge_labels(
-        G,
-        pos,
-        edge_labels=internal_labels,
-        ax=ax_g,
-        font_color="firebrick",
-        font_size=16,
-        font_weight="bold",
-        label_pos=0.5,
-        rotate=False,
-    )
-
-    # Physical standard dimensions (green text explicit geometry bounding)
-    edge_attr = nx.get_edge_attributes(G, "label")
-    for e in external_edges:
-        u, v = e
-        if str(u).startswith("P"):
-            u, v = v, u  # Mandate vector u (core) -> v (dangling)
-        label = edge_attr.get((u, v), edge_attr.get((v, u), ""))
-
-        # Explicitly peg to exactly 90% along the visible radius outwards
-        x = pos[u][0] + (pos[v][0] - pos[u][0]) * 0.90
-        y = pos[u][1] + (pos[v][1] - pos[u][1]) * 0.90
-
-        # Draw with a slight alpha white backdrop so lines don't strike through integers
-        ax_g.text(
-            x,
-            y,
-            str(label),
-            color="darkgreen",
-            fontsize=15,
-            fontweight="bold",
-            ha="center",
-            va="center",
-            bbox=dict(
-                facecolor="white", edgecolor="none", alpha=0.7, boxstyle="round,pad=0.1"
-            ),
-        )
-
-    ax_g.set_aspect("equal")
-    ax_g.axis("off")
-    ax_g.set_title(title, fontweight="bold", fontsize=18)
-    plt.tight_layout()
-    # Apply generous padding to prevent radial labels cutting off
-    plt.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.3)
-    plt.close(fig_g)
 
 
 # --- EXECUTION OR LOAD PIPELINE ---
@@ -529,222 +576,298 @@ if app_mode == "Run New Evaluation":
                 unsafe_allow_html=True,
             )
 
-        # Base CLI args shared across all seeds; seed-specific args appended per iteration
-        base_args = [
-            "conda",
-            "run",
-            "-n",
-            "tensors",
-            "python",
-            "scripts/experiments/run_mabss_experiment.py",
-            "--budget",
-            str(budget),
-            "--warm-start-epochs",
-            str(warm_start_epochs),
-            "--n-cores",
-            str(n_cores),
-            "--max-rank",
-            str(max_rank),
-            "--max-edge-rank",
-            str(max_edge_rank),
-            "--beta",
-            str(beta),
-            "--kernel-name",
-            kernel_name,
-            "--fixed-noise",
-            str(fixed_noise),
-            "--stopping-threshold",
-            "1e-5",
-            "--deterministic-eval",
-            "--exp3-gamma",
-            str(exp3_gamma),
-            "--exp3-decay",
-            str(exp3_decay),
-            "--exp3-reward-scale",
-            "0.05",
-            "--exp3-loss-bins",
-            str(exp3_loss_bins),
-            "--exp3-cr-bins",
-            str(exp3_cr_bins),
-            "--exp3-loss-cap",
-            "1.5",
-            "--exp3-log-cr-cap",
-            "8.0",
-            "--exp4-gamma",
-            str(exp4_gamma),
-            "--exp4-decay",
-            str(exp3_decay),
-            "--exp4-eta",
-            str(exp4_eta),
-            "--dtype",
-            "float32",
-        ]
-        if learn_noise:
-            base_args.append("--learn-noise")
+        def _mabss_cmd(seed, pol_name, pol_dir):
+            """Build CLI args for run_mabss_experiment.py."""
+            mabss_pol = pol_name.replace("mabss-", "")
+            cmd = [
+                "conda",
+                "run",
+                "-n",
+                "tensors",
+                "python",
+                "scripts/experiments/run_mabss_experiment.py",
+                "--budget",
+                str(budget),
+                "--warm-start-epochs",
+                str(warm_start_epochs),
+                "--n-cores",
+                str(n_cores),
+                "--max-rank",
+                str(max_rank),
+                "--max-edge-rank",
+                str(max_edge_rank),
+                "--beta",
+                str(beta),
+                "--kernel-name",
+                kernel_name,
+                "--fixed-noise",
+                str(fixed_noise),
+                "--stopping-threshold",
+                "1e-5",
+                "--deterministic-eval",
+                "--exp3-gamma",
+                str(exp3_gamma),
+                "--exp3-decay",
+                str(exp3_decay),
+                "--exp3-reward-scale",
+                "0.05",
+                "--exp3-loss-bins",
+                str(exp3_loss_bins),
+                "--exp3-cr-bins",
+                str(exp3_cr_bins),
+                "--exp3-loss-cap",
+                "1.5",
+                "--exp3-log-cr-cap",
+                "8.0",
+                "--exp4-gamma",
+                str(exp4_gamma),
+                "--exp4-decay",
+                str(exp3_decay),
+                "--exp4-eta",
+                str(exp4_eta),
+                "--dtype",
+                "float32",
+                "--decomp-method",
+                mabss_decomp_method,
+                "--seed",
+                str(seed),
+                "--policies",
+                mabss_pol,
+                "--out-dir",
+                str(pol_dir),
+            ]
+            if learn_noise:
+                cmd.append("--learn-noise")
+            if mabss_warm_start_method and mabss_warm_start_epochs > 0:
+                cmd.extend(
+                    [
+                        "--warm-start-method",
+                        mabss_warm_start_method,
+                        "--warm-start-decomp-epochs",
+                        str(mabss_warm_start_epochs),
+                    ]
+                )
+            if target_path:
+                cmd.extend(["--target-path", target_path])
+            return cmd
+
+        def _boss_cmd(seed, pol_name, pol_dir):
+            """Build CLI args for run_boss_experiment.py."""
+            acqf = pol_name.split("-")[1]  # boss-ei -> ei
+            cmd = [
+                "conda",
+                "run",
+                "-n",
+                "tensors",
+                "python",
+                "scripts/experiments/run_boss_experiment.py",
+                "--n-cores",
+                str(n_cores),
+                "--max-rank",
+                str(max_rank),
+                "--seed",
+                str(seed),
+                "--budget",
+                str(budget),
+                "--n-init",
+                str(boss_n_init),
+                "--max-bond",
+                str(boss_max_bond),
+                "--min-rse",
+                str(boss_min_rse),
+                "--maxiter-tn",
+                str(boss_maxiter_tn),
+                "--acqf",
+                acqf,
+                "--ucb-beta",
+                str(boss_ucb_beta),
+                "--decomp-method",
+                boss_decomp_method,
+                "--out-dir",
+                str(pol_dir),
+            ]
+            if target_path:
+                cmd.extend(["--target-path", target_path])
+            return cmd
+
+        import os as _os, fcntl as _fcntl
 
         for idx, seed in enumerate(seeds):
             seed_dir = out_dir / f"seed_{seed}"
             seed_dir.mkdir(exist_ok=True)
-            done_file = seed_dir / ".done"
-            if done_file.exists():
-                done_file.unlink()
-            stale_prog = seed_dir / "progress.json"
-            if stale_prog.exists():
-                stale_prog.unlink()
 
-            cmd = base_args + [
-                "--seed",
-                str(seed),
-                "--policies",
-                *policies_to_run,
-                "--out-dir",
-                str(seed_dir),
-            ]
+            # Pre-save target artifacts at the seed level (shared by all policies)
+            from scripts.utils import make_problem, save_tensor, save_image
 
-            progress_bar.progress(
-                int((tasks_done / total_tasks) * 100),
-                text=f"Seed {seed} — launching...",
+            _class_args = argparse.Namespace(
+                n_cores=n_cores,
+                max_rank=max_rank,
+                target_path=target_path,
+                dtype="float32",
+                seed=seed,
             )
+            _, target = make_problem(_class_args)
 
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(ROOT),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
+            save_tensor(seed_dir / "target_tensor.npz", target)
+            if problem_source == "Images":
+                save_image(seed_dir / "target_image.png", target)
 
-            progress_file = seed_dir / "progress.json"
-            last_policy_seen = None
-
-            # --- POLLING LOOP: blocks Streamlit thread until subprocess exits ---
-            # Ticks every 1s: reads progress.json written by run_mabss_experiment.py,
-            # updates the progress bar, and refreshes the live RAM/VRAM chart.
-            total_steps = total_tasks * budget  # fixed denominator for x-axis
-            while proc.poll() is None:
-                time.sleep(2)
-
-                # Single read of progress.json per tick (used for both bar and global_step)
-                step_n, budget_n, cur_pol = 0, budget, "?"
-                try:
-                    if progress_file.exists():
-                        with open(progress_file, "r") as _pf:
-                            prog = json.load(_pf)
-                        cur_pol = prog.get("policy", "?")
-                        step_n = prog.get("step", 0)
-                        budget_n = prog.get("budget", budget)
-
-                        # Policy transition → mark the just-finished policy as done
-                        if last_policy_seen and last_policy_seen != cur_pol:
-                            tasks_done += 1
-                            completed_items.append(
-                                f"Seed {seed} / {last_policy_seen.upper()}"
-                            )
-                            render_completed()
-                        last_policy_seen = cur_pol
-
-                        pct = min(
-                            int(((tasks_done * budget + step_n) / total_steps) * 100),
-                            99,
-                        )
-                        progress_bar.progress(
-                            pct,
-                            text=f"Seed {seed} — [{cur_pol.upper()}] Step {step_n}/{budget_n}",
-                        )
-                except Exception:
-                    pass
-
-                # Poll RAM and GPU VRAM usage
-                ram_pct = psutil.virtual_memory().percent
-                gpu_pct = 0.0
-                try:
-                    free_m, total_m = cp.cuda.Device().mem_info
-                    gpu_pct = ((total_m - free_m) / total_m) * 100.0
-                except Exception:
-                    pass
-
-                global_step = tasks_done * budget + step_n
-                mem_history.append(
-                    {
-                        "x": global_step,
-                        "System RAM (%)": ram_pct,
-                        "GPU VRAM (%)": gpu_pct,
-                    }
-                )
-
-                # Rebuild and push live memory chart to the placeholder column
-                xs = [m["x"] for m in mem_history]
-                fig = go.Figure(
-                    [
-                        go.Scatter(
-                            x=xs,
-                            y=[m["System RAM (%)"] for m in mem_history],
-                            mode="lines",
-                            name="System RAM",
-                            line=dict(color="#636EFA", width=2),
-                        ),
-                        go.Scatter(
-                            x=xs,
-                            y=[m["GPU VRAM (%)"] for m in mem_history],
-                            mode="lines",
-                            name="GPU VRAM",
-                            line=dict(color="#EF553B", width=2),
-                        ),
-                    ]
-                )
-                fig.add_hline(
-                    y=90,
-                    line_dash="dash",
-                    line_color="red",
-                    opacity=0.5,
-                    annotation_text="OOM Threshold (90%)",
-                )
-                fig.update_layout(
-                    yaxis=dict(range=[0, 100], title="Usage (%)"),
-                    xaxis=dict(range=[0, total_steps], title="Global Step"),
-                    height=350,
-                    margin=dict(l=0, r=0, t=10, b=0),
-                    template="plotly_white",
-                    legend=dict(orientation="h", y=1.15),
-                )
-                mem_ui.plotly_chart(
-                    fig, use_container_width=True, key=f"mem_{len(mem_history)}"
-                )
-
-            retcode = proc.returncode
-            if retcode != 0:
-                stdout = proc.stdout.read() if proc.stdout else ""
-                st.error(
-                    f"Seed {seed} failed (exit {retcode}):\n```\n{stdout[-2000:]}\n```"
-                )
-                continue
-
-            # Mark all remaining policies for this seed as done
             for p in policies_to_run:
+                pol_dir = seed_dir / p.replace("-", "_")
+                pol_dir.mkdir(exist_ok=True)
+                for stale in [pol_dir / ".done", pol_dir / "progress.json"]:
+                    if stale.exists():
+                        stale.unlink()
+
+                is_boss = p.startswith("boss-")
+                cmd = (
+                    _boss_cmd(seed, p, pol_dir)
+                    if is_boss
+                    else _mabss_cmd(seed, p, pol_dir)
+                )
+
+                progress_bar.progress(
+                    int((tasks_done / total_tasks) * 100),
+                    text=f"Seed {seed} — [{p.upper()}] launching...",
+                )
+
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env={**_os.environ, "CUDA_VISIBLE_DEVICES": str(cuda_device)},
+                )
+
+                progress_file = pol_dir / "progress.json"
+                full_stdout = ""
+                total_steps = total_tasks * budget
+                step_n, budget_n = 0, budget
+
+                while proc.poll() is None:
+                    _time.sleep(2)
+
+                    # Drain stdout (prevents pipe-buffer hang)
+                    if proc.stdout:
+                        _fd = proc.stdout.fileno()
+                        _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
+                        _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | _os.O_NONBLOCK)
+                        try:
+                            chunk = proc.stdout.read()
+                            if chunk:
+                                full_stdout += chunk
+                        except Exception:
+                            pass
+
+                    try:
+                        if progress_file.exists():
+                            with open(progress_file) as _pf:
+                                prog = json.load(_pf)
+                            step_n = prog.get("step", 0)
+                            budget_n = prog.get("budget", budget)
+                            pct = min(
+                                int(
+                                    ((tasks_done * budget + step_n) / total_steps) * 100
+                                ),
+                                99,
+                            )
+                            progress_bar.progress(
+                                pct,
+                                text=f"Seed {seed} — [{p.upper()}] Step {step_n}/{budget_n}",
+                            )
+                    except Exception:
+                        pass
+
+                    ram_pct = psutil.virtual_memory().percent
+                    gpu_pct = 0.0
+                    try:
+                        free_m, total_m = cp.cuda.Device(cuda_device).mem_info
+                        gpu_pct = ((total_m - free_m) / total_m) * 100.0
+                    except Exception:
+                        pass
+
+                    global_step = tasks_done * budget + step_n
+                    mem_history.append(
+                        {
+                            "x": global_step,
+                            "System RAM (%)": ram_pct,
+                            "GPU VRAM (%)": gpu_pct,
+                        }
+                    )
+
+                    xs = [m["x"] for m in mem_history]
+                    fig = go.Figure(
+                        [
+                            go.Scatter(
+                                x=xs,
+                                y=[m["System RAM (%)"] for m in mem_history],
+                                mode="lines",
+                                name="System RAM",
+                                line=dict(color="#636EFA", width=2),
+                            ),
+                            go.Scatter(
+                                x=xs,
+                                y=[m["GPU VRAM (%)"] for m in mem_history],
+                                mode="lines",
+                                name="GPU VRAM",
+                                line=dict(color="#EF553B", width=2),
+                            ),
+                        ]
+                    )
+                    fig.add_hline(
+                        y=90,
+                        line_dash="dash",
+                        line_color="red",
+                        opacity=0.5,
+                        annotation_text="OOM Threshold (90%)",
+                    )
+                    fig.update_layout(
+                        yaxis=dict(range=[0, 100], title="Usage (%)"),
+                        xaxis=dict(range=[0, total_steps], title="Global Step"),
+                        height=350,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        template="plotly_white",
+                        legend=dict(orientation="h", y=1.15),
+                    )
+                    mem_ui.plotly_chart(
+                        fig, use_container_width=True, key=f"mem_{len(mem_history)}"
+                    )
+
+                retcode = proc.returncode
+                if retcode != 0:
+                    st.error(
+                        f"Seed {seed} / {p.upper()} failed (exit {retcode}):\n```\n{full_stdout[-2000:]}\n```"
+                    )
+                    continue
+
                 label = f"Seed {seed} / {p.upper()}"
                 if label not in completed_items:
                     tasks_done += 1
                     completed_items.append(label)
-            render_completed()
+                render_completed()
 
-            # Load per-seed results from disk into aggregate lists
-            traces_path = seed_dir / "traces.csv"
-            summary_path = seed_dir / "summary.json"
-            if traces_path.exists():
-                df_seed = pd.read_csv(traces_path)
-                all_traces.extend(df_seed.to_dict("records"))
-            if summary_path.exists():
-                with open(summary_path, "r") as f:
-                    seed_summaries = json.load(f)
-                    all_summaries.extend(seed_summaries)
+                if (pol_dir / "traces.csv").exists():
+                    df_pol = pd.read_csv(pol_dir / "traces.csv")
+                    df_pol["Policy"] = p
+                    all_traces.extend(df_pol.to_dict("records"))
+                if (pol_dir / "summary.json").exists():
+                    with open(pol_dir / "summary.json") as f:
+                        for entry in json.load(f):
+                            entry["Seed"] = seed
+                            entry["policy"] = p
+                            all_summaries.append(entry)
 
-        # Bubble up
-        df_rows = pd.DataFrame(all_traces)
-        summaries = all_summaries
+            with open(seed_dir / ".done", "w") as f:
+                f.write("ok")
+
+        # Bubble up and persist to session state for immediate rendering
+        st.session_state["df_rows"] = pd.DataFrame(all_traces)
+        st.session_state["summaries"] = all_summaries
+        st.session_state["loaded_run"] = run_name
 
         progress_bar.progress(100, text="All tasks completed.")
         st.sidebar.success(f"Artifacts dumped to `artifacts/{run_name}`")
-        st.session_state["loaded_run"] = run_name
         data_ready = True
 else:
     # LOAD PAST ARTIFACT MODE
@@ -833,7 +956,7 @@ else:
             st.sidebar.markdown("### Static Configuration")
             c1, c2 = st.sidebar.columns(2)
             c1.metric("Cores ($N$)", cfg.get("n_cores", "-"))
-            c2.metric("Target Rank", cfg.get("max_rank", "-"))
+            c2.metric("Max Search Rank", cfg.get("max_edge_rank", "-"))
             b1, b2 = st.sidebar.columns(2)
             b1.metric("Steps Budget", cfg.get("budget", "-"))
             b2.metric("Decomp Epochs", cfg.get("warm_start_epochs", "-"))
@@ -861,6 +984,12 @@ if (
 
 # --- UNIFIED RENDERING PHASE ---
 if data_ready:
+    # Pull from locals or session state
+    if "df_rows" not in locals() or df_rows is None:
+        df_rows = st.session_state.get("df_rows", pd.DataFrame())
+    if "summaries" not in locals() or summaries is None:
+        summaries = st.session_state.get("summaries", [])
+
     if "df_summary" not in locals():
         df_summary = pd.DataFrame(summaries)
 
@@ -868,138 +997,10 @@ if data_ready:
 
     # --- MACRO PLOTS: mean ± std loss and cumulative regret across all seeds ---
     if not df_rows.empty:
-        # Color mapping across dynamic arrays
-        color_palette = [
-            "#636EFA",
-            "#EF553B",
-            "#00CC96",
-            "#AB63FA",
-            "#FFA15A",
-            "#19D3F3",
-            "#FF6692",
-            "#B6E880",
-        ]
         unique_policies = df_rows["Policy"].unique()
-        pol_colors = {
-            pol: color_palette[i % len(color_palette)]
-            for i, pol in enumerate(unique_policies)
-        }
+        pol_colors = {pol: get_policy_color(pol) for pol in unique_policies}
 
-        fig = make_subplots(
-            rows=1,
-            cols=2,
-            subplot_titles=(
-                "Mean Post-Step Loss (± 1 Std Dev)",
-                "Cumulative Oracle Regret (± 1 Std Dev)",
-            ),
-        )
-
-        for policy in unique_policies:
-            sub = df_rows[df_rows["Policy"] == policy]
-            gb = sub.groupby("step")
-            steps = list(gb.groups.keys())
-
-            mean_loss = gb["chosen_loss"].mean()
-            std_loss = gb["chosen_loss"].std().fillna(0)
-
-            mean_regret = gb["cum_regret"].mean()
-            std_regret = gb["cum_regret"].std().fillna(0)
-
-            color = pol_colors[policy]
-            rgb = f"rgba({int(color[1:3],16)}, {int(color[3:5],16)}, {int(color[5:7],16)}, 0.2)"
-
-            # Loss plotting
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_loss + std_loss,
-                    mode="lines",
-                    line=dict(width=0),
-                    showlegend=False,
-                    hoverinfo="skip",
-                ),
-                row=1,
-                col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_loss - std_loss,
-                    mode="lines",
-                    line=dict(width=0),
-                    fill="tonexty",
-                    fillcolor=rgb,
-                    showlegend=False,
-                    hoverinfo="skip",
-                ),
-                row=1,
-                col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_loss,
-                    mode="lines",
-                    line=dict(color=color, width=2),
-                    showlegend=False,
-                    name=policy.upper(),
-                ),
-                row=1,
-                col=1,
-            )
-
-            # Regret plotting
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_regret + std_regret,
-                    mode="lines",
-                    line=dict(width=0),
-                    showlegend=False,
-                    hoverinfo="skip",
-                ),
-                row=1,
-                col=2,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_regret - std_regret,
-                    mode="lines",
-                    line=dict(width=0),
-                    fill="tonexty",
-                    fillcolor=rgb,
-                    showlegend=False,
-                    hoverinfo="skip",
-                ),
-                row=1,
-                col=2,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=steps,
-                    y=mean_regret,
-                    mode="lines",
-                    line=dict(color=color, width=2),
-                    showlegend=True,
-                    name=policy.upper(),
-                ),
-                row=1,
-                col=2,
-            )
-
-        fig.update_layout(
-            margin=dict(l=0, r=0, t=30, b=0),
-            height=350,
-            template="plotly_white",
-            hovermode="x unified",
-        )
-        fig.update_xaxes(title_text="Search Step", row=1, col=1)
-        fig.update_yaxes(title_text="Normalized Loss", row=1, col=1)
-        fig.update_xaxes(title_text="Search Step", row=1, col=2)
-        fig.update_yaxes(title_text="Regret", row=1, col=2)
-
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(plot_loss_and_regret(df_rows), use_container_width=True)
 
     st.divider()
     st.markdown("## Seed-Specific Analysis Maps")
@@ -1015,9 +1016,8 @@ if data_ready:
             # Policy discrete layout
             policies = seed_df["Policy"].unique()
 
-            import numpy as np
-
             seed_summaries = [s for s in summaries if s.get("Seed") == seed]
+            pol_names = [s["policy"] for s in seed_summaries]
             s_dir = (
                 out_dir / f"seed_{seed}"
                 if (out_dir / f"seed_{seed}").exists()
@@ -1060,11 +1060,11 @@ if data_ready:
                 df_sum["Arm Entropy"] = df_sum["Arm Entropy"].round(3)
 
                 def _style_row(row):
-                    c = POLICY_COLORS.get(row["Policy"].lower(), "#888888")
-                    light = c + "22"
+                    c = get_policy_color(row["Policy"])
+                    light = c + "15"  # Even lighter for better readability
                     styles = [f"background-color: {light}"] * len(row)
                     styles[0] = (
-                        f"background-color: {c}; color: white; font-weight: bold"
+                        f"background-color: {c}; color: white; font-weight: bold; padding-left: 10px;"
                     )
                     return styles
 
@@ -1073,96 +1073,187 @@ if data_ready:
                     hide_index=True,
                     use_container_width=True,
                 )
-
             st.divider()
 
-            # --- Topology Grids ---
-            st.markdown("#### Topology Grids")
-            _, tc, _ = st.columns([2, 2, 2])
-            if (s_dir / "target_graph.png").exists():
-                tc.image(
-                    str(s_dir / "target_graph.png"),
-                    caption="Synthetic Base",
-                    use_container_width=True,
-                )
+            # --- Qualitative Analysis (Visual Fidelity & Topology) ---
+            st.markdown("#### Visualizing Tensor and Topology")
 
-            pol_names = [s["policy"] for s in seed_summaries]
-            if pol_names:
-                pcols = st.columns(len(pol_names))
-                for pcol, pol_name in zip(pcols, pol_names):
-                    p_path = s_dir / f"tn_graph_{pol_name}.png"
-                    if p_path.exists():
-                        pcol.image(
-                            str(p_path),
-                            caption=pol_name.upper(),
+            # Ground Truth / Target indicators (with nested search)
+            target_img_path = s_dir / "target_image.png"
+            target_graph_path = s_dir / "target_graph.png"
+
+            # Peek into policy subdirs if top-level missing (common with isolated runner calls)
+            if not target_graph_path.exists() and pol_names:
+                for p_name in pol_names:
+                    p_base = p_name.replace("-", "_")
+                    for pfx in ["", "mabss_", "boss_"]:
+                        cand = s_dir / f"{pfx}{p_base}" / "target_graph.png"
+                        if cand.exists():
+                            target_graph_path = cand
+                            break
+                    if target_graph_path.exists():
+                        break
+
+            if not target_img_path.exists() and pol_names:
+                for p_name in pol_names:
+                    p_base = p_name.replace("-", "_")
+                    for pfx in ["", "mabss_", "boss_"]:
+                        cand = s_dir / f"{pfx}{p_base}" / "target_image.png"
+                        if cand.exists():
+                            target_img_path = cand
+                            break
+                    if target_img_path.exists():
+                        break
+
+            has_gt_img = target_img_path.exists()
+            has_gt_graph = target_graph_path.exists()
+
+            if has_gt_img and pol_names:
+                # --- IMAGE MODE LAYOUT ---
+                n_cols = len(pol_names) + 1
+                row1 = st.columns(n_cols)
+
+                # 1. Target Image
+                with row1[0]:
+                    st.image(
+                        str(target_img_path), caption="Target", use_container_width=True
+                    )
+
+                # 2. Reconstructions (Row 1)
+                for i, pol_name in enumerate(pol_names):
+                    p_base = pol_name.replace("-", "_")
+                    p_subdir = s_dir / p_base
+                    if not p_subdir.exists():
+                        # Standard fallbacks for naming inconsistencies
+                        for pfx in ["mabss_", "boss_"]:
+                            if (s_dir / f"{pfx}{p_base}").exists():
+                                p_subdir = s_dir / f"{pfx}{p_base}"
+                                break
+
+                    p_img = p_subdir / "reconstruction.png"
+                    if not p_img.exists():
+                        p_img = s_dir / f"reconstruction_{p_base}.png"
+
+                    with row1[i + 1]:
+                        if p_img.exists():
+                            st.image(
+                                str(p_img),
+                                caption=pol_name.upper(),
+                                use_container_width=True,
+                            )
+                        else:
+                            st.info(f"No {pol_name} recon")
+
+                # 3. Topology Row (Row 2)
+                st.markdown("<br>", unsafe_allow_html=True)  # Subtle spacer
+                row2 = st.columns(n_cols)
+                # row2[0] is empty (Target does not have a discovered TN)
+
+                for i, pol_name in enumerate(pol_names):
+                    p_base = pol_name.replace("-", "_")
+                    p_subdir = s_dir / p_base
+                    if not p_subdir.exists():
+                        for pfx in ["mabss_", "boss_"]:
+                            if (s_dir / f"{pfx}{p_base}").exists():
+                                p_subdir = s_dir / f"{pfx}{p_base}"
+                                break
+
+                    p_graph = p_subdir / f"tn_graph_{pol_name}.png"
+                    if not p_graph.exists():
+                        short_p = pol_name.split("-")[-1]
+                        # Try short-name / underscore variations
+                        for cand in [
+                            f"tn_graph_{short_p}.png",
+                            f"tn_graph_{p_base}.png",
+                        ]:
+                            if (p_subdir / cand).exists():
+                                p_graph = p_subdir / cand
+                                break
+
+                    with row2[i + 1]:
+                        if p_graph.exists():
+                            st.image(
+                                str(p_graph),
+                                caption=f"{pol_name.upper()}",
+                                use_container_width=True,
+                            )
+
+            else:
+                # --- SYNTHETIC MODE LAYOUT ---
+                # Row 1: Target in the middle
+                if has_gt_graph:
+                    t_c1, t_c2, t_c3 = st.columns([1, 2, 1])
+                    with t_c2:
+                        st.image(
+                            str(target_graph_path),
+                            caption="Target Ground Truth Structure",
                             use_container_width=True,
                         )
 
+                # Row 2: Policy findings side-by-side
+                if pol_names:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    n_pols = len(pol_names)
+                    p_cols = st.columns(n_pols)
+                    for i, pol_name in enumerate(pol_names):
+                        p_base = pol_name.replace("-", "_")
+                        p_subdir = s_dir / p_base
+                        if not p_subdir.exists():
+                            for pfx in ["mabss_", "boss_"]:
+                                if (s_dir / f"{pfx}{p_base}").exists():
+                                    p_subdir = s_dir / f"{pfx}{p_base}"
+                                    break
+
+                        p_graph = p_subdir / f"tn_graph_{pol_name}.png"
+                        if not p_graph.exists():
+                            short_p = pol_name.split("-")[-1]
+                            for cand in [
+                                f"tn_graph_{short_p}.png",
+                                f"tn_graph_{p_base}.png",
+                            ]:
+                                if (p_subdir / cand).exists():
+                                    p_graph = p_subdir / cand
+                                    break
+                                elif (s_dir / cand).exists():
+                                    p_graph = s_dir / cand
+                                    break
+
+                        with p_cols[i]:
+                            if p_graph.exists():
+                                st.image(
+                                    str(p_graph),
+                                    caption=f"Found: {pol_name.upper()}",
+                                    use_container_width=True,
+                                )
+                            else:
+                                st.info(f"No {pol_name} structure")
+
             st.divider()
+
+            # --- Loss vs Runtime + Step Time Breakdown (side by side) ---
+            st.markdown("#### Computational Cost")
+            _col_rt, _col_bd = st.columns(2)
+            with _col_rt:
+                st.plotly_chart(
+                    plot_loss_vs_runtime_seed(seed_df),
+                    use_container_width=True,
+                )
+            with _col_bd:
+                st.plotly_chart(
+                    plot_step_time_breakdown(seed_df),
+                    use_container_width=True,
+                )
 
             # --- Trace Vectors (Plotly) ---
             st.markdown("#### Mathematical Trace Vectors")
             for s in seed_summaries:
                 pol_name = s["policy"]
-                pol_upper = pol_name.upper()
-                c = POLICY_COLORS.get(pol_name, "#888888")
+                c = get_policy_color(pol_name)
                 sub = seed_df[seed_df["Policy"] == pol_name]
                 if sub.empty:
                     continue
-                steps_v = sub["step"].values
-                chosen_arm = sub["selected_arm"].values
-                greedy_oracle = sub["oracle_best_arm"].values
-                rank_minus = (
-                    (sub["oracle_arm_rank"].values - 1)
-                    if "oracle_arm_rank" in sub.columns
-                    else np.zeros(len(sub))
-                )
-                hit_rate = sub["arm_match"].mean()
-                unique_arms = len(set(chosen_arm))
-
-                fig_t = go.Figure()
-                fig_t.add_trace(
-                    go.Scatter(
-                        x=steps_v,
-                        y=greedy_oracle,
-                        mode="lines",
-                        line=dict(color="#222222", width=1.5, shape="hv"),
-                        name="Greedy oracle arm",
-                    )
-                )
-                fig_t.add_trace(
-                    go.Scatter(
-                        x=steps_v,
-                        y=chosen_arm,
-                        mode="lines+markers",
-                        marker=dict(symbol="x", size=7, color=c),
-                        line=dict(color=c, width=2),
-                        name="Chosen arm",
-                    )
-                )
-                fig_t.add_trace(
-                    go.Scatter(
-                        x=steps_v,
-                        y=rank_minus,
-                        mode="lines",
-                        line=dict(color="#AAAAAA", width=2, dash="dash"),
-                        name="Oracle arm rank − 1",
-                    )
-                )
-                fig_t.update_layout(
-                    title=dict(
-                        text=f"{pol_upper} — hit rate={hit_rate:.2f}, unique arms={unique_arms}",
-                        font=dict(size=12),
-                    ),
-                    height=300,
-                    margin=dict(l=0, r=0, t=100, b=0),
-                    template="plotly_white",
-                    legend=dict(orientation="h", y=1.25, font=dict(size=10)),
-                    yaxis=dict(title="Arm id / rank−1", dtick=1),
-                    xaxis=dict(title="Search step", tickvals=steps_v.tolist()),
-                )
                 st.plotly_chart(
-                    fig_t,
+                    plot_arm_trace(sub, pol_name, c),
                     use_container_width=True,
                 )
 
