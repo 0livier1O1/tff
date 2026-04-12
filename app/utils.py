@@ -98,6 +98,8 @@ def _artifact_fully_done(out_dir: Path) -> bool:
             cfg = json.load(f)
         seeds = cfg.get("seeds", [cfg.get("seed", 1)])
         policies = cfg.get("policies", [])
+        if not seeds or not policies:
+            return False
         for sd in seeds:
             for p in policies:
                 if not (out_dir / f"seed_{sd}" / p.replace("-", "_") / ".done").exists():

@@ -543,6 +543,7 @@ if app_mode == "Run New Evaluation":
         with open(out_dir / "config.json", "w") as f:
             cfg = vars(args)
             cfg["seeds"] = seeds
+            cfg["policies"] = policies_to_run
             json.dump(cfg, f, indent=4)
 
         progress_bar = st.progress(0, text="Starting...")
