@@ -13,9 +13,8 @@ import pandas as pd
 import psutil
 import streamlit as st
 import cupy as cp
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from app.plots import plot_loss_and_regret, plot_arm_trace, plot_loss_vs_runtime_seed, plot_step_time_breakdown
+from app.utils import POLICY_COLORS, get_policy_color, _load_artifact, _artifact_fully_done, _build_mem_figure
 from scripts.utils import (
     random_adj_matrix,
     make_problem,
@@ -431,86 +430,77 @@ def get_args():
 
 
 import matplotlib
-
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import networkx as nx
-
-POLICY_COLORS = {
-    "mabss-greedy": "#4E79A7",
-    "mabss-ucb": "#E15759",
-    "mabss-exp3": "#59A14F",
-    "mabss-exp4": "#F28E2B",
-    "boss-ei": "#9467BD",
-    "boss-ucb": "#8C564B",
-}
 
 
-def get_policy_color(name: str):
-    """Robust color lookup for policy naming variations."""
-    if not name:
-        return "#888888"
-    n = name.lower().replace("_", "-")
-    if n in POLICY_COLORS:
-        return POLICY_COLORS[n]
-    # Map short names back to standard colors
-    for suffix in ["greedy", "ucb", "exp3", "exp4", "ei"]:
-        if n.endswith(suffix):
-            # Find the first key that ends with this suffix
-            for k in POLICY_COLORS:
-                if k.endswith(suffix):
-                    return POLICY_COLORS[k]
-    return "#888888"
+# ── Command builders ───────────────────────────────────────────────────────────
+# These reference module-level sidebar variables and are safe to call after
+# the sidebar block has been evaluated.
+
+def _mabss_cmd(seed, pol_name, pol_dir):
+    """Build CLI args for run_mabss_experiment.py."""
+    mabss_pol = pol_name.replace("mabss-", "")
+    cmd = [
+        "conda", "run", "-n", "tensors", "python",
+        "scripts/experiments/run_mabss_experiment.py",
+        "--budget", str(budget),
+        "--warm-start-epochs", str(warm_start_epochs),
+        "--n-cores", str(n_cores),
+        "--max-rank", str(max_rank),
+        "--max-edge-rank", str(max_edge_rank),
+        "--beta", str(beta),
+        "--kernel-name", kernel_name,
+        "--fixed-noise", str(fixed_noise),
+        "--stopping-threshold", "1e-5",
+        "--deterministic-eval",
+        "--exp3-gamma", str(exp3_gamma),
+        "--exp3-decay", str(exp3_decay),
+        "--exp3-reward-scale", "0.05",
+        "--exp3-loss-bins", str(exp3_loss_bins),
+        "--exp3-cr-bins", str(exp3_cr_bins),
+        "--exp3-loss-cap", "1.5",
+        "--exp3-log-cr-cap", "8.0",
+        "--exp4-gamma", str(exp4_gamma),
+        "--exp4-decay", str(exp3_decay),
+        "--exp4-eta", str(exp4_eta),
+        "--dtype", "float32",
+        "--decomp-method", mabss_decomp_method,
+        "--seed", str(seed),
+        "--policies", mabss_pol,
+        "--out-dir", str(pol_dir),
+    ]
+    if learn_noise:
+        cmd.append("--learn-noise")
+    if mabss_warm_start_method and mabss_warm_start_epochs > 0:
+        cmd.extend(["--warm-start-method", mabss_warm_start_method,
+                    "--warm-start-decomp-epochs", str(mabss_warm_start_epochs)])
+    if target_path:
+        cmd.extend(["--target-path", target_path])
+    return cmd
 
 
-def _load_artifact(out_dir: Path):
-    """Load results from all seed_*/policy_name/ subdirs.
-    Falls back to flat seed_*/traces.csv for legacy runs."""
-    traces, summaries = [], []
-    for seed_d in sorted(out_dir.iterdir()):
-        if not (seed_d.is_dir() and seed_d.name.startswith("seed_")):
-            continue
-        seed_val = int(seed_d.name.split("_")[1])
-
-        # New per-policy subdir layout: seed_1/boss_ei/traces.csv
-        pol_dirs = [d for d in seed_d.iterdir() if d.is_dir()]
-        for pol_d in sorted(pol_dirs):
-            pol_name = pol_d.name.replace("_", "-")  # boss_ei -> boss-ei
-
-            # Strict lookup for traces.csv and summary.json
-            t_path = pol_d / "traces.csv"
-            if not t_path.exists():
-                # Fallback to single match for traces_*.csv if renamed during run
-                t_files = list(pol_d.glob("traces*.csv"))
-                if t_files:
-                    t_path = t_files[0]
-                else:
-                    t_path = None
-
-            if t_path and t_path.exists():
-                df_p = pd.read_csv(t_path)
-                df_p["Policy"] = pol_name
-                df_p["Seed"] = seed_val
-                traces.append(df_p)
-
-            s_path = pol_d / "summary.json"
-            if not s_path.exists():
-                s_files = list(pol_d.glob("summary*.json"))
-                if s_files:
-                    s_path = s_files[0]
-                else:
-                    s_path = None
-
-            if s_path and s_path.exists():
-                with open(s_path) as f:
-                    for s in json.load(f):
-                        s["Seed"] = seed_val
-                        s["policy"] = pol_name
-                        summaries.append(s)
-
-    if not traces:
-        return None, []
-    return pd.concat(traces, ignore_index=True), summaries
+def _boss_cmd(seed, pol_name, pol_dir):
+    """Build CLI args for run_boss_experiment.py."""
+    acqf = pol_name.split("-")[1]  # boss-ei -> ei
+    cmd = [
+        "conda", "run", "-n", "tensors", "python",
+        "scripts/experiments/run_boss_experiment.py",
+        "--n-cores", str(n_cores),
+        "--max-rank", str(max_rank),
+        "--seed", str(seed),
+        "--budget", str(budget),
+        "--n-init", str(boss_n_init),
+        "--max-bond", str(boss_max_bond),
+        "--min-rse", str(boss_min_rse),
+        "--maxiter-tn", str(boss_maxiter_tn),
+        "--acqf", acqf,
+        "--ucb-beta", str(boss_ucb_beta),
+        "--decomp-method", boss_decomp_method,
+        "--out-dir", str(pol_dir),
+    ]
+    if target_path:
+        cmd.extend(["--target-path", target_path])
+    return cmd
 
 
 # --- EXECUTION OR LOAD PIPELINE ---
@@ -576,120 +566,6 @@ if app_mode == "Run New Evaluation":
                 unsafe_allow_html=True,
             )
 
-        def _mabss_cmd(seed, pol_name, pol_dir):
-            """Build CLI args for run_mabss_experiment.py."""
-            mabss_pol = pol_name.replace("mabss-", "")
-            cmd = [
-                "conda",
-                "run",
-                "-n",
-                "tensors",
-                "python",
-                "scripts/experiments/run_mabss_experiment.py",
-                "--budget",
-                str(budget),
-                "--warm-start-epochs",
-                str(warm_start_epochs),
-                "--n-cores",
-                str(n_cores),
-                "--max-rank",
-                str(max_rank),
-                "--max-edge-rank",
-                str(max_edge_rank),
-                "--beta",
-                str(beta),
-                "--kernel-name",
-                kernel_name,
-                "--fixed-noise",
-                str(fixed_noise),
-                "--stopping-threshold",
-                "1e-5",
-                "--deterministic-eval",
-                "--exp3-gamma",
-                str(exp3_gamma),
-                "--exp3-decay",
-                str(exp3_decay),
-                "--exp3-reward-scale",
-                "0.05",
-                "--exp3-loss-bins",
-                str(exp3_loss_bins),
-                "--exp3-cr-bins",
-                str(exp3_cr_bins),
-                "--exp3-loss-cap",
-                "1.5",
-                "--exp3-log-cr-cap",
-                "8.0",
-                "--exp4-gamma",
-                str(exp4_gamma),
-                "--exp4-decay",
-                str(exp3_decay),
-                "--exp4-eta",
-                str(exp4_eta),
-                "--dtype",
-                "float32",
-                "--decomp-method",
-                mabss_decomp_method,
-                "--seed",
-                str(seed),
-                "--policies",
-                mabss_pol,
-                "--out-dir",
-                str(pol_dir),
-            ]
-            if learn_noise:
-                cmd.append("--learn-noise")
-            if mabss_warm_start_method and mabss_warm_start_epochs > 0:
-                cmd.extend(
-                    [
-                        "--warm-start-method",
-                        mabss_warm_start_method,
-                        "--warm-start-decomp-epochs",
-                        str(mabss_warm_start_epochs),
-                    ]
-                )
-            if target_path:
-                cmd.extend(["--target-path", target_path])
-            return cmd
-
-        def _boss_cmd(seed, pol_name, pol_dir):
-            """Build CLI args for run_boss_experiment.py."""
-            acqf = pol_name.split("-")[1]  # boss-ei -> ei
-            cmd = [
-                "conda",
-                "run",
-                "-n",
-                "tensors",
-                "python",
-                "scripts/experiments/run_boss_experiment.py",
-                "--n-cores",
-                str(n_cores),
-                "--max-rank",
-                str(max_rank),
-                "--seed",
-                str(seed),
-                "--budget",
-                str(budget),
-                "--n-init",
-                str(boss_n_init),
-                "--max-bond",
-                str(boss_max_bond),
-                "--min-rse",
-                str(boss_min_rse),
-                "--maxiter-tn",
-                str(boss_maxiter_tn),
-                "--acqf",
-                acqf,
-                "--ucb-beta",
-                str(boss_ucb_beta),
-                "--decomp-method",
-                boss_decomp_method,
-                "--out-dir",
-                str(pol_dir),
-            ]
-            if target_path:
-                cmd.extend(["--target-path", target_path])
-            return cmd
-
         import os as _os, fcntl as _fcntl
 
         for idx, seed in enumerate(seeds):
@@ -697,8 +573,6 @@ if app_mode == "Run New Evaluation":
             seed_dir.mkdir(exist_ok=True)
 
             # Pre-save target artifacts at the seed level (shared by all policies)
-            from scripts.utils import make_problem, save_tensor, save_image
-
             _class_args = argparse.Namespace(
                 n_cores=n_cores,
                 max_rank=max_rank,
@@ -787,51 +661,15 @@ if app_mode == "Run New Evaluation":
                     except Exception:
                         pass
 
-                    global_step = tasks_done * budget + step_n
-                    mem_history.append(
-                        {
-                            "x": global_step,
-                            "System RAM (%)": ram_pct,
-                            "GPU VRAM (%)": gpu_pct,
-                        }
-                    )
-
-                    xs = [m["x"] for m in mem_history]
-                    fig = go.Figure(
-                        [
-                            go.Scatter(
-                                x=xs,
-                                y=[m["System RAM (%)"] for m in mem_history],
-                                mode="lines",
-                                name="System RAM",
-                                line=dict(color="#636EFA", width=2),
-                            ),
-                            go.Scatter(
-                                x=xs,
-                                y=[m["GPU VRAM (%)"] for m in mem_history],
-                                mode="lines",
-                                name="GPU VRAM",
-                                line=dict(color="#EF553B", width=2),
-                            ),
-                        ]
-                    )
-                    fig.add_hline(
-                        y=90,
-                        line_dash="dash",
-                        line_color="red",
-                        opacity=0.5,
-                        annotation_text="OOM Threshold (90%)",
-                    )
-                    fig.update_layout(
-                        yaxis=dict(range=[0, 100], title="Usage (%)"),
-                        xaxis=dict(range=[0, total_steps], title="Global Step"),
-                        height=350,
-                        margin=dict(l=0, r=0, t=10, b=0),
-                        template="plotly_white",
-                        legend=dict(orientation="h", y=1.15),
-                    )
+                    mem_history.append({
+                        "x": tasks_done * budget + step_n,
+                        "System RAM (%)": ram_pct,
+                        "GPU VRAM (%)": gpu_pct,
+                    })
                     mem_ui.plotly_chart(
-                        fig, use_container_width=True, key=f"mem_{len(mem_history)}"
+                        _build_mem_figure(mem_history, total_steps),
+                        use_container_width=True,
+                        key=f"mem_{len(mem_history)}",
                     )
 
                 retcode = proc.returncode
@@ -858,8 +696,8 @@ if app_mode == "Run New Evaluation":
                             entry["policy"] = p
                             all_summaries.append(entry)
 
-            with open(seed_dir / ".done", "w") as f:
-                f.write("ok")
+                with open(pol_dir / ".done", "w") as f:
+                    f.write("ok")
 
         # Bubble up and persist to session state for immediate rendering
         st.session_state["df_rows"] = pd.DataFrame(all_traces)
@@ -879,11 +717,7 @@ else:
         st.stop()
 
     past_runs = sorted(
-        [
-            d.name
-            for d in artifact_dir.iterdir()
-            if d.is_dir() and (d / "config.json").exists()
-        ],
+        [d.name for d in artifact_dir.iterdir() if d.is_dir() and _artifact_fully_done(d)],
         reverse=True,
     )
     if not past_runs:
@@ -897,8 +731,6 @@ else:
         st.session_state["loaded_run"] = ""  # Suppress unified renderer
         data_ready = False
         st.markdown("## Global Artifact Aggregation")
-
-        import json
 
         all_configs = []
         for run in past_runs:
