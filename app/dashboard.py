@@ -8,13 +8,15 @@ if str(ROOT) not in sys.path:
 import argparse
 import json
 import subprocess
-import time as _time
 import pandas as pd
 import psutil
 import streamlit as st
-import cupy as cp
 from app.plots import plot_loss_and_regret, plot_arm_trace, plot_loss_vs_runtime_seed, plot_step_time_breakdown
-from app.utils import POLICY_COLORS, get_policy_color, _load_artifact, _artifact_fully_done, _build_mem_figure
+from app.utils import (
+    POLICY_COLORS, get_policy_color,
+    _load_artifact, _artifact_fully_done,
+    _write_run_script, _job_status,
+)
 from scripts.utils import (
     random_adj_matrix,
     make_problem,
@@ -514,8 +516,6 @@ if app_mode == "Run New Evaluation":
             st.sidebar.error("Select at least one policy.")
             st.stop()
 
-        args = get_args()
-
         # Parse seed CSV string: supports ranges via "1, ..., 5" notation
         parts = [s.strip() for s in seeds_str.split(",")]
         raw_seeds = []
@@ -526,18 +526,13 @@ if app_mode == "Run New Evaluation":
                 if parts[i - 1].isdigit() and parts[i + 1].isdigit():
                     prev, nxt = int(parts[i - 1]), int(parts[i + 1])
                     if prev < nxt:
-                        raw_seeds.extend(list(range(prev + 1, nxt)))
-
-        seeds = []
-        for s in raw_seeds:
-            if s not in seeds:
-                seeds.append(s)
-
+                        raw_seeds.extend(range(prev + 1, nxt))
+        seeds = list(dict.fromkeys(raw_seeds))  # deduplicate preserving order
         if not seeds:
             st.sidebar.error("Provide valid integer seeds.")
             st.stop()
 
-        # Write run config to disk before launching subprocesses
+        args = get_args()
         out_dir = ROOT / "artifacts" / run_name
         out_dir.mkdir(parents=True, exist_ok=True)
         with open(out_dir / "config.json", "w") as f:
@@ -546,43 +541,16 @@ if app_mode == "Run New Evaluation":
             cfg["policies"] = policies_to_run
             json.dump(cfg, f, indent=4)
 
-        progress_bar = st.progress(0, text="Starting...")
-        col_log, col_mem = st.columns(2)
-        completed_log = col_log.empty()
-        mem_ui = col_mem.empty()
-
-        total_tasks = len(seeds) * len(policies_to_run)
-        all_traces = []
-        all_summaries = []
-        mem_history = []
-        completed_items = []
-        tasks_done = 0
-
-        def render_completed():
-            if not completed_items:
-                return
-            items_html = "<br>".join(f"<del>{item}</del>" for item in completed_items)
-            completed_log.markdown(
-                f'<div style="color:#999;font-size:0.8rem;line-height:1.2;margin:0;">{items_html}</div>',
-                unsafe_allow_html=True,
-            )
-
-        import os as _os, fcntl as _fcntl
-
-        for idx, seed in enumerate(seeds):
+        import os as _os
+        jobs, cmds = [], []
+        for seed in seeds:
             seed_dir = out_dir / f"seed_{seed}"
             seed_dir.mkdir(exist_ok=True)
-
-            # Pre-save target artifacts at the seed level (shared by all policies)
-            _class_args = argparse.Namespace(
-                n_cores=n_cores,
-                max_rank=max_rank,
-                target_path=target_path,
-                dtype="float32",
-                seed=seed,
+            _seed_args = argparse.Namespace(
+                n_cores=n_cores, max_rank=max_rank,
+                target_path=target_path, dtype="float32", seed=seed,
             )
-            _, target = make_problem(_class_args)
-
+            _, target = make_problem(_seed_args)
             save_tensor(seed_dir / "target_tensor.npz", target)
             if problem_source == "Images":
                 save_image(seed_dir / "target_image.png", target)
@@ -593,121 +561,54 @@ if app_mode == "Run New Evaluation":
                 for stale in [pol_dir / ".done", pol_dir / "progress.json"]:
                     if stale.exists():
                         stale.unlink()
+                cmd = _boss_cmd(seed, p, pol_dir) if p.startswith("boss-") else _mabss_cmd(seed, p, pol_dir)
+                cmds.append(cmd)
+                jobs.append({"seed": seed, "policy": p, "pol_dir": str(pol_dir)})
 
-                is_boss = p.startswith("boss-")
-                cmd = (
-                    _boss_cmd(seed, p, pol_dir)
-                    if is_boss
-                    else _mabss_cmd(seed, p, pol_dir)
-                )
+        script = out_dir / "run.sh"
+        _write_run_script(script, cmds, cuda_device)
+        with open(out_dir / "run.log", "w") as log:
+            proc = subprocess.Popen(
+                ["bash", str(script)],
+                cwd=str(ROOT), stdout=log, stderr=log,
+                env={**_os.environ, "CUDA_VISIBLE_DEVICES": str(cuda_device)},
+            )
 
-                progress_bar.progress(
-                    int((tasks_done / total_tasks) * 100),
-                    text=f"Seed {seed} — [{p.upper()}] launching...",
-                )
+        st.session_state["active_jobs"] = jobs
+        st.session_state["active_script_pid"] = proc.pid
+        st.session_state["active_run"] = run_name
+        st.rerun()
 
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(ROOT),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    env={**_os.environ, "CUDA_VISIBLE_DEVICES": str(cuda_device)},
-                )
+    # --- Job status panel ---
+    active_jobs = st.session_state.get("active_jobs", [])
+    active_run = st.session_state.get("active_run", "")
+    if active_jobs:
+        out_dir = ROOT / "artifacts" / active_run
+        script_alive = psutil.pid_exists(st.session_state.get("active_script_pid", -1))
 
-                progress_file = pol_dir / "progress.json"
-                full_stdout = ""
-                total_steps = total_tasks * budget
-                step_n, budget_n = 0, budget
+        hdr, btn = st.columns([5, 1])
+        hdr.markdown(f"**Run:** `{active_run}`")
+        if btn.button("Refresh", use_container_width=True):
+            st.rerun()
 
-                while proc.poll() is None:
-                    _time.sleep(2)
+        rows, all_done = [], True
+        for job in active_jobs:
+            status, step = _job_status(job, script_alive)
+            if status != "Done":
+                all_done = False
+            rows.append({"Seed": job["seed"], "Policy": job["policy"], "Status": status, "Step": step})
 
-                    # Drain stdout (prevents pipe-buffer hang)
-                    if proc.stdout:
-                        _fd = proc.stdout.fileno()
-                        _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
-                        _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | _os.O_NONBLOCK)
-                        try:
-                            chunk = proc.stdout.read()
-                            if chunk:
-                                full_stdout += chunk
-                        except Exception:
-                            pass
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-                    try:
-                        if progress_file.exists():
-                            with open(progress_file) as _pf:
-                                prog = json.load(_pf)
-                            step_n = prog.get("step", 0)
-                            budget_n = prog.get("budget", budget)
-                            pct = min(
-                                int(
-                                    ((tasks_done * budget + step_n) / total_steps) * 100
-                                ),
-                                99,
-                            )
-                            progress_bar.progress(
-                                pct,
-                                text=f"Seed {seed} — [{p.upper()}] Step {step_n}/{budget_n}",
-                            )
-                    except Exception:
-                        pass
-
-                    ram_pct = psutil.virtual_memory().percent
-                    gpu_pct = 0.0
-                    try:
-                        free_m, total_m = cp.cuda.Device(cuda_device).mem_info
-                        gpu_pct = ((total_m - free_m) / total_m) * 100.0
-                    except Exception:
-                        pass
-
-                    mem_history.append({
-                        "x": tasks_done * budget + step_n,
-                        "System RAM (%)": ram_pct,
-                        "GPU VRAM (%)": gpu_pct,
-                    })
-                    mem_ui.plotly_chart(
-                        _build_mem_figure(mem_history, total_steps),
-                        use_container_width=True,
-                        key=f"mem_{len(mem_history)}",
-                    )
-
-                retcode = proc.returncode
-                if retcode != 0:
-                    st.error(
-                        f"Seed {seed} / {p.upper()} failed (exit {retcode}):\n```\n{full_stdout[-2000:]}\n```"
-                    )
-                    continue
-
-                label = f"Seed {seed} / {p.upper()}"
-                if label not in completed_items:
-                    tasks_done += 1
-                    completed_items.append(label)
-                render_completed()
-
-                if (pol_dir / "traces.csv").exists():
-                    df_pol = pd.read_csv(pol_dir / "traces.csv")
-                    df_pol["Policy"] = p
-                    all_traces.extend(df_pol.to_dict("records"))
-                if (pol_dir / "summary.json").exists():
-                    with open(pol_dir / "summary.json") as f:
-                        for entry in json.load(f):
-                            entry["Seed"] = seed
-                            entry["policy"] = p
-                            all_summaries.append(entry)
-
-                with open(pol_dir / ".done", "w") as f:
-                    f.write("ok")
-
-        # Bubble up and persist to session state for immediate rendering
-        st.session_state["df_rows"] = pd.DataFrame(all_traces)
-        st.session_state["summaries"] = all_summaries
-        st.session_state["loaded_run"] = run_name
-
-        progress_bar.progress(100, text="All tasks completed.")
-        st.sidebar.success(f"Artifacts dumped to `artifacts/{run_name}`")
-        data_ready = True
+        if all_done:
+            df_rows, summaries = _load_artifact(out_dir)
+            st.session_state["df_rows"] = df_rows
+            st.session_state["summaries"] = summaries
+            st.session_state["loaded_run"] = active_run
+            st.session_state.pop("active_jobs")
+            st.session_state.pop("active_script_pid", None)
+            st.sidebar.success(f"All jobs complete — `artifacts/{active_run}`")
+            data_ready = True
 else:
     # LOAD PAST ARTIFACT MODE
     st.sidebar.markdown("### Historical Archives")

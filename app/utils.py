@@ -6,10 +6,10 @@ making these functions independently testable.
 """
 
 import json
+import shlex
 from pathlib import Path
 
 import pandas as pd
-import plotly.graph_objects as go
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -109,30 +109,33 @@ def _artifact_fully_done(out_dir: Path) -> bool:
         return False
 
 
-# ── Memory chart ───────────────────────────────────────────────────────────────
+# ── Shell script launcher ──────────────────────────────────────────────────────
 
 
-def _build_mem_figure(mem_history: list, total_steps: int) -> go.Figure:
-    """Return a Plotly figure showing RAM / VRAM usage over global steps."""
-    xs = [m["x"] for m in mem_history]
-    fig = go.Figure([
-        go.Scatter(
-            x=xs, y=[m["System RAM (%)"] for m in mem_history],
-            mode="lines", name="System RAM", line=dict(color="#636EFA", width=2),
-        ),
-        go.Scatter(
-            x=xs, y=[m["GPU VRAM (%)"] for m in mem_history],
-            mode="lines", name="GPU VRAM", line=dict(color="#EF553B", width=2),
-        ),
-    ])
-    fig.add_hline(y=90, line_dash="dash", line_color="red", opacity=0.5,
-                  annotation_text="OOM Threshold (90%)")
-    fig.update_layout(
-        yaxis=dict(range=[0, 100], title="Usage (%)"),
-        xaxis=dict(range=[0, total_steps], title="Global Step"),
-        height=350,
-        margin=dict(l=0, r=0, t=10, b=0),
-        template="plotly_white",
-        legend=dict(orientation="h", y=1.15),
-    )
-    return fig
+def _write_run_script(script_path: Path, cmds: list, cuda_device: int) -> None:
+    """Write a sequential bash script that runs all cmds in order."""
+    lines = [
+        "#!/bin/bash",
+        f"export CUDA_VISIBLE_DEVICES={cuda_device}",
+        f"cd {ROOT}",
+        "",
+    ]
+    for cmd in cmds:
+        lines.append(" ".join(shlex.quote(str(c)) for c in cmd))
+    script_path.write_text("\n".join(lines) + "\n")
+    script_path.chmod(0o755)
+
+
+def _job_status(job: dict, script_alive: bool) -> tuple:
+    """Return (status, step_label) for a single job dict."""
+    pol_dir = Path(job["pol_dir"])
+    if (pol_dir / ".done").exists():
+        return "Done", ""
+    if (pol_dir / "progress.json").exists():
+        try:
+            with open(pol_dir / "progress.json") as f:
+                pg = json.load(f)
+            return "Running", f"{pg.get('step', 0)}/{pg.get('budget', '?')}"
+        except Exception:
+            return "Running", "..."
+    return ("Pending" if script_alive else "Failed"), ""

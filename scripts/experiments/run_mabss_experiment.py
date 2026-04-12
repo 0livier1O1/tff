@@ -575,6 +575,8 @@ def main() -> None:
         with open(out_dir / "summary.json", "w") as f:
             json.dump([clean_summary], f, indent=2)
 
+        (out_dir / ".done").write_text("ok")
+
     print(f"[Seed {args.seed}] Done -> {out_dir}")
 
 
