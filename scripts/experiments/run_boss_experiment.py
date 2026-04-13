@@ -53,7 +53,7 @@ from scripts.utils import (
     draw_tn_graph,
     POLICY_COLORS,
 )
-from tnss.algo.boss import BOSS
+from tnss.algo.boss.boss import BOSS
 
 
 def _seed_all(seed: int) -> None:
@@ -135,9 +135,11 @@ def main():
     )
 
     t0 = time.time()
-    progress_file.write_text(json.dumps(
-        {"phase": "init", "step": 0, "budget": args.budget, "started_at": t0}
-    ))
+    progress_file.write_text(
+        json.dumps(
+            {"phase": "init", "step": 0, "budget": args.budget, "started_at": t0}
+        )
+    )
     summary, rows = boss.run(progress_file=progress_file)
     summary["total_time_s"] = time.time() - t0
     summary["Seed"] = args.seed
@@ -186,6 +188,7 @@ if __name__ == "__main__":
         main()
     except BaseException as exc:
         import argparse as _ap, traceback as _tb
+
         _p = _ap.ArgumentParser()
         _p.add_argument("--out-dir")
         _args, _ = _p.parse_known_args()
