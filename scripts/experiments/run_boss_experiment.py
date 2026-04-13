@@ -47,7 +47,6 @@ if str(ROOT / "tensors") not in sys.path:
     sys.path.insert(0, str(ROOT / "tensors"))
 
 from scripts.utils import (
-    random_adj_matrix,
     make_problem,
     save_tensor,
     save_image,
@@ -136,6 +135,9 @@ def main():
     )
 
     t0 = time.time()
+    progress_file.write_text(json.dumps(
+        {"phase": "init", "step": 0, "budget": args.budget, "started_at": t0}
+    ))
     summary, rows = boss.run(progress_file=progress_file)
     summary["total_time_s"] = time.time() - t0
     summary["Seed"] = args.seed
@@ -180,4 +182,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as exc:
+        import argparse as _ap, traceback as _tb
+        _p = _ap.ArgumentParser()
+        _p.add_argument("--out-dir")
+        _args, _ = _p.parse_known_args()
+        if _args.out_dir:
+            _pf = Path(_args.out_dir) / "progress.json"
+            _label = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+            _pf.write_text(json.dumps({"status": _label, "error": _tb.format_exc()}))
+        raise

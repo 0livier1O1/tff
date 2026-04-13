@@ -335,8 +335,15 @@ class BOSS:
     def _atomic_write(path: Path | None, data: dict):
         if path is None:
             return
+        import json
+        # Preserve started_at written before boss.run() was called
+        try:
+            prev = json.loads(path.read_text())
+            if "started_at" in prev and "started_at" not in data:
+                data["started_at"] = prev["started_at"]
+        except Exception:
+            pass
         tmp = path.with_suffix(".tmp")
         with open(tmp, "w") as f:
-            import json
             json.dump(data, f)
         tmp.replace(path)
