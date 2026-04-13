@@ -17,7 +17,6 @@ from app.plots import (
     plot_step_time_breakdown,
 )
 from app.utils import (
-    POLICY_COLORS,
     get_policy_color,
     _load_artifact,
     _artifact_fully_done,
@@ -27,11 +26,9 @@ from app.utils import (
     _script_alive,
 )
 from scripts.utils import (
-    random_adj_matrix,
     make_problem,
     save_tensor,
     save_image,
-    draw_tn_graph,
 )
 
 # Force page to wide layout, premium title
@@ -736,6 +733,7 @@ if _active_runs:
     for _rec in _active_runs:
         _rname = _rec["run_name"]
         _out_dir = ROOT / "artifacts" / _rname
+        _alive = _script_alive(Path(_rec["pid_file"]))
         st.markdown(f"**`{_rname}`**")
 
         _cfg = {}
@@ -751,7 +749,7 @@ if _active_runs:
 
         _rows, _all_done = [], True
         for _job in _rec["jobs"]:
-            _status, _step = _job_status(_job)
+            _status, _step = _job_status(_job, _alive)
             if _status != "Done":
                 _all_done = False
 
@@ -1187,7 +1185,7 @@ if data_ready:
             mime="application/json",
             use_container_width=True,
         )
-else:
+elif not st.session_state.get("active_runs"):
     st.info(
         "**Awaiting initialization.** Setup your environment context and click Execute."
     )

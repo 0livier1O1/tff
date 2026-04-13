@@ -164,14 +164,16 @@ def _script_alive(pid_file: Path) -> bool:
         return False
 
 
-def _job_status(job: dict) -> tuple:
+def _job_status(job: dict, script_alive: bool = True) -> tuple:
     """Return (status, step_label) for a single job dict.
 
-    Status is derived purely from filesystem state:
-      Done    — .done sentinel exists
-      Failed  — progress.json has status=failed
-      Running — progress.json present (and not failed)
-      Pending — nothing written yet (queued in run.sh)
+    Primary status comes from filesystem state:
+      Done        — .done sentinel exists
+      Failed      — progress.json has status=failed
+      Interrupted — progress.json has status=interrupted
+      Running     — progress.json present with step progress
+      Pending     — nothing written yet, script still alive
+      Cancelled   — nothing written yet, script is dead
     """
     pol_dir = Path(job["pol_dir"])
     if (pol_dir / ".done").exists():
@@ -181,8 +183,8 @@ def _job_status(job: dict) -> tuple:
             with open(pol_dir / "progress.json") as f:
                 pg = json.load(f)
             if pg.get("status") in ("failed", "interrupted"):
-                return pg.get("status", "Failed").capitalize(), pg.get("error", "")
+                return pg.get("status", "Failed").capitalize(), ""
             return "Running", f"{pg.get('step', 0)}/{pg.get('budget', '?')}"
         except Exception:
             return "Running", "..."
-    return "Pending", ""
+    return ("Pending" if script_alive else "Cancelled"), ""
