@@ -7,9 +7,11 @@ making these functions independently testable.
 
 import json
 import shlex
+import subprocess as _subprocess
 from pathlib import Path
 
 import pandas as pd
+import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,11 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 POLICY_COLORS = {
     "mabss-greedy": "#4E79A7",
-    "mabss-ucb":    "#E15759",
-    "mabss-exp3":   "#59A14F",
-    "mabss-exp4":   "#F28E2B",
-    "boss-ei":      "#9467BD",
-    "boss-ucb":     "#8C564B",
+    "mabss-ucb": "#E15759",
+    "mabss-exp3": "#59A14F",
+    "mabss-exp4": "#F28E2B",
+    "boss-ei": "#9467BD",
+    "boss-ucb": "#8C564B",
 }
 
 
@@ -102,7 +104,9 @@ def _artifact_fully_done(out_dir: Path) -> bool:
             return False
         for sd in seeds:
             for p in policies:
-                if not (out_dir / f"seed_{sd}" / p.replace("-", "_") / ".done").exists():
+                if not (
+                    out_dir / f"seed_{sd}" / p.replace("-", "_") / ".done"
+                ).exists():
                     return False
         return True
     except Exception:
@@ -113,11 +117,17 @@ def _artifact_fully_done(out_dir: Path) -> bool:
 
 
 def _write_run_script(script_path: Path, cmds: list, cuda_device: int) -> None:
-    """Write a sequential bash script that runs all cmds in order."""
+    """Write a sequential bash script that runs all cmds in order.
+
+    Writes its own PID to run.pid in the same directory so the dashboard can
+    track liveness regardless of whether it was launched directly or via tmux.
+    """
+    pid_file = script_path.parent / "run.pid"
     lines = [
         "#!/bin/bash",
         f"export CUDA_VISIBLE_DEVICES={cuda_device}",
         f"cd {ROOT}",
+        f"echo $$ > {pid_file}",
         "",
     ]
     for cmd in cmds:
@@ -126,8 +136,43 @@ def _write_run_script(script_path: Path, cmds: list, cuda_device: int) -> None:
     script_path.chmod(0o755)
 
 
-def _job_status(job: dict, script_alive: bool) -> tuple:
-    """Return (status, step_label) for a single job dict."""
+# ── Tmux helpers ───────────────────────────────────────────────────────────────
+
+
+def _list_tmux_sessions() -> list:
+    """Return active tmux session names, or [] if tmux is unavailable."""
+    try:
+        r = _subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode == 0:
+            return [s for s in r.stdout.strip().split("\n") if s]
+    except Exception:
+        pass
+    return []
+
+
+def _script_alive(pid_file: Path) -> bool:
+    """True if the script process recorded in run.pid is still running."""
+    if not pid_file.exists():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        return psutil.pid_exists(pid)
+    except Exception:
+        return False
+
+
+def _job_status(job: dict) -> tuple:
+    """Return (status, step_label) for a single job dict.
+
+    Status is derived purely from filesystem state:
+      Done    — .done sentinel exists
+      Failed  — progress.json has status=failed
+      Running — progress.json present (and not failed)
+      Pending — nothing written yet (queued in run.sh)
+    """
     pol_dir = Path(job["pol_dir"])
     if (pol_dir / ".done").exists():
         return "Done", ""
@@ -135,7 +180,9 @@ def _job_status(job: dict, script_alive: bool) -> tuple:
         try:
             with open(pol_dir / "progress.json") as f:
                 pg = json.load(f)
+            if pg.get("status") in ("failed", "interrupted"):
+                return pg.get("status", "Failed").capitalize(), pg.get("error", "")
             return "Running", f"{pg.get('step', 0)}/{pg.get('budget', '?')}"
         except Exception:
             return "Running", "..."
-    return ("Pending" if script_alive else "Failed"), ""
+    return "Pending", ""

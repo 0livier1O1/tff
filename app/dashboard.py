@@ -9,13 +9,22 @@ import argparse
 import json
 import subprocess
 import pandas as pd
-import psutil
 import streamlit as st
-from app.plots import plot_loss_and_regret, plot_arm_trace, plot_loss_vs_runtime_seed, plot_step_time_breakdown
+from app.plots import (
+    plot_loss_and_regret,
+    plot_arm_trace,
+    plot_loss_vs_runtime_seed,
+    plot_step_time_breakdown,
+)
 from app.utils import (
-    POLICY_COLORS, get_policy_color,
-    _load_artifact, _artifact_fully_done,
-    _write_run_script, _job_status,
+    POLICY_COLORS,
+    get_policy_color,
+    _load_artifact,
+    _artifact_fully_done,
+    _write_run_script,
+    _job_status,
+    _list_tmux_sessions,
+    _script_alive,
 )
 from scripts.utils import (
     random_adj_matrix,
@@ -205,6 +214,22 @@ if app_mode == "Run New Evaluation":
         index=0,
         help="GPU device index passed as CUDA_VISIBLE_DEVICES to all subprocesses.",
     )
+
+    tmux_sessions = _list_tmux_sessions()
+    use_tmux = st.sidebar.toggle(
+        "Launch in tmux session",
+        value=bool(tmux_sessions),
+        help="Send the run script to an existing tmux session — survives dashboard disconnects.",
+    )
+    tmux_session = None
+    if use_tmux:
+        if tmux_sessions:
+            tmux_session = st.sidebar.selectbox("Tmux Session", tmux_sessions)
+        else:
+            st.sidebar.warning(
+                "No tmux sessions found. Start one with `tmux new -s boss`."
+            )
+            use_tmux = False
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("#### Algorithm Settings")
@@ -432,6 +457,7 @@ def get_args():
 
 
 import matplotlib
+
 matplotlib.use("Agg")
 
 
@@ -439,43 +465,78 @@ matplotlib.use("Agg")
 # These reference module-level sidebar variables and are safe to call after
 # the sidebar block has been evaluated.
 
+
 def _mabss_cmd(seed, pol_name, pol_dir):
     """Build CLI args for run_mabss_experiment.py."""
     mabss_pol = pol_name.replace("mabss-", "")
     cmd = [
-        "conda", "run", "-n", "tensors", "python",
+        "conda",
+        "run",
+        "-n",
+        "tensors",
+        "python",
         "scripts/experiments/run_mabss_experiment.py",
-        "--budget", str(budget),
-        "--warm-start-epochs", str(warm_start_epochs),
-        "--n-cores", str(n_cores),
-        "--max-rank", str(max_rank),
-        "--max-edge-rank", str(max_edge_rank),
-        "--beta", str(beta),
-        "--kernel-name", kernel_name,
-        "--fixed-noise", str(fixed_noise),
-        "--stopping-threshold", "1e-5",
+        "--budget",
+        str(budget),
+        "--warm-start-epochs",
+        str(warm_start_epochs),
+        "--n-cores",
+        str(n_cores),
+        "--max-rank",
+        str(max_rank),
+        "--max-edge-rank",
+        str(max_edge_rank),
+        "--beta",
+        str(beta),
+        "--kernel-name",
+        kernel_name,
+        "--fixed-noise",
+        str(fixed_noise),
+        "--stopping-threshold",
+        "1e-5",
         "--deterministic-eval",
-        "--exp3-gamma", str(exp3_gamma),
-        "--exp3-decay", str(exp3_decay),
-        "--exp3-reward-scale", "0.05",
-        "--exp3-loss-bins", str(exp3_loss_bins),
-        "--exp3-cr-bins", str(exp3_cr_bins),
-        "--exp3-loss-cap", "1.5",
-        "--exp3-log-cr-cap", "8.0",
-        "--exp4-gamma", str(exp4_gamma),
-        "--exp4-decay", str(exp3_decay),
-        "--exp4-eta", str(exp4_eta),
-        "--dtype", "float32",
-        "--decomp-method", mabss_decomp_method,
-        "--seed", str(seed),
-        "--policies", mabss_pol,
-        "--out-dir", str(pol_dir),
+        "--exp3-gamma",
+        str(exp3_gamma),
+        "--exp3-decay",
+        str(exp3_decay),
+        "--exp3-reward-scale",
+        "0.05",
+        "--exp3-loss-bins",
+        str(exp3_loss_bins),
+        "--exp3-cr-bins",
+        str(exp3_cr_bins),
+        "--exp3-loss-cap",
+        "1.5",
+        "--exp3-log-cr-cap",
+        "8.0",
+        "--exp4-gamma",
+        str(exp4_gamma),
+        "--exp4-decay",
+        str(exp3_decay),
+        "--exp4-eta",
+        str(exp4_eta),
+        "--dtype",
+        "float32",
+        "--decomp-method",
+        mabss_decomp_method,
+        "--seed",
+        str(seed),
+        "--policies",
+        mabss_pol,
+        "--out-dir",
+        str(pol_dir),
     ]
     if learn_noise:
         cmd.append("--learn-noise")
     if mabss_warm_start_method and mabss_warm_start_epochs > 0:
-        cmd.extend(["--warm-start-method", mabss_warm_start_method,
-                    "--warm-start-decomp-epochs", str(mabss_warm_start_epochs)])
+        cmd.extend(
+            [
+                "--warm-start-method",
+                mabss_warm_start_method,
+                "--warm-start-decomp-epochs",
+                str(mabss_warm_start_epochs),
+            ]
+        )
     if target_path:
         cmd.extend(["--target-path", target_path])
     return cmd
@@ -485,20 +546,36 @@ def _boss_cmd(seed, pol_name, pol_dir):
     """Build CLI args for run_boss_experiment.py."""
     acqf = pol_name.split("-")[1]  # boss-ei -> ei
     cmd = [
-        "conda", "run", "-n", "tensors", "python",
+        "conda",
+        "run",
+        "-n",
+        "tensors",
+        "python",
         "scripts/experiments/run_boss_experiment.py",
-        "--n-cores", str(n_cores),
-        "--max-rank", str(max_rank),
-        "--seed", str(seed),
-        "--budget", str(budget),
-        "--n-init", str(boss_n_init),
-        "--max-bond", str(boss_max_bond),
-        "--min-rse", str(boss_min_rse),
-        "--maxiter-tn", str(boss_maxiter_tn),
-        "--acqf", acqf,
-        "--ucb-beta", str(boss_ucb_beta),
-        "--decomp-method", boss_decomp_method,
-        "--out-dir", str(pol_dir),
+        "--n-cores",
+        str(n_cores),
+        "--max-rank",
+        str(max_rank),
+        "--seed",
+        str(seed),
+        "--budget",
+        str(budget),
+        "--n-init",
+        str(boss_n_init),
+        "--max-bond",
+        str(boss_max_bond),
+        "--min-rse",
+        str(boss_min_rse),
+        "--maxiter-tn",
+        str(boss_maxiter_tn),
+        "--acqf",
+        acqf,
+        "--ucb-beta",
+        str(boss_ucb_beta),
+        "--decomp-method",
+        boss_decomp_method,
+        "--out-dir",
+        str(pol_dir),
     ]
     if target_path:
         cmd.extend(["--target-path", target_path])
@@ -515,6 +592,14 @@ if app_mode == "Run New Evaluation":
         if not policies_to_run:
             st.sidebar.error("Select at least one policy.")
             st.stop()
+
+        # Block duplicate launches for the same run name
+        for _er in st.session_state.get("active_runs", []):
+            if _er["run_name"] == run_name and _script_alive(Path(_er["pid_file"])) is not False:
+                st.sidebar.error(
+                    f"`{run_name}` is already running. Refresh to check its status."
+                )
+                st.stop()
 
         # Parse seed CSV string: supports ranges via "1, ..., 5" notation
         parts = [s.strip() for s in seeds_str.split(",")]
@@ -542,13 +627,17 @@ if app_mode == "Run New Evaluation":
             json.dump(cfg, f, indent=4)
 
         import os as _os
+
         jobs, cmds = [], []
         for seed in seeds:
             seed_dir = out_dir / f"seed_{seed}"
             seed_dir.mkdir(exist_ok=True)
             _seed_args = argparse.Namespace(
-                n_cores=n_cores, max_rank=max_rank,
-                target_path=target_path, dtype="float32", seed=seed,
+                n_cores=n_cores,
+                max_rank=max_rank,
+                target_path=target_path,
+                dtype="float32",
+                seed=seed,
             )
             _, target = make_problem(_seed_args)
             save_tensor(seed_dir / "target_tensor.npz", target)
@@ -561,55 +650,150 @@ if app_mode == "Run New Evaluation":
                 for stale in [pol_dir / ".done", pol_dir / "progress.json"]:
                     if stale.exists():
                         stale.unlink()
-                cmd = _boss_cmd(seed, p, pol_dir) if p.startswith("boss-") else _mabss_cmd(seed, p, pol_dir)
+                cmd = (
+                    _boss_cmd(seed, p, pol_dir)
+                    if p.startswith("boss-")
+                    else _mabss_cmd(seed, p, pol_dir)
+                )
                 cmds.append(cmd)
                 jobs.append({"seed": seed, "policy": p, "pol_dir": str(pol_dir)})
 
         script = out_dir / "run.sh"
         _write_run_script(script, cmds, cuda_device)
-        with open(out_dir / "run.log", "w") as log:
-            proc = subprocess.Popen(
-                ["bash", str(script)],
-                cwd=str(ROOT), stdout=log, stderr=log,
-                env={**_os.environ, "CUDA_VISIBLE_DEVICES": str(cuda_device)},
-            )
 
-        st.session_state["active_jobs"] = jobs
-        st.session_state["active_script_pid"] = proc.pid
-        st.session_state["active_run"] = run_name
+        if use_tmux and tmux_session:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", tmux_session, f"bash {script}", "Enter"],
+                check=True,
+            )
+        else:
+            with open(out_dir / "run.log", "w") as log:
+                _proc = subprocess.Popen(
+                    ["bash", str(script)],
+                    cwd=str(ROOT),
+                    stdout=log,
+                    stderr=log,
+                    env={**_os.environ, "CUDA_VISIBLE_DEVICES": str(cuda_device)},
+                )
+            # Write PID immediately so _script_alive works before the script's echo $$ runs
+            (out_dir / "run.pid").write_text(str(_proc.pid))
+
+        import time as _time
+        _run_record = {
+            "run_name": run_name,
+            "jobs": jobs,
+            "pid_file": str(out_dir / "run.pid"),
+            "submitted_at": _time.time(),
+        }
+        with open(out_dir / "session_state.json", "w") as _f:
+            json.dump(_run_record, _f)
+        # Append to active_runs; replace any prior entry for the same run_name
+        _existing = [
+            r
+            for r in st.session_state.get("active_runs", [])
+            if r["run_name"] != run_name
+        ]
+        st.session_state["active_runs"] = _existing + [_run_record]
         st.rerun()
 
-    # --- Job status panel ---
-    active_jobs = st.session_state.get("active_jobs", [])
-    active_run = st.session_state.get("active_run", "")
-    if active_jobs:
-        out_dir = ROOT / "artifacts" / active_run
-        script_alive = psutil.pid_exists(st.session_state.get("active_script_pid", -1))
+# ── Restore active runs after browser reconnect ────────────────────────────────
+if "active_runs" not in st.session_state:
+    _artifact_dir = ROOT / "artifacts"
+    _restored = []
+    if _artifact_dir.exists():
+        for _run_d in sorted(_artifact_dir.iterdir(), reverse=True):
+            _ss_file = _run_d / "session_state.json"
+            if _ss_file.exists() and not _artifact_fully_done(_run_d):
+                try:
+                    with open(_ss_file) as _f:
+                        _restored.append(json.load(_f))
+                except Exception:
+                    pass
+    if _restored:
+        st.session_state["active_runs"] = _restored
 
-        hdr, btn = st.columns([5, 1])
-        hdr.markdown(f"**Run:** `{active_run}`")
-        if btn.button("Refresh", use_container_width=True):
-            st.rerun()
+# --- Job status panel (always visible while any run is active) ---
+_active_runs = st.session_state.get("active_runs", [])
+if _active_runs:
+    _hdr, _btn = st.columns([5, 1])
+    _hdr.markdown("#### Active Runs")
+    if _btn.button("Refresh", use_container_width=True):
+        st.rerun()
 
-        rows, all_done = [], True
-        for job in active_jobs:
-            status, step = _job_status(job, script_alive)
-            if status != "Done":
-                all_done = False
-            rows.append({"Seed": job["seed"], "Policy": job["policy"], "Status": status, "Step": step})
+    import time as _time
+    from datetime import datetime as _dt, timedelta as _td
 
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    def _fmt_ts(ts):
+        return _dt.fromtimestamp(ts).strftime("%H:%M:%S") if ts else ""
 
-        if all_done:
-            df_rows, summaries = _load_artifact(out_dir)
-            st.session_state["df_rows"] = df_rows
-            st.session_state["summaries"] = summaries
-            st.session_state["loaded_run"] = active_run
-            st.session_state.pop("active_jobs")
-            st.session_state.pop("active_script_pid", None)
-            st.sidebar.success(f"All jobs complete — `artifacts/{active_run}`")
-            data_ready = True
-else:
+    def _fmt_dur(start_ts, end_ts=None):
+        if not start_ts:
+            return ""
+        secs = int((end_ts or _time.time()) - start_ts)
+        return str(_td(seconds=secs))
+
+    _still_active = []
+    for _rec in _active_runs:
+        _rname = _rec["run_name"]
+        _out_dir = ROOT / "artifacts" / _rname
+        st.markdown(f"**`{_rname}`**")
+
+        _cfg = {}
+        _cfg_file = _out_dir / "config.json"
+        if _cfg_file.exists():
+            try:
+                with open(_cfg_file) as _f:
+                    _cfg = json.load(_f)
+            except Exception:
+                pass
+
+        _submitted_at = _rec.get("submitted_at")
+
+        _rows, _all_done = [], True
+        for _job in _rec["jobs"]:
+            _status, _step = _job_status(_job)
+            if _status != "Done":
+                _all_done = False
+
+            _pol_dir = Path(_job["pol_dir"])
+            _pf = _pol_dir / "progress.json"
+            _done_f = _pol_dir / ".done"
+
+            _started_at = None
+            if _pf.exists():
+                try:
+                    _started_at = json.loads(_pf.read_text()).get("started_at")
+                except Exception:
+                    pass
+
+            _completed_at = _done_f.stat().st_mtime if _done_f.exists() else None
+
+            _rows.append({
+                "Seed":      _job["seed"],
+                "Policy":    _job["policy"],
+                "Status":    _status,
+                "Step":      _step,
+                "N":         _cfg.get("n_cores", "-"),
+                "Budget":    _cfg.get("budget", "-"),
+                "Epochs":    _cfg.get("warm_start_epochs", "-"),
+                "MaxRank":   _cfg.get("max_edge_rank", "-"),
+                "Submitted": _fmt_ts(_submitted_at),
+                "Started":   _fmt_ts(_started_at),
+                "Duration":  _fmt_dur(_started_at, _completed_at),
+                "Completed": _fmt_ts(_completed_at),
+            })
+
+        st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+
+        if _all_done:
+            (_out_dir / "session_state.json").unlink(missing_ok=True)
+            st.sidebar.success(f"`{_rname}` complete — load it via Load Past Artifact.")
+        else:
+            _still_active.append(_rec)
+
+    st.session_state["active_runs"] = _still_active
+
+if app_mode == "Load Past Artifact":
     # LOAD PAST ARTIFACT MODE
     st.sidebar.markdown("### Historical Archives")
     artifact_dir = ROOT / "artifacts"
@@ -619,7 +803,11 @@ else:
         st.stop()
 
     past_runs = sorted(
-        [d.name for d in artifact_dir.iterdir() if d.is_dir() and _artifact_fully_done(d)],
+        [
+            d.name
+            for d in artifact_dir.iterdir()
+            if d.is_dir() and _artifact_fully_done(d)
+        ],
         reverse=True,
     )
     if not past_runs:
@@ -700,21 +888,6 @@ else:
             st.error("Failed to load artifact due to filesystem drift.")
             st.stop()
 
-# Auto-hydrate: re-load artifact on Streamlit reruns after a run completes
-if (
-    "loaded_run" in st.session_state
-    and not data_ready
-    and st.session_state["loaded_run"]
-):
-    out_dir = ROOT / "artifacts" / st.session_state["loaded_run"]
-    if out_dir.exists():
-        try:
-            df_rows, summaries = _load_artifact(out_dir)
-            if df_rows is None:
-                raise ValueError("No traces found in cached artifact.")
-            data_ready = True
-        except Exception as e:
-            st.warning(f"Session hydrator dropped state: {e}")
 
 # --- UNIFIED RENDERING PHASE ---
 if data_ready:
@@ -723,6 +896,8 @@ if data_ready:
         df_rows = st.session_state.get("df_rows", pd.DataFrame())
     if "summaries" not in locals() or summaries is None:
         summaries = st.session_state.get("summaries", [])
+    if "out_dir" not in locals():
+        out_dir = ROOT / "artifacts" / st.session_state.get("loaded_run", "")
 
     if "df_summary" not in locals():
         df_summary = pd.DataFrame(summaries)

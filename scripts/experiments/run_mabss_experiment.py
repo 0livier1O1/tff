@@ -291,11 +291,17 @@ def run_policy(
             )
         if progress_file:
             # Atomic write to prevent dashboard race conditions
+            _prev = {}
+            try:
+                _prev = json.loads(progress_file.read_text())
+            except Exception:
+                pass
             tmp_p = progress_file.with_suffix(".tmp")
             with open(tmp_p, "w") as _pf:
-                json.dump(
-                    {"policy": policy_str, "step": step + 1, "budget": args.budget}, _pf
-                )
+                json.dump({
+                    "policy": policy_str, "step": step + 1, "budget": args.budget,
+                    "started_at": _prev.get("started_at"),
+                }, _pf)
             tmp_p.replace(progress_file)
         t_step = time.time()
 
@@ -438,7 +444,7 @@ def _summarize_policy(rows: list[dict], n_arms: int, budget: int, policy: str) -
         "final_cr": (
             float(rows[-1]["current_cr"]) if "current_cr" in rows[-1] else float("nan")
         ),
-        "mean_fit_time_s": float(np.mean([r["fit_time_s"] for r in rows])),
+        "mean_fit_time_s": float(np.mean([r["decomp_time_s"] for r in rows])),
         "mean_pick_time_s": float(np.mean([r["pick_time_s"] for r in rows])),
         "mean_oracle_time_s": float(np.mean([r["oracle_time_s"] for r in rows])),
         "mean_step_time_s": float(np.mean([r["step_time_s"] for r in rows])),
@@ -542,6 +548,9 @@ def main() -> None:
 
     for p in args.policies:
         print(f"[Seed {args.seed}] Running {p}...")
+        progress_file.write_text(json.dumps(
+            {"policy": p, "step": 0, "budget": args.budget, "started_at": time.time()}
+        ))
         summary, rows, best_recon = run_policy(
             args, target, policy_str=p, progress_file=progress_file
         )
@@ -593,4 +602,15 @@ def _seed_all(seed: int) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as exc:
+        import argparse as _ap, traceback as _tb
+        _p = _ap.ArgumentParser()
+        _p.add_argument("--out-dir")
+        _args, _ = _p.parse_known_args()
+        if _args.out_dir:
+            _pf = Path(_args.out_dir) / "progress.json"
+            _label = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+            _pf.write_text(json.dumps({"status": _label, "error": _tb.format_exc()}))
+        raise
