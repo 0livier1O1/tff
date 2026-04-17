@@ -281,6 +281,7 @@ def run_policy(
         raise ValueError(f"Unknown policy {policy_str}")
 
     rows = []
+    decomp_histories = []
     stop_reason = "budget_exhausted"
 
     for step in range(args.budget):
@@ -342,6 +343,8 @@ def run_policy(
                 )
                 if isinstance(policy, EXP4Policy):
                     action, p_info = policy.act(env, valid_mask, pre_gp_scores=p_info)
+            elif isinstance(policy, GreedyOraclePolicy):
+                action = policy.act(env, valid_mask, precomputed_rewards=oracle_rewards)
             else:
                 action = policy.act(env, valid_mask)
         pick_time = time.time() - pick_t0
@@ -352,6 +355,11 @@ def run_policy(
         decomp_time = time.time() - decomp_t0
         cur_loss = info["parent_loss"]
         chosen_loss = info["losses"][-1].item()
+        decomp_histories.append({
+            "step": step + 1,
+            "arm": int(action),
+            "losses": info["losses"].tolist(),
+        })
 
         # GP fitting — policy.update() refits the surrogate on new observations
         gp_fit_t0 = time.time()
@@ -410,7 +418,7 @@ def run_policy(
     )
     best_recon = ntwrk.contract()
 
-    return summary, rows, best_recon
+    return summary, rows, best_recon, decomp_histories
 
 
 def _summarize_policy(rows: list[dict], n_arms: int, budget: int, policy: str) -> dict:
@@ -551,7 +559,7 @@ def main() -> None:
         progress_file.write_text(json.dumps(
             {"policy": p, "step": 0, "budget": args.budget, "started_at": time.time()}
         ))
-        summary, rows, best_recon = run_policy(
+        summary, rows, best_recon, decomp_histories = run_policy(
             args, target, policy_str=p, progress_file=progress_file
         )
 
@@ -583,6 +591,9 @@ def main() -> None:
         clean_summary = {k: v for k, v in summary.items() if k != "A"}
         with open(out_dir / "summary.json", "w") as f:
             json.dump([clean_summary], f, indent=2)
+
+        with open(out_dir / "decomp_traces.json", "w") as f:
+            json.dump(decomp_histories, f)
 
         (out_dir / ".done").write_text("ok")
 

@@ -590,3 +590,67 @@ def plot_loss_cr_tradeoff(df_rows: pd.DataFrame) -> go.Figure:
         margin=dict(l=40, r=20, t=50, b=80),
     )
     return fig
+
+
+def plot_decomp_curves(decomp_data: list[dict], pol_name: str, color: str) -> go.Figure:
+    """Concatenated decomposition loss across all search steps.
+
+    Single continuous curve over global epoch index; vertical dashed lines mark
+    each rank increment with a label showing the step number and selected arm.
+    """
+    all_x, all_y = [], []
+    step_boundaries = []  # (global_epoch_at_start, step, arm)
+    epoch_cursor = 0
+
+    for entry in decomp_data:
+        losses = entry["losses"]
+        step_boundaries.append((epoch_cursor + 1, entry["step"], entry["arm"]))
+        all_x.extend(range(epoch_cursor + 1, epoch_cursor + len(losses) + 1))
+        all_y.extend(losses)
+        epoch_cursor += len(losses)
+
+    r = int(color[1:3], 16)
+    g = int(color[3:5], 16)
+    b = int(color[5:7], 16)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=all_x,
+            y=all_y,
+            mode="lines",
+            line=dict(color=color, width=1.5),
+            showlegend=False,
+            hovertemplate="Epoch %{x}<br>RSE %{y:.5f}<extra></extra>",
+        )
+    )
+
+    shapes, annotations = [], []
+    for x0, step, arm in step_boundaries:
+        shapes.append(dict(
+            type="line",
+            x0=x0, x1=x0, y0=0, y1=1,
+            yref="paper",
+            line=dict(color=f"rgba({r},{g},{b},0.4)", width=1, dash="dash"),
+        ))
+        annotations.append(dict(
+            x=x0, y=1, yref="paper",
+            text=f"s{step}<br>a{arm}",
+            showarrow=False,
+            font=dict(size=9, color=f"rgba({r},{g},{b},0.8)"),
+            xanchor="left",
+            yanchor="top",
+        ))
+
+    fig.update_layout(
+        title=dict(text=f"{pol_name.upper()} — decomposition convergence", font=dict(size=12)),
+        xaxis_title="Global epoch",
+        yaxis_title="RSE",
+        yaxis_type="log",
+        height=320,
+        template="plotly_white",
+        shapes=shapes,
+        annotations=annotations,
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+    return fig

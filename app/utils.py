@@ -48,9 +48,10 @@ def get_policy_color(name: str) -> str:
 def _load_artifact(out_dir: Path):
     """Load results from all seed_*/policy_name/ subdirs.
 
-    Returns (traces_df, summaries_list) or (None, []) if nothing found.
+    Returns (traces_df, summaries_list, decomp_dict) or (None, [], {}) if nothing found.
+    decomp_dict is keyed by (seed, pol_name) -> list of {step, arm, losses} dicts.
     """
-    traces, summaries = [], []
+    traces, summaries, decomp_dict = [], [], {}
     for seed_d in sorted(out_dir.iterdir()):
         if not (seed_d.is_dir() and seed_d.name.startswith("seed_")):
             continue
@@ -82,9 +83,14 @@ def _load_artifact(out_dir: Path):
                         s["policy"] = pol_name
                         summaries.append(s)
 
+            d_path = pol_d / "decomp_traces.json"
+            if d_path.exists():
+                with open(d_path) as f:
+                    decomp_dict[(seed_val, pol_name)] = json.load(f)
+
     if not traces:
-        return None, []
-    return pd.concat(traces, ignore_index=True), summaries
+        return None, [], {}
+    return pd.concat(traces, ignore_index=True), summaries, decomp_dict
 
 
 # ── Run completion sentinel ────────────────────────────────────────────────────

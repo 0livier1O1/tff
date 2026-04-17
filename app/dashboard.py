@@ -15,6 +15,7 @@ from app.plots import (
     plot_arm_trace,
     plot_loss_vs_runtime_seed,
     plot_step_time_breakdown,
+    plot_decomp_curves,
 )
 from app.utils import (
     get_policy_color,
@@ -859,7 +860,7 @@ if app_mode == "Load Past Artifact":
         st.sidebar.success(f"Viewing Historical Artifact: `{selected_run}`")
         try:
             # Load all seed subdirectories into flat trace + summary lists
-            df_rows, summaries = _load_artifact(out_dir)
+            df_rows, summaries, decomp_dict = _load_artifact(out_dir)
 
             if df_rows is None:
                 st.error(
@@ -899,6 +900,8 @@ if data_ready:
 
     if "df_summary" not in locals():
         df_summary = pd.DataFrame(summaries)
+    if "decomp_dict" not in locals():
+        decomp_dict = {}
 
     st.markdown("## Trajectory Visualization (Averaged Over Seeds)")
 
@@ -907,7 +910,7 @@ if data_ready:
         unique_policies = df_rows["Policy"].unique()
         pol_colors = {pol: get_policy_color(pol) for pol in unique_policies}
 
-        st.plotly_chart(plot_loss_and_regret(df_rows), use_container_width=True)
+        st.plotly_chart(plot_loss_and_regret(df_rows), use_container_width=True, key="loss_and_regret_global")
 
     st.divider()
     st.markdown("## Seed-Specific Analysis Maps")
@@ -1144,11 +1147,13 @@ if data_ready:
                 st.plotly_chart(
                     plot_loss_vs_runtime_seed(seed_df),
                     use_container_width=True,
+                    key=f"loss_vs_runtime_{seed}",
                 )
             with _col_bd:
                 st.plotly_chart(
                     plot_step_time_breakdown(seed_df),
                     use_container_width=True,
+                    key=f"step_time_breakdown_{seed}",
                 )
 
             # --- Trace Vectors (Plotly) ---
@@ -1159,10 +1164,27 @@ if data_ready:
                 sub = seed_df[seed_df["Policy"] == pol_name]
                 if sub.empty:
                     continue
-                st.plotly_chart(
-                    plot_arm_trace(sub, pol_name, c),
-                    use_container_width=True,
-                )
+                _decomp_data = decomp_dict.get((seed, pol_name), [])
+                if _decomp_data:
+                    _col_arm, _col_decomp = st.columns(2)
+                    with _col_arm:
+                        st.plotly_chart(
+                            plot_arm_trace(sub, pol_name, c),
+                            use_container_width=True,
+                            key=f"arm_trace_{seed}_{pol_name}",
+                        )
+                    with _col_decomp:
+                        st.plotly_chart(
+                            plot_decomp_curves(_decomp_data, pol_name, c),
+                            use_container_width=True,
+                            key=f"decomp_curves_{seed}_{pol_name}",
+                        )
+                else:
+                    st.plotly_chart(
+                        plot_arm_trace(sub, pol_name, c),
+                        use_container_width=True,
+                        key=f"arm_trace_{seed}_{pol_name}",
+                    )
 
     st.divider()
     st.markdown("### Export Artifacts")
