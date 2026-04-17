@@ -963,6 +963,11 @@ if data_ready:
                     [{k: s.get(k) for k in _sum_keys} for s in seed_summaries]
                 )
                 df_sum.columns = _sum_labels
+                _total_time = (
+                    seed_df.groupby("Policy")["step_time_s"].sum().round(1)
+                    if "step_time_s" in seed_df.columns else pd.Series(dtype=float)
+                )
+                df_sum["Total Time (s)"] = df_sum["Policy"].map(_total_time)
                 df_sum["Final Loss"] = df_sum["Final Loss"].round(4)
                 df_sum["Final CR"] = df_sum["Final CR"].round(3)
                 df_sum["Cum. Regret"] = df_sum["Cum. Regret"].round(4)
