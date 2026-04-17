@@ -654,3 +654,72 @@ def plot_decomp_curves(decomp_data: list[dict], pol_name: str, color: str) -> go
         margin=dict(l=0, r=0, t=40, b=0),
     )
     return fig
+
+
+def plot_time_to_threshold(df_rows: pd.DataFrame, threshold: float = 0.05) -> go.Figure:
+    """Scatter: cumulative runtime vs CR at first step where chosen_loss <= threshold.
+
+    Each point is one (policy, seed) pair. Colored by seed, shaped by policy.
+    Points where the threshold is never reached are omitted.
+    """
+    if "chosen_loss" not in df_rows.columns or "step_time_s" not in df_rows.columns:
+        return go.Figure()
+
+    # Cumulative runtime per (Policy, Seed) in step order
+    df = df_rows.sort_values(["Policy", "Seed", "step"]).copy()
+    df["cum_time"] = df.groupby(["Policy", "Seed"])["step_time_s"].cumsum()
+
+    # First row per (Policy, Seed) where loss hits threshold
+    hits = (
+        df[df["chosen_loss"] <= threshold]
+        .groupby(["Policy", "Seed"], sort=False)
+        .first()
+        .reset_index()[["Policy", "Seed", "step", "chosen_loss", "current_cr", "cum_time"]]
+    )
+
+    if hits.empty:
+        return go.Figure().update_layout(
+            title=f"No policy reached loss ≤ {threshold}",
+            template="plotly_white", height=420,
+        )
+
+    policies = sorted(hits["Policy"].unique())
+
+    hits["label"] = hits.apply(
+        lambda r: (
+            f"<b>{r['Policy'].upper()}</b> — Seed {r['Seed']}<br>"
+            f"Runtime: {r['cum_time']:.1f}s<br>"
+            f"CR: {r['current_cr']:.2f}<br>"
+            f"Step: {int(r['step'])}<br>"
+            f"Loss: {r['chosen_loss']:.5f}"
+        ), axis=1
+    )
+
+    fig = go.Figure()
+
+    # One trace per policy — all seeds plotted, colored by policy
+    for policy in policies:
+        p = hits[hits["Policy"] == policy]
+        fig.add_trace(go.Scatter(
+            x=p["cum_time"], y=p["current_cr"],
+            mode="markers",
+            marker=dict(
+                color=get_policy_color(policy),
+                size=12,
+                line=dict(color="white", width=1),
+            ),
+            name=policy.upper(),
+            text=p["label"].tolist(),
+            hovertemplate="%{text}<extra></extra>",
+        ))
+
+    fig.update_layout(
+        title=dict(text=f"Time-to-threshold (loss ≤ {threshold}): Runtime vs CR", font=dict(size=13)),
+        xaxis_title="Cumulative runtime at threshold (s)",
+        yaxis_title="Compression Ratio (CR)",
+        height=420,
+        template="plotly_white",
+        legend=dict(orientation="v", x=1.02, y=1, xanchor="left"),
+        margin=dict(l=40, r=160, t=50, b=50),
+    )
+    return fig

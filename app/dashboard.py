@@ -16,6 +16,7 @@ from app.plots import (
     plot_loss_vs_runtime_seed,
     plot_step_time_breakdown,
     plot_decomp_curves,
+    plot_time_to_threshold,
 )
 from app.utils import (
     get_policy_color,
@@ -911,6 +912,21 @@ if data_ready:
         pol_colors = {pol: get_policy_color(pol) for pol in unique_policies}
 
         st.plotly_chart(plot_loss_and_regret(df_rows), use_container_width=True, key="loss_and_regret_global")
+
+        st.markdown("#### Time-to-Threshold")
+        _thr_col, _chart_col = st.columns([1, 5])
+        with _thr_col:
+            _threshold = st.number_input(
+                "Loss threshold", min_value=0.0, max_value=1.0,
+                value=0.05, step=0.01, format="%.3f",
+                key="ttt_threshold",
+            )
+        with _chart_col:
+            st.plotly_chart(
+                plot_time_to_threshold(df_rows, threshold=_threshold),
+                use_container_width=True,
+                key="time_to_threshold_global",
+            )
 
     st.divider()
     st.markdown("## Seed-Specific Analysis Maps")
