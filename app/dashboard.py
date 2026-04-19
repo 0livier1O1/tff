@@ -26,6 +26,7 @@ from app.utils import (
     _job_status,
     _list_tmux_sessions,
     _script_alive,
+    _cr_from_adj,
 )
 from scripts.utils import (
     make_problem,
@@ -984,6 +985,11 @@ if data_ready:
                     if "step_time_s" in seed_df.columns else pd.Series(dtype=float)
                 )
                 df_sum["Total Time (s)"] = df_sum["Policy"].map(_total_time)
+                _target_adj_path = s_dir / "target_adj.npy"
+                if _target_adj_path.exists():
+                    import numpy as _np
+                    _target_cr = _cr_from_adj(_np.load(_target_adj_path))
+                    df_sum["Efficiency"] = (df_sum["Final CR"] / _target_cr).round(3)
                 df_sum["Final Loss"] = df_sum["Final Loss"].round(4)
                 df_sum["Final CR"] = df_sum["Final CR"].round(3)
                 df_sum["Cum. Regret"] = df_sum["Cum. Regret"].round(4)

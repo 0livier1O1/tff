@@ -539,6 +539,8 @@ def main() -> None:
     init_adj, target = make_problem(args)
 
     # Save target artifacts ONCE at the seed root
+    if not (seed_dir / "target_adj.npy").exists():
+        np.save(seed_dir / "target_adj.npy", cp.asnumpy(cp.asarray(init_adj)))
     if not (seed_dir / "target_tensor.npz").exists():
         save_tensor(seed_dir / "target_tensor.npz", target)
     if args.target_path and not (seed_dir / "target_image.png").exists():

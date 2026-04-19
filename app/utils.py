@@ -10,6 +10,7 @@ import shlex
 import subprocess as _subprocess
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import psutil
 
@@ -40,6 +41,17 @@ def get_policy_color(name: str) -> str:
                 if k.endswith(suffix):
                     return POLICY_COLORS[k]
     return "#888888"
+
+
+# ── Compression ratio (numpy, no GPU) ─────────────────────────────────────────
+
+
+def _cr_from_adj(adj: np.ndarray) -> float:
+    """Compute compression ratio from adjacency matrix using pure numpy."""
+    a = adj.astype(np.float64)
+    target_size = np.prod(np.diag(a))
+    network_size = np.sum(np.prod(a, axis=1))
+    return float(target_size / network_size)
 
 
 # ── Artifact loading ───────────────────────────────────────────────────────────
