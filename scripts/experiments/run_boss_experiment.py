@@ -184,6 +184,24 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys as _sys
+    if len(_sys.argv) == 1:
+        # Debug session — explicit arguments
+        _sys.argv = [
+            _sys.argv[0],
+            "--n-cores",    "5",
+            "--max-rank",   "6",
+            "--seed",       "1",
+            "--budget",     "10",
+            "--n-init",     "5",
+            "--max-bond",   "6",
+            "--min-rse",    "0.01",
+            "--maxiter-tn", "200",
+            "--acqf",       "ei",
+            "--decomp-method", "sgd",
+            "--out-dir",    "artifacts/debug_boss/seed_1/boss_ei",
+        ]
+
     try:
         main()
     except BaseException as exc:

@@ -615,6 +615,22 @@ def _seed_all(seed: int) -> None:
 
 
 if __name__ == "__main__":
+    import sys as _sys
+    if len(_sys.argv) == 1:
+        # Debug session — explicit arguments
+        _sys.argv = [
+            _sys.argv[0],
+            "--policies",           "greedy", "ucb", "exp3", "exp4",
+            "--n-cores",            "5",
+            "--max-rank",           "6",
+            "--seed",               "1",
+            "--budget",             "5",
+            "--warm-start-epochs",  "30",
+            "--max-edge-rank",      "10",
+            "--deterministic-eval",
+            "--out-dir",            "artifacts/debug_mabss/seed_1",
+        ]
+
     try:
         main()
     except BaseException as exc:
