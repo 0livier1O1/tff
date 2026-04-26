@@ -97,6 +97,7 @@ from scripts.utils import (
     save_tensor,
     save_image,
     draw_tn_graph,
+    eval_generating_structure,
     POLICY_COLORS,
 )
 from tnss.algo.mabs.env import TNSearchEnv
@@ -541,6 +542,15 @@ def main() -> None:
     # Save target artifacts ONCE at the seed root
     if not (seed_dir / "target_adj.npy").exists():
         np.save(seed_dir / "target_adj.npy", cp.asnumpy(cp.asarray(init_adj)))
+
+    if not args.target_path:  # Synthetic only — ground truth structure is known
+        eval_generating_structure(
+            init_adj, target,
+            max_epochs=args.warm_start_epochs,
+            decomp_method=getattr(args, "decomp_method", "sgd"),
+            out_path=seed_dir / "generating_rse.json",
+            dtype=args.dtype,
+        )
     if not (seed_dir / "target_tensor.npz").exists():
         save_tensor(seed_dir / "target_tensor.npz", target)
     if args.target_path and not (seed_dir / "target_image.png").exists():

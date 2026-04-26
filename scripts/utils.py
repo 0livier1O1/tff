@@ -307,3 +307,43 @@ def make_problem(args):
         target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype)
 
     return adj, target
+
+
+def eval_generating_structure(init_adj, target, max_epochs: int, decomp_method: str,
+                               out_path: Path, dtype: str = "float32") -> float:
+    """Decompose target using the ground-truth generating adjacency matrix.
+
+    Provides a reference RSE showing what is achievable if the search
+    recovers the exact generating structure. Result is saved to out_path.
+    Only runs if out_path does not already exist.
+    """
+    import json
+    import time
+    from tensors.networks.cutensor_network import cuTensorNetwork
+
+    if out_path.exists():
+        with open(out_path) as f:
+            return json.load(f)["rse"]
+
+    adj_cp = cp.asarray(init_adj)
+    target_cp = cp.asarray(target)
+    ntwrk = cuTensorNetwork(adj_cp, backend="cupy", dtype=dtype)
+
+    t0 = time.time()
+    losses = ntwrk.decompose(target_cp, max_epochs=max_epochs, method=decomp_method)
+    elapsed = time.time() - t0
+    rse = float(losses[-1]) if losses else float("nan")
+
+    result = {
+        "rse": rse,
+        "cr": float(ntwrk.compression_ratio()),
+        "max_epochs": max_epochs,
+        "decomp_method": decomp_method,
+        "elapsed_s": elapsed,
+        "losses": losses if isinstance(losses, list) else [],
+    }
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"[Generating structure] RSE={rse:.5f}  CR={result['cr']:.5f}  ({elapsed:.1f}s)")
+    return rse

@@ -848,10 +848,10 @@ if __name__ == "__main__":
     A = random_adj_matrix(N, max_rank)
     tgt, cores = sim_tensor_from_adj(A, backend="cupy", dtype="float32")
 
-    increment_mode_rank(cores[0], 2)
+    # increment_mode_rank(cores[0], 2)
 
     ctn = cuTensorNetwork(A, backend="cupy", dtype="float32")
     loss = ctn.decompose(
-        tgt, tol=1e-8, init_lr=0.1, loss_patience=2500, max_epochs=5000
+        tgt, tol=1e-8, init_lr=0.5, loss_patience=2500, max_epochs=5000, method="sgd"
     )
     print(loss)

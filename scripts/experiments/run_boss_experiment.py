@@ -51,6 +51,7 @@ from scripts.utils import (
     save_tensor,
     save_image,
     draw_tn_graph,
+    eval_generating_structure,
     POLICY_COLORS,
 )
 from tnss.algo.boss.boss import BOSS
@@ -77,6 +78,10 @@ def main():
     parser.add_argument("--n-runs", type=int, default=1)
     parser.add_argument("--acqf", type=str, default="ei", choices=["ei", "ucb"])
     parser.add_argument("--ucb-beta", type=float, default=2.0)
+    parser.add_argument(
+        "--lamda", type=float, default=1.0,
+        help="Trade-off weight between RSE and CR in the BOSS objective."
+    )
     parser.add_argument(
         "--decomp-method",
         type=str,
@@ -109,6 +114,15 @@ def main():
     target = torch.from_numpy(cp.asnumpy(target_cp)).to(torch.double)
 
     # Save target artifacts ONCE at the seed root
+    if not args.target_path:  # Synthetic only — ground truth structure is known
+        eval_generating_structure(
+            init_adj, target_cp,
+            max_epochs=args.maxiter_tn,
+            decomp_method="sgd" if args.decomp_method == "pam_legacy" else args.decomp_method,
+            out_path=seed_dir / "generating_rse.json",
+            dtype=args.dtype,
+        )
+
     if not (seed_dir / "target_tensor.npz").exists():
         save_tensor(seed_dir / "target_tensor.npz", target)
     if args.target_path and not (seed_dir / "target_image.png").exists():
@@ -127,6 +141,7 @@ def main():
         max_rank=args.max_bond,
         min_rse=args.min_rse,
         maxiter_tn=args.maxiter_tn,
+        lamda=args.lamda,
         n_runs=args.n_runs,
         acqf=args.acqf,
         ucb_beta=args.ucb_beta,

@@ -115,12 +115,13 @@ beta, kernel_name, learn_noise, fixed_noise = (
 exp3_gamma, exp4_gamma, exp3_decay, exp4_eta = 0.2, 0.1, 0.95, 0.5
 exp3_loss_bins, exp3_cr_bins = 4, 4
 n_cores, max_rank, seed, budget, warm_start_epochs, max_edge_rank = 5, 6, 1, 15, 60, 10
-boss_n_init, boss_max_bond, boss_min_rse, boss_maxiter_tn, boss_ucb_beta = (
+boss_n_init, boss_max_bond, boss_min_rse, boss_maxiter_tn, boss_ucb_beta, boss_lamda = (
     10,
     10,
     0.01,
     1000,
     2.0,
+    1.0,
 )
 mabss_decomp_method, boss_decomp_method = "adam", "adam"
 mabss_warm_start_method, mabss_warm_start_epochs = None, 0
@@ -401,9 +402,17 @@ if app_mode == "Run New Evaluation":
                     min_value=10,
                     help="FCTN-PAM iterations per structure evaluation.",
                 )
+                bc1, bc2 = st.columns(2)
+                boss_lamda = bc1.number_input(
+                    "Lambda ($\\lambda$)",
+                    value=1.0,
+                    min_value=0.0,
+                    format="%f",
+                    help=r"Trade-off weight $\lambda$ between RSE and CR in the BOSS objective.",
+                )
                 if "boss-ucb" in policies_to_run:
-                    boss_ucb_beta = st.slider(
-                        "BOSS UCB Beta ($\\beta$)",
+                    boss_ucb_beta = bc2.slider(
+                        "UCB Beta ($\\beta$)",
                         0.1,
                         10.0,
                         2.0,
@@ -574,6 +583,8 @@ def _boss_cmd(seed, pol_name, pol_dir):
         str(boss_ucb_beta),
         "--decomp-method",
         boss_decomp_method,
+        "--lamda",
+        str(boss_lamda),
         "--out-dir",
         str(pol_dir),
     ]
@@ -1010,6 +1021,37 @@ if data_ready:
                     hide_index=True,
                     use_container_width=True,
                 )
+
+                _gen_rse_path = s_dir / "generating_rse.json"
+                if _gen_rse_path.exists():
+                    with open(_gen_rse_path) as _f:
+                        _gen = json.load(_f)
+                    _losses = _gen.get("losses", [])
+                    if _losses:
+                        import plotly.graph_objects as _go
+                        _fig_gen = _go.Figure()
+                        _fig_gen.add_trace(_go.Scatter(
+                            x=list(range(1, len(_losses) + 1)),
+                            y=_losses,
+                            mode="lines",
+                            line=dict(color="#444444", width=1.5),
+                            hovertemplate="Epoch %{x}<br>RSE %{y:.5f}<extra></extra>",
+                        ))
+                        _fig_gen.update_layout(
+                            title=dict(
+                                text=f"Generating structure decomposition — best RSE: {_gen['rse']:.5f}  CR: {_gen['cr']:.3f}",
+                                font=dict(size=12),
+                            ),
+                            xaxis_title="Epoch",
+                            yaxis_title="RSE",
+                            yaxis_type="log",
+                            height=260,
+                            template="plotly_white",
+                            showlegend=False,
+                            margin=dict(l=0, r=0, t=40, b=0),
+                        )
+                        st.plotly_chart(_fig_gen, use_container_width=True,
+                                        key=f"gen_rse_{seed}")
             st.divider()
 
             # --- Qualitative Analysis (Visual Fidelity & Topology) ---
