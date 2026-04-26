@@ -4,6 +4,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import cupy as cp
 import torch
 from torch import Tensor
 
@@ -55,7 +56,6 @@ def _eval_tn(target: Tensor, A_int: Tensor, t_shape: Tensor,
 def _eval_tn_cutn(target, A_int, maxiter, n_runs, min_rse, method="pam",
                   backend="cupy", dtype="float32"):
     """Eval using cuTensorNetwork decompose (supports sgd, pam, als)."""
-    import cupy as cp
     tgt_np = target.numpy() if hasattr(target, 'numpy') else target
     tgt_cp = cp.asarray(tgt_np)
     A_cp = cp.asarray(A_int.numpy() if hasattr(A_int, 'numpy') else A_int)
@@ -106,6 +106,7 @@ class BOSS:
         max_rank: int = 10,
         min_rse: float = 0.01,
         maxiter_tn: int = 1000,
+        lamda: float = 1.0,
         n_runs: int = 1,
         acqf: str = "ei",
         ucb_beta: float = 2.0,
@@ -125,13 +126,15 @@ class BOSS:
         assert acqf in ("ei", "ucb"), f"acqf must be 'ei' or 'ucb', got {acqf!r}"
         self.acqf = acqf
         self.ucb_beta = ucb_beta
+        self.lamda = lamda
+
         self.decomp_method = decomp_method
         self.n_init = n_init
         self.budget = budget
         self.raw_samples = raw_samples
         self.num_restarts = num_restarts
         self.verbose = verbose
-
+        
         # Search space: [1, max_rank]^D normalized to [0, 1]^D
         self.bounds_int = torch.stack([
             torch.ones(self.D, dtype=torch.double),
@@ -159,12 +162,20 @@ class BOSS:
         X, Y_rse, Y_cr, T = self._sobol_init(progress_file)
 
         for b in range(self.budget):
+            t_step = time.time()
+
+            t0 = time.time()
+            Y_ = self._get_objective(Y_rse, Y_cr)
             model = self._fit_gp(X, Y_rse)
+            gp_fit_time = time.time() - t0
+
+            t0 = time.time()
             cand_std = self._suggest(model, best_f=Y_rse.min())
+            suggest_time = time.time() - t0
 
             x_int_flat = self._to_int(cand_std).squeeze(0)
             A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-            cr, rse, runtime, recon = self._evaluate(A_int)
+            cr, rse, eval_time, recon = self._evaluate(A_int)
 
             if rse < self._best_rse:
                 self._best_rse = rse
@@ -174,19 +185,24 @@ class BOSS:
             X = torch.cat([X, cand_std])
             Y_rse = torch.cat([Y_rse, torch.tensor([[rse]])])
             Y_cr = torch.cat([Y_cr, torch.tensor([[cr]])])
-            T = torch.cat([T, torch.tensor([runtime])])
+            T = torch.cat([T, torch.tensor([eval_time])])
 
             row = {
                 "step": self.n_init + b,
                 "phase": "bo",
-                "cr": cr, "rse": rse, "runtime_s": runtime,
+                "cr": cr, "rse": rse,
+                "eval_time_s": eval_time,
+                "gp_fit_time_s": gp_fit_time,
+                "suggest_time_s": suggest_time,
+                "step_time_s": time.time() - t_step,
                 "best_rse": self._best_rse,
                 "best_cr": Y_cr[Y_rse.argmin()].item(),
             }
             self.rows.append(row)
             if self.verbose:
                 print(f"[BO {b+1}/{self.budget}] RSE={rse:.5f}  CR={cr:.5f}  "
-                      f"best_RSE={row['best_rse']:.5f}")
+                      f"best_RSE={row['best_rse']:.5f}  "
+                      f"GP={gp_fit_time:.1f}s  acqf={suggest_time:.1f}s  eval={eval_time:.1f}s")
 
             self._atomic_write(progress_file, {"phase": "bo", "step": b + 1,
                                                 "budget": self.budget})
@@ -216,6 +232,11 @@ class BOSS:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _get_objective(self, Y_rse: Tensor, Y_cr: Tensor) -> Tensor:
+        """Combine RSE and CR into a single scalar objective for GP modeling."""
+        Y = Y_cr + self.lamda * Y_rse
+        return Y        
 
     def _evaluate(self, A_int: Tensor):
         """Dispatch to legacy or cuTN eval based on decomp_method."""
@@ -250,7 +271,10 @@ class BOSS:
             t_list.append(runtime)
 
             row = {"step": i, "phase": "init", "cr": cr, "rse": rse,
-                   "runtime_s": runtime,
+                   "eval_time_s": runtime,
+                   "gp_fit_time_s": 0.0,
+                   "suggest_time_s": 0.0,
+                   "step_time_s": runtime,
                    "best_rse": self._best_rse,
                    "best_cr": cr_list[int(np.argmin(rse_list))]}
             self.rows.append(row)
@@ -322,13 +346,17 @@ class BOSS:
         rses = [r["rse"] for r in self.rows]
         crs  = [r["cr"]  for r in self.rows]
         best_idx = int(np.argmin(rses))
+        bo_rows = [r for r in self.rows if r["phase"] == "bo"]
         return {
             "n_init": self.n_init,
             "budget": self.budget,
             "best_rse": rses[best_idx],
             "best_cr":  crs[best_idx],
             "best_step": self.rows[best_idx]["step"],
-            "mean_runtime_s": float(np.mean([r["runtime_s"] for r in self.rows])),
+            "mean_eval_time_s":    float(np.mean([r["eval_time_s"]    for r in self.rows])),
+            "mean_gp_fit_time_s":  float(np.mean([r["gp_fit_time_s"]  for r in bo_rows])) if bo_rows else 0.0,
+            "mean_suggest_time_s": float(np.mean([r["suggest_time_s"] for r in bo_rows])) if bo_rows else 0.0,
+            "mean_step_time_s":    float(np.mean([r["step_time_s"]    for r in self.rows])),
         }
 
     @staticmethod
