@@ -123,7 +123,7 @@ boss_n_init, boss_max_bond, boss_min_rse, boss_maxiter_tn, boss_ucb_beta, boss_l
     2.0,
     1.0,
 )
-mabss_decomp_method, boss_decomp_method = "adam", "adam"
+mabss_decomp_method, boss_decomp_method = "sgd", "sgd"
 mabss_warm_start_method, mabss_warm_start_epochs = None, 0
 policies_to_run = []
 run_name = "historical_load"
@@ -204,12 +204,13 @@ if app_mode == "Run New Evaluation":
             st.stop()
 
     seeds_default = "1" if problem_source == "Synthetic" else "1"
-    seeds_str = st.sidebar.text_input(
+    _sc1, _sc2 = st.sidebar.columns(2)
+    seeds_str = _sc1.text_input(
         "Random Seeds (csv)",
         seeds_default,
         help="Comma-separated string defining execution iteration arrays.",
     )
-    cuda_device = st.sidebar.selectbox(
+    cuda_device = _sc2.selectbox(
         "CUDA Device",
         [0, 1],
         index=0,
@@ -235,12 +236,20 @@ if app_mode == "Run New Evaluation":
     st.sidebar.markdown("---")
     st.sidebar.markdown("#### Algorithm Settings")
     with st.sidebar.container():
-        budget = st.sidebar.slider(
+        _ac1, _ac2 = st.sidebar.columns(2)
+        budget = _ac1.number_input(
             "Steps Budget",
             min_value=1,
-            max_value=50,
+            max_value=2000,
             value=15,
             help="Number of topological search steps (MABSS) or BO evaluations (BOSS).",
+        )
+        max_edge_rank = _ac2.number_input(
+            "Max Search Rank",
+            min_value=2,
+            max_value=100,
+            value=10,
+            help=r"Global search constraint: The maximal allowed bond dimension $\chi$ for any edge in the network.",
         )
         policies_to_run = st.sidebar.multiselect(
             "Active Policies",
@@ -255,36 +264,68 @@ if app_mode == "Run New Evaluation":
             default=["mabss-greedy", "mabss-exp4"],
             help="Search algorithms: `mabss-*` are sequential bandit rank-increment policies; `boss-*` are global BO structure search.",
         )
-        max_edge_rank = st.sidebar.number_input(
-            "Max Search Rank (Hard Limit)",
-            min_value=2,
-            max_value=100,
-            value=10,
-            help=r"Global search constraint: The maximal allowed bond dimension $\chi$ for any edge in the network.",
-        )
     st.sidebar.markdown("---")
     st.sidebar.markdown("#### Decomposition Settings")
     with st.sidebar.container():
-        warm_start_epochs = st.sidebar.slider(
+        has_mabss = any(p.startswith("mabss-") for p in policies_to_run)
+        has_boss = any(p.startswith("boss-") for p in policies_to_run)
+
+        _dc1, _dc2 = st.sidebar.columns(2)
+        warm_start_epochs = _dc1.number_input(
             "Decomp Epochs",
             min_value=10,
-            max_value=400,
+            max_value=10000,
             value=60,
             step=10,
             help="Epochs for each local tensor decomposition evaluation.",
         )
-
-        has_mabss = any(p.startswith("mabss-") for p in policies_to_run)
-        has_boss = any(p.startswith("boss-") for p in policies_to_run)
-
-        decomp_method = st.sidebar.selectbox(
-            "Decomp Engine",
-            ["adam", "sgd", "pam", "als", "pam (torch)"],
+        decomp_method = _dc2.selectbox(
+            "Engine",
+            ["sgd", "pam", "als", "adam", "pam (torch)"],
             index=0,
-            help="pam (torch). sgd/adam/pam/als: via cuTensorNetwork (GPU).",
+            help="sgd/adam/pam/als: cuTensorNetwork (GPU). pam (torch): CPU legacy.",
         )
-        mabss_decomp_method = decomp_method
-        boss_decomp_method = decomp_method
+        mabss_decomp_method = "pam" if decomp_method == "pam (torch)" else decomp_method
+        boss_decomp_method = "pam_legacy" if decomp_method == "pam (torch)" else decomp_method
+
+        _lr1, _lr2 = st.sidebar.columns(2)
+        decomp_init_lr = _lr1.number_input(
+            "Init LR",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.01,
+            step=0.001,
+            format="%.4f",
+            help="Initial learning rate for SGD/Adam. 0 = auto (0.01 SGD / 0.002 Adam).",
+        )
+        decomp_momentum = _lr2.number_input(
+            "Momentum",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.5,
+            step=0.05,
+            format="%.2f",
+            help="SGD momentum coefficient.",
+        )
+        decomp_init_lr = decomp_init_lr if decomp_init_lr > 0 else None
+
+        _p1, _p2 = st.sidebar.columns(2)
+        decomp_loss_patience = _p1.number_input(
+            "Loss Pat.",
+            min_value=10,
+            max_value=50000,
+            value=2500,
+            step=100,
+            help="Epochs without loss improvement before early stop.",
+        )
+        decomp_lr_patience = _p2.number_input(
+            "LR Pat.",
+            min_value=10,
+            max_value=10000,
+            value=250,
+            step=50,
+            help="Epochs without improvement before LR decay.",
+        )
 
         if has_mabss:
             ws_col1, ws_col2 = st.sidebar.columns(2)
@@ -528,6 +569,12 @@ def _mabss_cmd(seed, pol_name, pol_dir):
         "float32",
         "--decomp-method",
         mabss_decomp_method,
+        "--momentum",
+        str(decomp_momentum),
+        "--loss-patience",
+        str(decomp_loss_patience),
+        "--lr-patience",
+        str(decomp_lr_patience),
         "--seed",
         str(seed),
         "--policies",
@@ -535,6 +582,8 @@ def _mabss_cmd(seed, pol_name, pol_dir):
         "--out-dir",
         str(pol_dir),
     ]
+    if decomp_init_lr is not None:
+        cmd.extend(["--init-lr", str(decomp_init_lr)])
     if learn_noise:
         cmd.append("--learn-noise")
     if mabss_warm_start_method and mabss_warm_start_epochs > 0:
@@ -585,9 +634,17 @@ def _boss_cmd(seed, pol_name, pol_dir):
         boss_decomp_method,
         "--lamda",
         str(boss_lamda),
+        "--momentum",
+        str(decomp_momentum),
+        "--loss-patience",
+        str(decomp_loss_patience),
+        "--lr-patience",
+        str(decomp_lr_patience),
         "--out-dir",
         str(pol_dir),
     ]
+    if decomp_init_lr is not None:
+        cmd.extend(["--init-lr", str(decomp_init_lr)])
     if target_path:
         cmd.extend(["--target-path", target_path])
     return cmd

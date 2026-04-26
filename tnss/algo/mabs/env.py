@@ -39,6 +39,10 @@ class TNSearchEnv:
         self.decomp_method = kwargs.get("decomp_method", "sgd")
         self.warm_start_method = kwargs.get("warm_start_method", None)
         self.warm_start_decomp_epochs = kwargs.get("warm_start_decomp_epochs", 0)
+        self.init_lr = kwargs.get("init_lr", None)
+        self.momentum = kwargs.get("momentum", 0.5)
+        self.loss_patience = kwargs.get("loss_patience", 2500)
+        self.lr_patience = kwargs.get("lr_patience", 250)
         self.seed = int(seed)
 
         k = len(self.Z_dim)
@@ -132,6 +136,10 @@ class TNSearchEnv:
             method=self.decomp_method,
             warm_start_method=self.warm_start_method,
             warm_start_epochs=self.warm_start_decomp_epochs,
+            init_lr=self.init_lr,
+            momentum=self.momentum,
+            loss_patience=self.loss_patience,
+            lr_patience=self.lr_patience,
         )
         losses = torch.tensor(decomp_losses, dtype=torch.double).cpu()
 

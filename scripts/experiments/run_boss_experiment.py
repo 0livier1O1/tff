@@ -89,6 +89,10 @@ def main():
         choices=["pam_legacy", "pam", "sgd", "adam", "als"],
         help="pam_legacy=fctn.py, pam/sgd/adam/als=cuTensorNetwork",
     )
+    parser.add_argument("--init-lr", type=float, default=None, help="Initial LR for SGD/Adam (None = auto)")
+    parser.add_argument("--momentum", type=float, default=0.5, help="SGD momentum")
+    parser.add_argument("--loss-patience", type=int, default=2500, help="Early stop: epochs without loss improvement")
+    parser.add_argument("--lr-patience", type=int, default=250, help="LR decay patience in epochs")
     parser.add_argument("--out-dir", type=str, default="artifacts/debug_boss")
     parser.add_argument(
         "--target-path",
@@ -146,6 +150,10 @@ def main():
         acqf=args.acqf,
         ucb_beta=args.ucb_beta,
         decomp_method=args.decomp_method,
+        init_lr=args.init_lr,
+        momentum=args.momentum,
+        loss_patience=args.loss_patience,
+        lr_patience=args.lr_patience,
         verbose=True,
     )
 

@@ -54,7 +54,8 @@ def _eval_tn(target: Tensor, A_int: Tensor, t_shape: Tensor,
 
 
 def _eval_tn_cutn(target, A_int, maxiter, n_runs, min_rse, method="pam",
-                  backend="cupy", dtype="float32"):
+                  backend="cupy", dtype="float32",
+                  init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
     """Eval using cuTensorNetwork decompose (supports sgd, pam, als)."""
     tgt_np = target.numpy() if hasattr(target, 'numpy') else target
     tgt_cp = cp.asarray(tgt_np)
@@ -66,7 +67,11 @@ def _eval_tn_cutn(target, A_int, maxiter, n_runs, min_rse, method="pam",
     best_recon = None
     t0 = time.time()
     for _ in range(n_runs):
-        losses = ntwrk.decompose(tgt_cp, max_epochs=maxiter, method=method)
+        losses = ntwrk.decompose(
+            tgt_cp, max_epochs=maxiter, method=method,
+            init_lr=init_lr, momentum=momentum,
+            loss_patience=loss_patience, lr_patience=lr_patience,
+        )
         val = float(losses[-1]) if losses else float("inf")
         if val < best_rse:
             best_rse = val
@@ -111,6 +116,10 @@ class BOSS:
         acqf: str = "ei",
         ucb_beta: float = 2.0,
         decomp_method: str = "pam_legacy",
+        init_lr: float | None = None,
+        momentum: float = 0.5,
+        loss_patience: int = 2500,
+        lr_patience: int = 250,
         raw_samples: int = 256,
         num_restarts: int = 10,
         verbose: bool = True,
@@ -129,6 +138,10 @@ class BOSS:
         self.lamda = lamda
 
         self.decomp_method = decomp_method
+        self.init_lr = init_lr
+        self.momentum = momentum
+        self.loss_patience = loss_patience
+        self.lr_patience = lr_patience
         self.n_init = n_init
         self.budget = budget
         self.raw_samples = raw_samples
@@ -249,6 +262,10 @@ class BOSS:
             self.target, A_int,
             self.maxiter_tn, self.n_runs, self.min_rse,
             method=self.decomp_method,
+            init_lr=self.init_lr,
+            momentum=self.momentum,
+            loss_patience=self.loss_patience,
+            lr_patience=self.lr_patience,
         )
 
     def _sobol_init(self, progress_file):

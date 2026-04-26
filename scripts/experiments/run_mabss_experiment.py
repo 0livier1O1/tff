@@ -232,6 +232,10 @@ def run_policy(
         decomp_method=getattr(args, "decomp_method", "sgd"),
         warm_start_method=getattr(args, "warm_start_method", None),
         warm_start_decomp_epochs=getattr(args, "warm_start_decomp_epochs", 0),
+        init_lr=getattr(args, "init_lr", None),
+        momentum=getattr(args, "momentum", 0.5),
+        loss_patience=getattr(args, "loss_patience", 2500),
+        lr_patience=getattr(args, "lr_patience", 250),
     )
     encoder = LocalEncoder(
         include_arm=args.include_arm_feature,
@@ -510,6 +514,10 @@ def main() -> None:
     parser.add_argument("--include-parent-context", action="store_true", default=True)
     parser.add_argument("--fixed-noise", type=float, default=1e-6)
     parser.add_argument("--learn-noise", action="store_true")
+    parser.add_argument("--init-lr", type=float, default=None, help="Initial LR for SGD/Adam (None = auto)")
+    parser.add_argument("--momentum", type=float, default=0.5, help="SGD momentum")
+    parser.add_argument("--loss-patience", type=int, default=2500, help="Early stop: epochs without loss improvement")
+    parser.add_argument("--lr-patience", type=int, default=250, help="LR decay patience in epochs")
     parser.add_argument("--bootstrap-oracle-steps", type=int, default=0)
     parser.add_argument("--warm-start-full-steps", type=int, default=0)
     parser.add_argument("--exp3-gamma", type=float, default=0.2)
