@@ -248,16 +248,22 @@ def render_results(
         )
 
         st.markdown("#### Time-to-Threshold")
-        _thr_col, _chart_col = st.columns([1, 5])
-        with _thr_col:
+        _ctrl_col, _chart_col = st.columns([1, 5])
+        with _ctrl_col:
             _threshold = st.number_input(
                 "Loss threshold",
                 min_value=0.0, max_value=1.0, value=0.05, step=0.01, format="%.3f",
                 key="ttt_threshold",
             )
+            _has_eff = "efficiency" in df_rows.columns
+            _y_metric = st.selectbox(
+                "Y-axis",
+                options=["CR", "Efficiency"] if _has_eff else ["CR"],
+                key="ttt_y_metric",
+            )
         with _chart_col:
             st.plotly_chart(
-                plot_time_to_threshold(df_rows, threshold=_threshold),
+                plot_time_to_threshold(df_rows, threshold=_threshold, y_metric=_y_metric),
                 use_container_width=True,
                 key="time_to_threshold_global",
             )
@@ -380,10 +386,10 @@ def _render_summary_table(seed_df, seed_summaries, s_dir, get_policy_color, _cr_
         _shape = _np.load(_target_npz)["data"].shape
         df_sum["Shape"] = "×".join(str(d) for d in _shape)
 
-    _target_adj_path = s_dir / "target_adj.npy"
-    if _target_adj_path.exists():
-        _target_cr = _cr_from_adj(_np.load(_target_adj_path))
-        df_sum["Efficiency"] = (df_sum["Final CR"] / _target_cr).round(3)
+    
+    _last_eff = seed_df.groupby("Policy")["efficiency"].last()
+    df_sum["Efficiency"] = df_sum["Policy"].map(_last_eff).round(3)
+    
 
     df_sum["Final Loss"] = df_sum["Final Loss"].round(4)
     df_sum["Final CR"] = df_sum["Final CR"].round(3)

@@ -656,25 +656,35 @@ def plot_decomp_curves(decomp_data: list[dict], pol_name: str, color: str) -> go
     return fig
 
 
-def plot_time_to_threshold(df_rows: pd.DataFrame, threshold: float = 0.05) -> go.Figure:
-    """Scatter: cumulative runtime vs CR at first step where chosen_loss <= threshold.
+def plot_time_to_threshold(
+    df_rows: pd.DataFrame, threshold: float = 0.05, y_metric: str = "CR"
+) -> go.Figure:
+    """Scatter: cumulative runtime vs CR or Efficiency at first step where chosen_loss <= threshold.
 
-    Each point is one (policy, seed) pair. Colored by seed, shaped by policy.
+    Each point is one (policy, seed) pair. Colored by policy.
     Points where the threshold is never reached are omitted.
     """
     if "chosen_loss" not in df_rows.columns or "step_time_s" not in df_rows.columns:
         return go.Figure()
 
+    use_efficiency = y_metric == "Efficiency" and "efficiency" in df_rows.columns
+    y_col = "efficiency" if use_efficiency else "current_cr"
+    y_label = "Efficiency (CR / target CR)" if use_efficiency else "Compression Ratio (CR)"
+
     # Cumulative runtime per (Policy, Seed) in step order
     df = df_rows.sort_values(["Policy", "Seed", "step"]).copy()
     df["cum_time"] = df.groupby(["Policy", "Seed"])["step_time_s"].cumsum()
+
+    keep_cols = ["Policy", "Seed", "step", "chosen_loss", "current_cr", "cum_time"]
+    if use_efficiency:
+        keep_cols.append("efficiency")
 
     # First row per (Policy, Seed) where loss hits threshold
     hits = (
         df[df["chosen_loss"] <= threshold]
         .groupby(["Policy", "Seed"], sort=False)
         .first()
-        .reset_index()[["Policy", "Seed", "step", "chosen_loss", "current_cr", "cum_time"]]
+        .reset_index()[keep_cols]
     )
 
     if hits.empty:
@@ -689,23 +699,23 @@ def plot_time_to_threshold(df_rows: pd.DataFrame, threshold: float = 0.05) -> go
         lambda r: (
             f"<b>{r['Policy'].upper()}</b> — Seed {r['Seed']}<br>"
             f"Runtime: {r['cum_time']:.1f}s<br>"
-            f"CR: {r['current_cr']:.2f}<br>"
-            f"Step: {int(r['step'])}<br>"
-            f"Loss: {r['chosen_loss']:.5f}"
+            f"CR: {r['current_cr']:.3f}"
+            + (f"<br>Efficiency: {r['efficiency']:.3f}" if use_efficiency else "")
+            + f"<br>Step: {int(r['step'])}<br>Loss: {r['chosen_loss']:.5f}"
         ), axis=1
     )
 
     fig = go.Figure()
 
-    # One trace per policy — all seeds plotted, colored by policy
     for policy in policies:
         p = hits[hits["Policy"] == policy]
+        sizes = 9 + (p["chosen_loss"] / threshold) * 10
         fig.add_trace(go.Scatter(
-            x=p["cum_time"], y=p["current_cr"],
+            x=p["cum_time"], y=p[y_col],
             mode="markers",
             marker=dict(
                 color=get_policy_color(policy),
-                size=12,
+                size=sizes.tolist(),
                 line=dict(color="white", width=1),
             ),
             name=policy.upper(),
@@ -713,10 +723,23 @@ def plot_time_to_threshold(df_rows: pd.DataFrame, threshold: float = 0.05) -> go
             hovertemplate="%{text}<extra></extra>",
         ))
 
+    fig.add_hline(
+        y=1,
+        line_dash="dash",
+        line_color="gray",
+        opacity=0.6,
+        annotation_text="y = 1",
+        annotation_position="right",
+        annotation_font=dict(color="gray", size=11),
+    )
+
     fig.update_layout(
-        title=dict(text=f"Time-to-threshold (loss ≤ {threshold}): Runtime vs CR", font=dict(size=13)),
+        title=dict(
+            text=f"Time-to-threshold (loss ≤ {threshold}): Runtime vs {y_metric}",
+            font=dict(size=13),
+        ),
         xaxis_title="Cumulative runtime at threshold (s)",
-        yaxis_title="Compression Ratio (CR)",
+        yaxis_title=y_label,
         height=420,
         template="plotly_white",
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left"),

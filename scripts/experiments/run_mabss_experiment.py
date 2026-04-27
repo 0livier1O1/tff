@@ -215,6 +215,7 @@ def run_policy(
     args: argparse.Namespace,
     target,
     policy_str: str,
+    target_cr: float = 1.0,
     ui_bar=None,
     mem_ui=None,
     mem_history=None,
@@ -382,12 +383,18 @@ def run_policy(
             int((oracle_sorted_indices == action).nonzero(as_tuple=True)[0].item()) + 1
         )
 
+        step_time = gp_fit_time + decomp_time + pick_time
+        if policy_str == "greedy":
+            step_time += oracle_time - decomp_time
+
         # Logging
+        _current_cr = float(info["current_cr"].item())
         row = {
             "step": step + 1,
             "cur_loss": float(cur_loss.item()),
             "chosen_loss": float(chosen_loss),
-            "current_cr": float(info["current_cr"].item()),
+            "current_cr": _current_cr,
+            "efficiency": _current_cr / target_cr if target_cr else float("nan"),
             "selected_arm": int(action),
             "oracle_best_arm": int(oracle_best_arm.item()),
             "oracle_arm_rank": chosen_arm_rank,
@@ -401,7 +408,7 @@ def run_policy(
             "decomp_time_s": decomp_time,
             "gp_fit_time_s": gp_fit_time,
             "oracle_time_s": oracle_time,
-            "step_time_s": time.time() - t_step,
+            "step_time_s": step_time,
         }
         rows.append(row)
 
@@ -557,7 +564,10 @@ def main() -> None:
     # Refresh shared target artifacts from this seeded subprocess.  The
     # dashboard may have an older imported problem factory in memory, so the
     # CLI process is the source of truth for the target used by the algorithm.
-    np.save(seed_dir / "target_adj.npy", cp.asnumpy(cp.asarray(init_adj)))
+    _adj_np = cp.asnumpy(cp.asarray(init_adj))
+    np.save(seed_dir / "target_adj.npy", _adj_np)
+    _a = _adj_np.astype(np.float64)
+    target_cr = float(np.prod(np.diag(_a)) / np.sum(np.prod(_a, axis=1)))
     save_tensor(seed_dir / "target_tensor.npz", target)
     if args.target_path:
         save_image(seed_dir / "target_image.png", target)
@@ -587,7 +597,7 @@ def main() -> None:
             {"policy": p, "step": 0, "budget": args.budget, "started_at": time.time()}
         ))
         summary, rows, best_recon, decomp_histories = run_policy(
-            args, target, policy_str=p, progress_file=progress_file
+            args, target, policy_str=p, target_cr=target_cr, progress_file=progress_file
         )
 
         # Save reconstruction

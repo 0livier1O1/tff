@@ -290,7 +290,7 @@ class cuTensorNetwork:
                 "TN parameter count from adjacency matrix must be positive."
             )
 
-        return original_numel / tn_numel
+        return tn_numel/original_numel
 
     def decompose(
         self,

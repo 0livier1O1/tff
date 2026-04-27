@@ -6,8 +6,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 # ── Configure these ──────────────────────────────────────────────────────────
-RUN_A = ROOT / "artifacts" / "new_new_gen1"
-RUN_B = ROOT / "artifacts" / "new_new_gen2"
+RUN_A = ROOT / "artifacts" / "test_mabs"
+RUN_B = ROOT / "artifacts" / "test_boss"
 # ─────────────────────────────────────────────────────────────────────────────
 
 for run in [RUN_A, RUN_B]:
