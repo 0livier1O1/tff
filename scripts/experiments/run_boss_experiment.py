@@ -123,7 +123,14 @@ def main():
     init_adj, target_cp = make_problem(args)
     target = torch.from_numpy(cp.asnumpy(target_cp)).to(torch.double)
 
-    # Save target artifacts ONCE at the seed root
+    # Refresh shared target artifacts from this seeded subprocess.  The
+    # dashboard may have an older imported problem factory in memory, so the
+    # CLI process is the source of truth for the target used by the algorithm.
+    np.save(seed_dir / "target_adj.npy", cp.asnumpy(cp.asarray(init_adj)))
+    save_tensor(seed_dir / "target_tensor.npz", target)
+    if args.target_path:
+        save_image(seed_dir / "target_image.png", target)
+
     if not args.target_path:  # Synthetic only — ground truth structure is known
         eval_generating_structure(
             init_adj, target_cp,
@@ -133,10 +140,6 @@ def main():
             dtype=args.dtype,
         )
 
-    if not (seed_dir / "target_tensor.npz").exists():
-        save_tensor(seed_dir / "target_tensor.npz", target)
-    if args.target_path and not (seed_dir / "target_image.png").exists():
-        save_image(seed_dir / "target_image.png", target)
     if not (seed_dir / "target_graph.png").exists():
         draw_tn_graph(
             init_adj,
