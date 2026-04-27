@@ -375,6 +375,11 @@ def _render_summary_table(seed_df, seed_summaries, s_dir, get_policy_color, _cr_
     )
     df_sum["Total Time (s)"] = df_sum["Policy"].map(_total_time)
 
+    _target_npz = s_dir / "target_tensor.npz"
+    if _target_npz.exists():
+        _shape = _np.load(_target_npz)["data"].shape
+        df_sum["Shape"] = "×".join(str(d) for d in _shape)
+
     _target_adj_path = s_dir / "target_adj.npy"
     if _target_adj_path.exists():
         _target_cr = _cr_from_adj(_np.load(_target_adj_path))

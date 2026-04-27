@@ -89,7 +89,7 @@ def mabss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> li
         ])
     if cfg.target_path:
         cmd.extend(["--target-path", cfg.target_path])
-    return cmd
+    return cmd  # --adj-path injected by launch_run after saving per-seed .npy
 
 
 def boss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> list[str]:
@@ -119,7 +119,7 @@ def boss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> lis
         cmd.extend(["--init-lr", str(cfg.decomp_init_lr)])
     if cfg.target_path:
         cmd.extend(["--target-path", cfg.target_path])
-    return cmd
+    return cmd  # --adj-path injected by launch_run after saving per-seed .npy
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +159,8 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         # Problem
         "n_cores": cfg.n_cores, "max_rank": cfg.max_rank,
         "problem_source": cfg.problem_source, "target_path": cfg.target_path,
+        "adj_spec": cfg.adj_spec, "adj_r_min": cfg.adj_r_min, "adj_r_max": cfg.adj_r_max,
+        "topology": cfg.topology,
         # Algorithm
         "budget": cfg.budget, "max_edge_rank": cfg.max_edge_rank,
         "seeds": all_seeds, "policies": cfg.policies_to_run,
@@ -186,16 +188,42 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
     with open(cfg_path, "w") as f:
         json.dump(config_dict, f, indent=4)
 
+    import numpy as np
+    import torch
+    from app.problem import resolve_adj_spec
+
     jobs: list[dict] = []
     cmds: list[list[str]] = []
+    resolved_adj: dict[str, list] = {}   # seed → concrete int matrix, written to config after loop
     for seed in seeds:
         seed_dir = out_dir / f"seed_{seed}"
         seed_dir.mkdir(exist_ok=True)
+
+        adj_npy = seed_dir / "adj_spec.npy"
+        adj_path_arg: str | None = None
+
+        if cfg.problem_source == "Synthetic":
+            if cfg.adj_spec is not None:
+                # Explicit template: resolve "R" entries deterministically per seed
+                adj_np = resolve_adj_spec(cfg.adj_spec, cfg.adj_r_min, cfg.adj_r_max, seed)
+            else:
+                # Legacy random mode: seed identically to how the scripts do it
+                torch.manual_seed(seed)
+                np.random.seed(seed)
+                from scripts.utils import random_adj_matrix
+                _adj_t = random_adj_matrix(cfg.n_cores, cfg.max_rank)
+                adj_np = _adj_t.numpy().astype(np.int32)
+            np.save(adj_npy, adj_np)
+            adj_path_arg = str(adj_npy)
+            resolved_adj[str(seed)] = adj_np.tolist()
+
         _seed_args = argparse.Namespace(
             n_cores=cfg.n_cores, max_rank=cfg.max_rank,
-            target_path=cfg.target_path, dtype="float32", seed=seed,
+            target_path=cfg.target_path,
+            adj_path=adj_path_arg,
+            dtype="float32", seed=seed,
         )
-        _, target = make_problem(_seed_args)
+        init_adj, target = make_problem(_seed_args)
         save_tensor(seed_dir / "target_tensor.npz", target)
         if cfg.problem_source == "Images":
             save_image(seed_dir / "target_image.png", target)
@@ -210,8 +238,16 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
                 if stale.exists():
                     stale.unlink()
             cmd = boss_cmd(cfg, seed, p, pol_dir) if p.startswith("boss-") else mabss_cmd(cfg, seed, p, pol_dir)
+            if adj_path_arg:
+                cmd.extend(["--adj-path", adj_path_arg])
             cmds.append(cmd)
             jobs.append({"seed": seed, "policy": p, "pol_dir": str(pol_dir)})
+
+    # Persist the concrete per-seed adjacency matrices so config.json fully identifies the problem
+    if resolved_adj:
+        config_dict["adj_matrices"] = resolved_adj
+        with open(cfg_path, "w") as f:
+            json.dump(config_dict, f, indent=4)
 
     if not cmds:
         st.sidebar.warning("All requested seed/policy combinations are already complete. Nothing to run.")

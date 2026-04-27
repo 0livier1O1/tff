@@ -302,6 +302,9 @@ def make_problem(args):
         if adj is None:
             max_r = getattr(args, "max_rank", 1)  # Default for image start
             adj = random_adj_matrix(args.n_cores, max_r, diag=target.shape)
+    elif hasattr(args, "adj_path") and args.adj_path:
+        adj = torch.from_numpy(np.load(args.adj_path)).to(torch.int)
+        target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype)
     else:
         adj = random_adj_matrix(args.n_cores, args.max_rank)
         target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype)

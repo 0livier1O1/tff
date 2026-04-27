@@ -35,8 +35,13 @@ class SidebarConfig:
     # Problem
     problem_source: str = "Synthetic"
     n_cores: int = 5
-    max_rank: int = 6
+    max_rank: int = 6          # kept for Images mode and backward-compat
     target_path: str | None = None
+    # Adjacency matrix editor (Synthetic mode)
+    adj_spec: list | None = None  # N×N list of lists of str; None = use old random path
+    adj_r_min: int = 2
+    adj_r_max: int = 8
+    topology: str = "FCTN"
     # Run control
     seeds_str: str = "1"
     cuda_device: int = 0
@@ -102,6 +107,8 @@ def render_sidebar() -> SidebarConfig:
 # ---------------------------------------------------------------------------
 
 def _render_run_mode(cfg: SidebarConfig) -> None:
+    from app.problem import render_problem_source
+
     cfg.extend_mode = st.sidebar.toggle(
         "Extend existing run",
         value=False,
@@ -112,28 +119,7 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
         return
 
     st.sidebar.markdown("### General Settings")
-    cfg.problem_source = st.sidebar.radio(
-        "Target Source", ["Synthetic", "Images"], horizontal=True
-    )
-
-    col1, col2 = st.sidebar.columns(2)
-    if cfg.problem_source == "Synthetic":
-        cfg.n_cores = col1.number_input(
-            "Cores ($N$)",
-            min_value=3,
-            max_value=8,
-            value=5,
-            help=r"Total number of discrete cores in the target tensor graph.",
-        )
-        cfg.max_rank = col2.number_input(
-            "Synthetic Max Rank",
-            min_value=2,
-            max_value=15,
-            value=6,
-            help=r"Rank of the synthetic 'goal' tensor. The algorithm will try to find this complexity.",
-        )
-    else:
-        _render_image_source(cfg, col1)
+    render_problem_source(cfg)
 
     _sc1, _sc2 = st.sidebar.columns(2)
     cfg.seeds_str = _sc1.text_input(
@@ -163,49 +149,6 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
     exp_src = "image" if cfg.problem_source == "Images" else "synthetic"
     default_name = f"exp_{exp_src}_{cfg.budget}s_{cfg.warm_start_epochs}d_{cfg.mabss_decomp_method}"
     cfg.run_name = st.sidebar.text_input("Run Name", value=default_name)
-
-
-def _render_image_source(cfg: SidebarConfig, col1) -> None:
-    img_dir = Path("data/images")
-    if not img_dir.exists():
-        st.sidebar.error("data/images directory not found.")
-        st.stop()
-
-    img_files = sorted([f.name for f in img_dir.glob("*.npz")])
-    if not img_files:
-        st.sidebar.error("No .npz files found in data/images")
-        st.stop()
-
-    selected_img = st.sidebar.selectbox("Select Target Image", img_files)
-    cfg.target_path = str(img_dir / selected_img)
-    cfg.max_rank = 1
-    cfg.n_cores = col1.selectbox(
-        "Cores ($N$)",
-        [4, 6, 8, 10, 12, 16],
-        index=2,
-        help="Reshape image into N cores.",
-    )
-
-    try:
-        import importlib
-        import scripts.utils as utils
-        importlib.reload(utils)
-        _, target_cp = utils.load_target_tensor(cfg.target_path)
-        if cfg.n_cores != target_cp.ndim:
-            img_2d = utils.reconstruct_image(target_cp)
-            target_display = utils.retensorize_image(img_2d, cfg.n_cores)
-        else:
-            target_display = target_cp
-        st.sidebar.markdown(f"**Shape**: `{target_display.shape}`")
-        with st.sidebar.expander("Show Preview", expanded=False):
-            st.image(utils.reconstruct_image(target_cp), use_container_width=True)
-    except Exception as e:
-        st.sidebar.warning(f"Could not preview image: {e}")
-
-    st.sidebar.info(
-        f"Re-tensorizing {selected_img} to $N={cfg.n_cores}$. "
-        "Mode sizes are powers of 2 mapping to 256x256 pixels."
-    )
 
 
 def _render_tmux(cfg: SidebarConfig) -> None:
@@ -488,6 +431,10 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.boss_maxiter_tn       = _get("boss_maxiter_tn", 1000)
     cfg.boss_ucb_beta         = _get("boss_ucb_beta", 2.0)
     cfg.boss_lamda            = _get("boss_lamda", 1.0)
+    cfg.adj_spec              = _get("adj_spec", None)
+    cfg.adj_r_min             = _get("adj_r_min", 2)
+    cfg.adj_r_max             = _get("adj_r_max", 8)
+    cfg.topology              = _get("topology", "FCTN")
 
     st.sidebar.markdown("### Locked Settings (from existing run)")
     st.sidebar.json(existing_cfg)

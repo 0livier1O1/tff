@@ -482,6 +482,12 @@ def main() -> None:
         default=None,
         help="Path to an image .npz for real-world data experiments",
     )
+    parser.add_argument(
+        "--adj-path",
+        type=str,
+        default=None,
+        help="Path to a .npy file containing an integer adjacency matrix (overrides random generation).",
+    )
     parser.add_argument("--deterministic-eval", action="store_true", default=True)
     parser.add_argument(
         "--decomp-method",
