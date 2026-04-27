@@ -545,6 +545,7 @@ def main() -> None:
     # Heuristic: If out_dir is a policy subdirectory, save shared target artifacts one level up
     seed_dir = out_dir.parent if out_dir.name.startswith("mabss_") else out_dir
 
+    _seed_all(args.seed)
     init_adj, target = make_problem(args)
 
     # Save target artifacts ONCE at the seed root

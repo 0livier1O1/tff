@@ -43,6 +43,9 @@ class SidebarConfig:
     use_tmux: bool = False
     tmux_session: str | None = None
     run_name: str = "historical_load"
+    # Extend mode
+    extend_mode: bool = False
+    extend_run: str | None = None
     # Algorithm
     budget: int = 15
     max_edge_rank: int = 10
@@ -99,6 +102,15 @@ def render_sidebar() -> SidebarConfig:
 # ---------------------------------------------------------------------------
 
 def _render_run_mode(cfg: SidebarConfig) -> None:
+    cfg.extend_mode = st.sidebar.toggle(
+        "Extend existing run",
+        value=False,
+        help="Add new seeds to an existing artifact directory without re-running completed seeds.",
+    )
+    if cfg.extend_mode:
+        _render_extend_mode(cfg)
+        return
+
     st.sidebar.markdown("### General Settings")
     cfg.problem_source = st.sidebar.radio(
         "Target Source", ["Synthetic", "Images"], horizontal=True
@@ -393,3 +405,89 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
                     "UCB Beta ($\\beta$)", 0.1, 10.0, 2.0, 0.1,
                     help=r"Exploration weight for UCB acquisition: $\mu(x) - \beta\sigma(x)$.",
                 )
+
+
+def _render_extend_mode(cfg: SidebarConfig) -> None:
+    """Extend mode: pick an existing run, enter only the new seeds to add."""
+    import json
+
+    artifact_dir = ROOT / "artifacts"
+    if not artifact_dir.exists():
+        st.sidebar.error("No artifacts directory found.")
+        st.stop()
+
+    existing = sorted(
+        [d.name for d in artifact_dir.iterdir() if d.is_dir() and (d / "config.json").exists()],
+        reverse=True,
+    )
+    if not existing:
+        st.sidebar.warning("No existing runs found.")
+        st.stop()
+
+    cfg.extend_run = st.sidebar.selectbox("Existing Run", existing)
+    cfg.run_name = cfg.extend_run
+
+    # Read settings from the existing run's config
+    existing_cfg = {}
+    cfg_path = artifact_dir / cfg.extend_run / "config.json"
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            existing_cfg = json.load(f)
+
+    done_seeds = sorted([
+        int(d.name.replace("seed_", ""))
+        for d in (artifact_dir / cfg.extend_run).iterdir()
+        if d.is_dir() and d.name.startswith("seed_")
+    ])
+    if done_seeds:
+        st.sidebar.caption(f"Existing seeds: {done_seeds}")
+
+    _sc1, _sc2 = st.sidebar.columns(2)
+    cfg.seeds_str = _sc1.text_input(
+        "New Seeds (csv)",
+        "",
+        help="Seeds to add. Already-completed seed/policy combos are automatically skipped.",
+    )
+    cfg.cuda_device = _sc2.selectbox("CUDA Device", [0, 1], index=0)
+
+    _render_tmux(cfg)
+
+    # Restore all settings from the existing run's config
+    def _get(key, default):
+        return existing_cfg.get(key, default)
+
+    cfg.n_cores               = _get("n_cores", 5)
+    cfg.max_rank              = _get("max_rank", 6)
+    cfg.problem_source        = _get("problem_source", "Synthetic")
+    cfg.target_path           = _get("target_path", None)
+    cfg.budget                = _get("budget", 15)
+    cfg.max_edge_rank         = _get("max_edge_rank", 10)
+    cfg.policies_to_run       = _get("policies", [])
+    cfg.warm_start_epochs     = _get("warm_start_epochs", 60)
+    cfg.mabss_decomp_method   = _get("mabss_decomp_method", "sgd")
+    cfg.boss_decomp_method    = _get("boss_decomp_method", "sgd")
+    cfg.decomp_init_lr        = _get("decomp_init_lr", None)
+    cfg.decomp_momentum       = _get("decomp_momentum", 0.5)
+    cfg.decomp_loss_patience  = _get("decomp_loss_patience", 2500)
+    cfg.decomp_lr_patience    = _get("decomp_lr_patience", 250)
+    cfg.mabss_warm_start_method  = _get("mabss_warm_start_method", None)
+    cfg.mabss_warm_start_epochs  = _get("mabss_warm_start_epochs", 0)
+    cfg.beta                  = _get("beta", 5.0)
+    cfg.kernel_name           = _get("kernel_name", "matern")
+    cfg.learn_noise           = _get("learn_noise", False)
+    cfg.fixed_noise           = _get("fixed_noise", 1e-6)
+    cfg.exp3_gamma            = _get("exp3_gamma", 0.2)
+    cfg.exp3_decay            = _get("exp3_decay", 0.95)
+    cfg.exp3_loss_bins        = _get("exp3_loss_bins", 4)
+    cfg.exp3_cr_bins          = _get("exp3_cr_bins", 4)
+    cfg.exp4_gamma            = _get("exp4_gamma", 0.1)
+    cfg.exp4_eta              = _get("exp4_eta", 0.5)
+    cfg.boss_n_init           = _get("boss_n_init", 10)
+    cfg.boss_max_bond         = _get("boss_max_bond", 10)
+    cfg.boss_min_rse          = _get("boss_min_rse", 0.01)
+    cfg.boss_maxiter_tn       = _get("boss_maxiter_tn", 1000)
+    cfg.boss_ucb_beta         = _get("boss_ucb_beta", 2.0)
+    cfg.boss_lamda            = _get("boss_lamda", 1.0)
+
+    st.sidebar.markdown("### Locked Settings (from existing run)")
+    st.sidebar.json(existing_cfg)

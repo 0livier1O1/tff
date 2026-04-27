@@ -147,14 +147,43 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
     out_dir = ROOT / "artifacts" / cfg.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Merge seeds into config: in extend mode preserve previously recorded seeds
+    existing_config: dict = {}
+    cfg_path = out_dir / "config.json"
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            existing_config = json.load(f)
+    all_seeds = sorted(set(existing_config.get("seeds", [])) | set(seeds))
+
     config_dict = {
+        # Problem
         "n_cores": cfg.n_cores, "max_rank": cfg.max_rank,
-        "budget": cfg.budget, "warm_start_epochs": cfg.warm_start_epochs,
-        "max_edge_rank": cfg.max_edge_rank, "beta": cfg.beta,
-        "kernel_name": cfg.kernel_name, "seeds": seeds,
-        "policies": cfg.policies_to_run,
+        "problem_source": cfg.problem_source, "target_path": cfg.target_path,
+        # Algorithm
+        "budget": cfg.budget, "max_edge_rank": cfg.max_edge_rank,
+        "seeds": all_seeds, "policies": cfg.policies_to_run,
+        # Decomposition
+        "warm_start_epochs": cfg.warm_start_epochs,
+        "mabss_decomp_method": cfg.mabss_decomp_method,
+        "boss_decomp_method": cfg.boss_decomp_method,
+        "decomp_init_lr": cfg.decomp_init_lr,
+        "decomp_momentum": cfg.decomp_momentum,
+        "decomp_loss_patience": cfg.decomp_loss_patience,
+        "decomp_lr_patience": cfg.decomp_lr_patience,
+        "mabss_warm_start_method": cfg.mabss_warm_start_method,
+        "mabss_warm_start_epochs": cfg.mabss_warm_start_epochs,
+        # Advanced policy
+        "beta": cfg.beta, "kernel_name": cfg.kernel_name,
+        "learn_noise": cfg.learn_noise, "fixed_noise": cfg.fixed_noise,
+        "exp3_gamma": cfg.exp3_gamma, "exp3_decay": cfg.exp3_decay,
+        "exp3_loss_bins": cfg.exp3_loss_bins, "exp3_cr_bins": cfg.exp3_cr_bins,
+        "exp4_gamma": cfg.exp4_gamma, "exp4_eta": cfg.exp4_eta,
+        # BOSS
+        "boss_n_init": cfg.boss_n_init, "boss_max_bond": cfg.boss_max_bond,
+        "boss_min_rse": cfg.boss_min_rse, "boss_maxiter_tn": cfg.boss_maxiter_tn,
+        "boss_ucb_beta": cfg.boss_ucb_beta, "boss_lamda": cfg.boss_lamda,
     }
-    with open(out_dir / "config.json", "w") as f:
+    with open(cfg_path, "w") as f:
         json.dump(config_dict, f, indent=4)
 
     jobs: list[dict] = []
@@ -174,12 +203,19 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         for p in cfg.policies_to_run:
             pol_dir = seed_dir / p.replace("-", "_")
             pol_dir.mkdir(exist_ok=True)
-            for stale in [pol_dir / ".done", pol_dir / "progress.json"]:
+            # Skip combos that already finished successfully
+            if (pol_dir / ".done").exists():
+                continue
+            for stale in [pol_dir / "progress.json"]:
                 if stale.exists():
                     stale.unlink()
             cmd = boss_cmd(cfg, seed, p, pol_dir) if p.startswith("boss-") else mabss_cmd(cfg, seed, p, pol_dir)
             cmds.append(cmd)
             jobs.append({"seed": seed, "policy": p, "pol_dir": str(pol_dir)})
+
+    if not cmds:
+        st.sidebar.warning("All requested seed/policy combinations are already complete. Nothing to run.")
+        st.stop()
 
     script = out_dir / "run.sh"
     _write_run_script(script, cmds, cfg.cuda_device)
