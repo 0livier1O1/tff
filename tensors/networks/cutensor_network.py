@@ -92,27 +92,33 @@ def letter_range(n):
         yield chr(c)
 
 
-def random_tensor(shape, device, std_dev, backend, backend_dtype):
+def random_tensor(shape, device, std_dev, backend, backend_dtype, rng=None):
     if backend == "torch":
-        core = torch.nn.init.normal_(
-            torch.nn.Parameter(torch.empty(*shape, dtype=backend_dtype, device=device)),
-            mean=0.0,
-            std=std_dev,
-        )
+        if rng is None:
+            core = torch.nn.init.normal_(
+                torch.nn.Parameter(torch.empty(*shape, dtype=backend_dtype, device=device)),
+                mean=0.0,
+                std=std_dev,
+            )
+        else:
+            core = torch.randn(
+                tuple(shape), dtype=backend_dtype, device=device, generator=rng
+            ) * std_dev
     else:
-        core = cp.random.normal(loc=0.0, scale=std_dev, size=tuple(shape)).astype(
+        rand = cp.random if rng is None else rng
+        core = rand.normal(loc=0.0, scale=std_dev, size=tuple(shape)).astype(
             backend_dtype
         )
     return core
 
 
-def _random_cores_from_adj(adj_matrix, std_dev, backend, backend_dtype):
+def _random_cores_from_adj(adj_matrix, std_dev, backend, backend_dtype, rng=None):
     cores = []
     rows = adj_matrix.unbind(0) if hasattr(adj_matrix, "unbind") else adj_matrix
     device = getattr(adj_matrix, "device", None)
     for row in rows:
         shape = row.tolist()
-        core = random_tensor(shape, device, std_dev, backend, backend_dtype)
+        core = random_tensor(shape, device, std_dev, backend, backend_dtype, rng=rng)
         cores.append(core)
     return cores
 
@@ -810,7 +816,7 @@ def einsum_expr(adj_matrix, keep_rank1=True):
     return f"{lhs}->{rhs}"
 
 
-def sim_tensor_from_adj(A, std_dev=0.1, backend="torch", dtype="float32"):
+def sim_tensor_from_adj(A, std_dev=0.1, backend="torch", dtype="float32", seed=None):
     backend_name = backend.lower()
     dtype_name = dtype.lower()
 
@@ -834,7 +840,14 @@ def sim_tensor_from_adj(A, std_dev=0.1, backend="torch", dtype="float32"):
         raise ValueError(f"Unsupported backend '{backend}'. Use 'torch' or 'cupy'.")
 
     backend_dtype = torch_dtype if backend_name == "torch" else cupy_dtype
-    cores = _random_cores_from_adj(adj, std_dev, backend_name, backend_dtype)
+    if seed is None:
+        rng = None
+    elif backend_name == "torch":
+        rng = torch.Generator(device="cpu")
+        rng.manual_seed(int(seed))
+    else:
+        rng = cp.random.RandomState(int(seed))
+    cores = _random_cores_from_adj(adj, std_dev, backend_name, backend_dtype, rng=rng)
 
     ntwrk = cuTensorNetwork(adj, cores=cores, backend=backend_name, dtype=dtype_name)
     return ntwrk.contract_ntwrk(), cores

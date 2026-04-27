@@ -121,11 +121,17 @@ def random_adj_matrix(
     diag: torch.Tensor = None,
     num_zero_edges: int = None,
     n_samples: int = 1,
+    seed: int | None = None,
 ):
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed))
+
     D = int(n_cores * (n_cores - 1) / 2)
     bounds = torch.ones((2, D))
     bounds[1] = max(1, max_rank)
-    X = torch.rand((n_samples, D))
+    X = torch.rand((n_samples, D), generator=generator)
 
     if num_zero_edges is None:
         X = unnormalize(X, bounds).round()
@@ -133,14 +139,14 @@ def random_adj_matrix(
         # For legacy / specific constraints
         bounds[0] = 2
         X = unnormalize(X, bounds).round()
-        idx = torch.randperm(D)[:num_zero_edges]
+        idx = torch.randperm(D, generator=generator)[:num_zero_edges]
         X[:, idx] = 1
 
     if diag is None:
         # Default physical dimension baseline
         low = 2
         high = max(3, max_rank + 1)
-        diag = torch.randint(low, high, size=(n_cores,))
+        diag = torch.randint(low, high, size=(n_cores,), generator=generator)
     else:
         if not isinstance(diag, torch.Tensor):
             diag = torch.from_numpy(np.array(diag)).to(torch.int)
@@ -280,6 +286,7 @@ def make_problem(args):
     Automatically reshapes if args.n_cores differs from file order.
     """
     from tensors.networks.cutensor_network import sim_tensor_from_adj
+    seed = getattr(args, "seed", None)
 
     if hasattr(args, "target_path") and args.target_path:
         adj, target = load_target_tensor(args.target_path, args.dtype)
@@ -301,13 +308,13 @@ def make_problem(args):
 
         if adj is None:
             max_r = getattr(args, "max_rank", 1)  # Default for image start
-            adj = random_adj_matrix(args.n_cores, max_r, diag=target.shape)
+            adj = random_adj_matrix(args.n_cores, max_r, diag=target.shape, seed=seed)
     elif hasattr(args, "adj_path") and args.adj_path:
         adj = torch.from_numpy(np.load(args.adj_path)).to(torch.int)
-        target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype)
+        target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype, seed=seed)
     else:
-        adj = random_adj_matrix(args.n_cores, args.max_rank)
-        target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype)
+        adj = random_adj_matrix(args.n_cores, args.max_rank, seed=seed)
+        target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype, seed=seed)
 
     return adj, target
 

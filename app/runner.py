@@ -189,7 +189,6 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         json.dump(config_dict, f, indent=4)
 
     import numpy as np
-    import torch
     from app.problem import resolve_adj_spec
 
     jobs: list[dict] = []
@@ -207,11 +206,9 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
                 # Explicit template: resolve "R" entries deterministically per seed
                 adj_np = resolve_adj_spec(cfg.adj_spec, cfg.adj_r_min, cfg.adj_r_max, seed)
             else:
-                # Legacy random mode: seed identically to how the scripts do it
-                torch.manual_seed(seed)
-                np.random.seed(seed)
+                # Legacy random mode: pass seed directly to topology generation.
                 from scripts.utils import random_adj_matrix
-                _adj_t = random_adj_matrix(cfg.n_cores, cfg.max_rank)
+                _adj_t = random_adj_matrix(cfg.n_cores, cfg.max_rank, seed=seed)
                 adj_np = _adj_t.numpy().astype(np.int32)
             np.save(adj_npy, adj_np)
             adj_path_arg = str(adj_npy)
