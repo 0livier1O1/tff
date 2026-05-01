@@ -119,8 +119,9 @@ def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
         steps = list(gb.groups.keys())
 
         mean_loss = gb["step_loss"].mean()
-        min_loss = gb["step_loss"].min()
-        max_loss = gb["step_loss"].max()
+        std_loss = gb["step_loss"].std()
+        # min_loss = gb["step_loss"].min()
+        # max_loss = gb["step_loss"].max()
         mean_regret = gb["cum_regret"].mean()
         min_regret = gb["cum_regret"].min()
         max_regret = gb["cum_regret"].max()
@@ -161,7 +162,9 @@ def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
             )
 
         # Row 1 — vs step
-        _band(steps, min_loss, max_loss, 1, 1)
+        # _band(steps, min_loss, max_loss, 1, 1)
+        b = 2
+        _band(steps, mean_loss - b * std_loss, mean_loss + b * std_loss, 1, 1)
         fig.add_trace(
             go.Scatter(
                 x=steps,
@@ -175,7 +178,8 @@ def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
             col=1,
         )
 
-        _band(steps, min_regret, max_regret, 1, 2)
+        # _band(steps, min_regret, max_regret, 1, 2)
+        _band(steps, mean_regret - b * std_loss, mean_regret + b * std_loss, 1, 2)
         fig.add_trace(
             go.Scatter(
                 x=steps,

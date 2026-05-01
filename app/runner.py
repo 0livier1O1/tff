@@ -50,7 +50,7 @@ def mabss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> li
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_mabss_experiment.py",
         "--budget",              str(cfg.budget),
-        "--warm-start-epochs",  str(cfg.warm_start_epochs),
+        "--warm-start-epochs",    str(cfg.mabss_decomp_epochs),
         "--n-cores",             str(cfg.n_cores),
         "--max-rank",            str(cfg.max_rank),
         "--max-edge-rank",       str(cfg.max_edge_rank),
@@ -71,15 +71,15 @@ def mabss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> li
         "--exp4-eta",            str(cfg.exp4_eta),
         "--dtype",               "float32",
         "--decomp-method",       cfg.mabss_decomp_method,
-        "--momentum",            str(cfg.decomp_momentum),
-        "--loss-patience",       str(cfg.decomp_loss_patience),
-        "--lr-patience",         str(cfg.decomp_lr_patience),
+        "--momentum",            str(cfg.mabss_decomp_momentum),
+        "--loss-patience",       str(cfg.mabss_decomp_loss_patience),
+        "--lr-patience",         str(cfg.mabss_decomp_lr_patience),
         "--seed",                str(seed),
         "--policies",            mabss_pol,
         "--out-dir",             str(pol_dir),
     ]
-    if cfg.decomp_init_lr is not None:
-        cmd.extend(["--init-lr", str(cfg.decomp_init_lr)])
+    if cfg.mabss_decomp_init_lr is not None:
+        cmd.extend(["--init-lr", str(cfg.mabss_decomp_init_lr)])
     if cfg.learn_noise:
         cmd.append("--learn-noise")
     if cfg.mabss_warm_start_method and cfg.mabss_warm_start_epochs > 0:
@@ -105,18 +105,18 @@ def boss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> lis
         "--n-init",      str(cfg.boss_n_init),
         "--max-bond",    str(cfg.boss_max_bond),
         "--min-rse",     str(cfg.boss_min_rse),
-        "--maxiter-tn",  str(cfg.boss_maxiter_tn),
+        "--maxiter-tn",  str(cfg.boss_decomp_epochs),
         "--acqf",        acqf,
         "--ucb-beta",    str(cfg.boss_ucb_beta),
         "--decomp-method", cfg.boss_decomp_method,
         "--lamda",       str(cfg.boss_lamda),
-        "--momentum",    str(cfg.decomp_momentum),
-        "--loss-patience", str(cfg.decomp_loss_patience),
-        "--lr-patience",   str(cfg.decomp_lr_patience),
+        "--momentum",    str(cfg.boss_decomp_momentum),
+        "--loss-patience", str(cfg.boss_decomp_loss_patience),
+        "--lr-patience",   str(cfg.boss_decomp_lr_patience),
         "--out-dir",     str(pol_dir),
     ]
-    if cfg.decomp_init_lr is not None:
-        cmd.extend(["--init-lr", str(cfg.decomp_init_lr)])
+    if cfg.boss_decomp_init_lr is not None:
+        cmd.extend(["--init-lr", str(cfg.boss_decomp_init_lr)])
     if cfg.target_path:
         cmd.extend(["--target-path", cfg.target_path])
     return cmd  # --adj-path injected by launch_run after saving per-seed .npy
@@ -165,13 +165,18 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         "budget": cfg.budget, "max_edge_rank": cfg.max_edge_rank,
         "seeds": all_seeds, "policies": cfg.policies_to_run,
         # Decomposition
-        "warm_start_epochs": cfg.warm_start_epochs,
+        "mabss_decomp_epochs": cfg.mabss_decomp_epochs,
+        "boss_decomp_epochs": cfg.boss_decomp_epochs,
         "mabss_decomp_method": cfg.mabss_decomp_method,
         "boss_decomp_method": cfg.boss_decomp_method,
-        "decomp_init_lr": cfg.decomp_init_lr,
-        "decomp_momentum": cfg.decomp_momentum,
-        "decomp_loss_patience": cfg.decomp_loss_patience,
-        "decomp_lr_patience": cfg.decomp_lr_patience,
+        "mabss_decomp_init_lr": cfg.mabss_decomp_init_lr,
+        "boss_decomp_init_lr": cfg.boss_decomp_init_lr,
+        "mabss_decomp_momentum": cfg.mabss_decomp_momentum,
+        "boss_decomp_momentum": cfg.boss_decomp_momentum,
+        "mabss_decomp_loss_patience": cfg.mabss_decomp_loss_patience,
+        "boss_decomp_loss_patience": cfg.boss_decomp_loss_patience,
+        "mabss_decomp_lr_patience": cfg.mabss_decomp_lr_patience,
+        "boss_decomp_lr_patience": cfg.boss_decomp_lr_patience,
         "mabss_warm_start_method": cfg.mabss_warm_start_method,
         "mabss_warm_start_epochs": cfg.mabss_warm_start_epochs,
         # Advanced policy
@@ -182,7 +187,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         "exp4_gamma": cfg.exp4_gamma, "exp4_eta": cfg.exp4_eta,
         # BOSS
         "boss_n_init": cfg.boss_n_init, "boss_max_bond": cfg.boss_max_bond,
-        "boss_min_rse": cfg.boss_min_rse, "boss_maxiter_tn": cfg.boss_maxiter_tn,
+        "boss_min_rse": cfg.boss_min_rse,
         "boss_ucb_beta": cfg.boss_ucb_beta, "boss_lamda": cfg.boss_lamda,
     }
     with open(cfg_path, "w") as f:

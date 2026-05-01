@@ -14,7 +14,8 @@ DEFAULT_PARAMS: dict = {
     "n_cores": 5,
     "max_rank": 6,
     "budget": 15,
-    "warm_start_epochs": 60,
+    "mabss_decomp_epochs": 60,
+    "boss_decomp_epochs": 1000,
     "max_edge_rank": 10,
     "beta": 5.0,
     "kernel_name": "matern",
@@ -56,13 +57,18 @@ class SidebarConfig:
     max_edge_rank: int = 10
     policies_to_run: list = field(default_factory=list)
     # Decomposition
-    warm_start_epochs: int = 60
+    mabss_decomp_epochs: int = 60
+    boss_decomp_epochs: int = 1000
     mabss_decomp_method: str = "sgd"
     boss_decomp_method: str = "sgd"
-    decomp_init_lr: float | None = None
-    decomp_momentum: float = 0.5
-    decomp_loss_patience: int = 2500
-    decomp_lr_patience: int = 250
+    mabss_decomp_init_lr: float | None = None
+    boss_decomp_init_lr: float | None = None
+    mabss_decomp_momentum: float = 0.5
+    boss_decomp_momentum: float = 0.5
+    mabss_decomp_loss_patience: int = 2500
+    boss_decomp_loss_patience: int = 2500
+    mabss_decomp_lr_patience: int = 250
+    boss_decomp_lr_patience: int = 250
     mabss_warm_start_method: str | None = None
     mabss_warm_start_epochs: int = 0
     # Advanced policy — GP-UCB
@@ -81,7 +87,6 @@ class SidebarConfig:
     boss_n_init: int = 10
     boss_max_bond: int = 10
     boss_min_rse: float = 0.01
-    boss_maxiter_tn: int = 1000
     boss_ucb_beta: float = 2.0
     boss_lamda: float = 1.0
 
@@ -147,7 +152,7 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
 
     st.sidebar.markdown("### Storage Options")
     exp_src = "image" if cfg.problem_source == "Images" else "synthetic"
-    default_name = f"exp_{exp_src}_{cfg.budget}s_{cfg.warm_start_epochs}d_{cfg.mabss_decomp_method}"
+    default_name = f"exp_{exp_src}_{cfg.budget}s_{cfg.mabss_decomp_method}_{cfg.boss_decomp_method}"
     cfg.run_name = st.sidebar.text_input("Run Name", value=default_name)
 
 
@@ -197,71 +202,112 @@ def _render_decomp_settings(cfg: SidebarConfig) -> None:
     st.sidebar.markdown("#### Decomposition Settings")
     with st.sidebar.container():
         has_mabss = any(p.startswith("mabss-") for p in cfg.policies_to_run)
+        has_boss = any(p.startswith("boss-") for p in cfg.policies_to_run)
 
-        _dc1, _dc2 = st.sidebar.columns(2)
-        cfg.warm_start_epochs = _dc1.number_input(
+        specs = []
+        if has_mabss:
+            specs.append(("mabss", "MABSS", ["sgd", "pam", "als", "adam"], 60))
+        if has_boss:
+            specs.append(("boss", "BOSS", ["sgd", "pam", "als", "adam"], 1000))
+
+        for prefix, label, engines, default_epochs in specs:
+            with st.sidebar.expander(label, expanded=True):
+                _render_decomp_family(cfg, prefix, engines, default_epochs, st)
+                if prefix == "mabss":
+                    ws_col1, ws_col2 = st.columns(2)
+                    _ws = ws_col1.selectbox("Warm Start", ["None", "pam", "als"], index=0)
+                    cfg.mabss_warm_start_method = None if _ws == "None" else _ws
+                    cfg.mabss_warm_start_epochs = ws_col2.number_input(
+                        "Warm Iters", value=0, min_value=0, step=10
+                    )
+
+
+def _render_decomp_family(
+    cfg: SidebarConfig,
+    prefix: str,
+    engines: list[str],
+    default_epochs: int,
+    ui,
+) -> None:
+    c1, c2 = ui.columns(2)
+    setattr(
+        cfg,
+        f"{prefix}_decomp_epochs",
+        c1.number_input(
             "Decomp Epochs",
             min_value=10,
             max_value=10000,
-            value=60,
+            value=getattr(cfg, f"{prefix}_decomp_epochs", default_epochs),
             step=10,
-            help="Epochs for each local tensor decomposition evaluation.",
-        )
-        decomp_method = _dc2.selectbox(
+            key=f"{prefix}_decomp_epochs",
+            help="Epochs for tensor decomposition evaluations.",
+        ),
+    )
+    current_engine = getattr(cfg, f"{prefix}_decomp_method")
+    setattr(
+        cfg,
+        f"{prefix}_decomp_method",
+        c2.selectbox(
             "Engine",
-            ["sgd", "pam", "als", "adam", "pam (torch)"],
-            index=0,
-            help="sgd/adam/pam/als: cuTensorNetwork (GPU). pam (torch): CPU legacy.",
-        )
-        cfg.mabss_decomp_method = "pam" if decomp_method == "pam (torch)" else decomp_method
-        cfg.boss_decomp_method = "pam_legacy" if decomp_method == "pam (torch)" else decomp_method
+            engines,
+            index=engines.index(current_engine) if current_engine in engines else 0,
+            key=f"{prefix}_decomp_method",
+            help="Decomposition backend for this policy family.",
+        ),
+    )
 
-        _lr1, _lr2 = st.sidebar.columns(2)
-        _init_lr = _lr1.number_input(
-            "Init LR",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.01,
-            step=0.001,
-            format="%.4f",
-            help="Initial learning rate for SGD/Adam. 0 = auto (0.01 SGD / 0.002 Adam).",
-        )
-        cfg.decomp_momentum = _lr2.number_input(
+    c3, c4 = ui.columns(2)
+    init_lr = c3.number_input(
+        "Init LR",
+        min_value=0.0,
+        max_value=1.0,
+        value=getattr(cfg, f"{prefix}_decomp_init_lr") or 0.0,
+        step=0.001,
+        format="%.4f",
+        key=f"{prefix}_decomp_init_lr",
+        help="0 = auto (0.01 SGD / 0.002 Adam).",
+    )
+    setattr(cfg, f"{prefix}_decomp_init_lr", init_lr if init_lr > 0 else None)
+    setattr(
+        cfg,
+        f"{prefix}_decomp_momentum",
+        c4.number_input(
             "Momentum",
             min_value=0.0,
             max_value=1.0,
-            value=0.5,
+            value=getattr(cfg, f"{prefix}_decomp_momentum"),
             step=0.05,
             format="%.2f",
+            key=f"{prefix}_decomp_momentum",
             help="SGD momentum coefficient.",
-        )
-        cfg.decomp_init_lr = _init_lr if _init_lr > 0 else None
+        ),
+    )
 
-        _p1, _p2 = st.sidebar.columns(2)
-        cfg.decomp_loss_patience = _p1.number_input(
+    c5, c6 = ui.columns(2)
+    setattr(
+        cfg,
+        f"{prefix}_decomp_loss_patience",
+        c5.number_input(
             "Loss Pat.",
             min_value=10,
             max_value=50000,
-            value=2500,
+            value=getattr(cfg, f"{prefix}_decomp_loss_patience"),
             step=100,
-            help="Epochs without loss improvement before early stop.",
-        )
-        cfg.decomp_lr_patience = _p2.number_input(
+            key=f"{prefix}_decomp_loss_patience",
+        ),
+    )
+    setattr(
+        cfg,
+        f"{prefix}_decomp_lr_patience",
+        c6.number_input(
             "LR Pat.",
             min_value=10,
             max_value=10000,
-            value=250,
+            value=getattr(cfg, f"{prefix}_decomp_lr_patience"),
             step=50,
-            help="Epochs without improvement before LR decay.",
-        )
-
-        if has_mabss:
-            ws_col1, ws_col2 = st.sidebar.columns(2)
-            _ws = ws_col1.selectbox("Warm Start", ["None", "pam", "als"], index=0)
-            cfg.mabss_warm_start_method = None if _ws == "None" else _ws
-            cfg.mabss_warm_start_epochs = ws_col2.number_input(
-                "Warm Iters", value=0, min_value=0, step=10
-            )
+            key=f"{prefix}_decomp_lr_patience",
+        ),
+    )
 
 
 def _render_advanced_policy(cfg: SidebarConfig) -> None:
@@ -329,14 +375,9 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
                 "Max Bond Rank", value=10, min_value=1,
                 help=r"Upper bound on each bond rank in the search space.",
             )
-            bb1, bb2 = st.columns(2)
-            cfg.boss_min_rse = bb1.number_input(
+            cfg.boss_min_rse = st.number_input(
                 "Min RSE Target", value=0.01, format="%f",
                 help="Early-stop threshold per TN evaluation.",
-            )
-            cfg.boss_maxiter_tn = bb2.number_input(
-                "PAM Iterations", value=1000, min_value=10,
-                help="FCTN-PAM iterations per structure evaluation.",
             )
             bc1, bc2 = st.columns(2)
             cfg.boss_lamda = bc1.number_input(
@@ -406,13 +447,18 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.budget                = _get("budget", 15)
     cfg.max_edge_rank         = _get("max_edge_rank", 10)
     cfg.policies_to_run       = _get("policies", [])
-    cfg.warm_start_epochs     = _get("warm_start_epochs", 60)
+    cfg.mabss_decomp_epochs   = _get("mabss_decomp_epochs", 60)
+    cfg.boss_decomp_epochs    = _get("boss_decomp_epochs", 1000)
     cfg.mabss_decomp_method   = _get("mabss_decomp_method", "sgd")
     cfg.boss_decomp_method    = _get("boss_decomp_method", "sgd")
-    cfg.decomp_init_lr        = _get("decomp_init_lr", None)
-    cfg.decomp_momentum       = _get("decomp_momentum", 0.5)
-    cfg.decomp_loss_patience  = _get("decomp_loss_patience", 2500)
-    cfg.decomp_lr_patience    = _get("decomp_lr_patience", 250)
+    cfg.mabss_decomp_init_lr  = _get("mabss_decomp_init_lr", None)
+    cfg.boss_decomp_init_lr   = _get("boss_decomp_init_lr", None)
+    cfg.mabss_decomp_momentum = _get("mabss_decomp_momentum", 0.5)
+    cfg.boss_decomp_momentum  = _get("boss_decomp_momentum", 0.5)
+    cfg.mabss_decomp_loss_patience = _get("mabss_decomp_loss_patience", 2500)
+    cfg.boss_decomp_loss_patience  = _get("boss_decomp_loss_patience", 2500)
+    cfg.mabss_decomp_lr_patience = _get("mabss_decomp_lr_patience", 250)
+    cfg.boss_decomp_lr_patience  = _get("boss_decomp_lr_patience", 250)
     cfg.mabss_warm_start_method  = _get("mabss_warm_start_method", None)
     cfg.mabss_warm_start_epochs  = _get("mabss_warm_start_epochs", 0)
     cfg.beta                  = _get("beta", 5.0)
@@ -428,7 +474,6 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.boss_n_init           = _get("boss_n_init", 10)
     cfg.boss_max_bond         = _get("boss_max_bond", 10)
     cfg.boss_min_rse          = _get("boss_min_rse", 0.01)
-    cfg.boss_maxiter_tn       = _get("boss_maxiter_tn", 1000)
     cfg.boss_ucb_beta         = _get("boss_ucb_beta", 2.0)
     cfg.boss_lamda            = _get("boss_lamda", 1.0)
     cfg.adj_spec              = _get("adj_spec", None)

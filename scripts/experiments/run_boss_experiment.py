@@ -84,9 +84,9 @@ def main():
     parser.add_argument(
         "--decomp-method",
         type=str,
-        default="pam_legacy",
-        choices=["pam_legacy", "pam", "sgd", "adam", "als"],
-        help="pam_legacy=fctn.py, pam/sgd/adam/als=cuTensorNetwork",
+        default="sgd",
+        choices=["pam", "sgd", "adam", "als"],
+        help="pam/sgd/adam/als=cuTensorNetwork",
     )
     parser.add_argument("--init-lr", type=float, default=None, help="Initial LR for SGD/Adam (None = auto)")
     parser.add_argument("--momentum", type=float, default=0.5, help="SGD momentum")
@@ -134,7 +134,7 @@ def main():
         eval_generating_structure(
             init_adj, target_cp,
             max_epochs=args.maxiter_tn,
-            decomp_method="sgd" if args.decomp_method == "pam_legacy" else args.decomp_method,
+            decomp_method=args.decomp_method,
             out_path=seed_dir / "generating_rse.json",
             dtype=args.dtype,
         )

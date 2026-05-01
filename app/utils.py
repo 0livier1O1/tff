@@ -60,10 +60,11 @@ def _cr_from_adj(adj: np.ndarray) -> float:
 def _load_artifact(out_dir: Path):
     """Load results from all seed_*/policy_name/ subdirs.
 
-    Returns (traces_df, summaries_list, decomp_dict) or (None, [], {}) if nothing found.
+    Returns (mabss_df, boss_df, summaries_list, decomp_dict), with separate
+    trace dataframes because MABSS and BOSS optimize/report different metrics.
     decomp_dict is keyed by (seed, pol_name) -> list of {step, arm, losses} dicts.
     """
-    traces, summaries, decomp_dict = [], [], {}
+    mabss_traces, boss_traces, summaries, decomp_dict = [], [], [], {}
     for seed_d in sorted(out_dir.iterdir()):
         if not (seed_d.is_dir() and seed_d.name.startswith("seed_")):
             continue
@@ -81,7 +82,10 @@ def _load_artifact(out_dir: Path):
                 df_p = pd.read_csv(t_path)
                 df_p["Policy"] = pol_name
                 df_p["Seed"] = seed_val
-                traces.append(df_p)
+                if pol_name.startswith("boss-"):
+                    boss_traces.append(df_p)
+                elif pol_name.startswith("mabss-"):
+                    mabss_traces.append(df_p)
 
             s_path = pol_d / "summary.json"
             if not s_path.exists():
@@ -100,9 +104,11 @@ def _load_artifact(out_dir: Path):
                 with open(d_path) as f:
                     decomp_dict[(seed_val, pol_name)] = json.load(f)
 
-    if not traces:
-        return None, [], {}
-    return pd.concat(traces, ignore_index=True), summaries, decomp_dict
+    if not mabss_traces and not boss_traces:
+        return None, None, [], {}
+    mabss_df = pd.concat(mabss_traces, ignore_index=True) if mabss_traces else pd.DataFrame()
+    boss_df = pd.concat(boss_traces, ignore_index=True) if boss_traces else pd.DataFrame()
+    return mabss_df, boss_df, summaries, decomp_dict
 
 
 # ── Run completion sentinel ────────────────────────────────────────────────────

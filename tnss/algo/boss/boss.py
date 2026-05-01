@@ -18,7 +18,6 @@ from botorch.utils.transforms import unnormalize
 from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
-from tensors.decomp.fctn import decomp_pam
 from tensors.networks.cutensor_network import cuTensorNetwork
 from tnss.utils import triu_to_adj_matrix
 
@@ -28,32 +27,9 @@ def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
     return triu_to_adj_matrix(x_int.double().unsqueeze(0), diag=t_shape).squeeze()
 
 
-def _compute_cr(A: Tensor, n_target: int) -> float:
-    """CR = sum_i(prod_j A[i,j]) / numel(target), computed analytically."""
-    return (A.prod(dim=-1).sum() / n_target).item()
-
-
-def _eval_tn(target: Tensor, A_int: Tensor, t_shape: Tensor,
-             maxiter: int, n_runs: int, min_rse: float):
-    """Legacy eval using decomp_pam from fctn.py (no cuTN overhead)."""
-    cr = _compute_cr(A_int.double(), target.numel())
-    best_rse = float("inf")
-    best_recon = None
-    t0 = time.time()
-    for _ in range(n_runs):
-        losses, recon = decomp_pam(target, A_int, iter=maxiter)
-        val = losses[-1].item() if len(losses) > 0 else float("inf")
-        if val < best_rse:
-            best_rse = val
-            best_recon = recon
-        if best_rse < min_rse:
-            break
-    return cr, best_rse, time.time() - t0, best_recon
-
-
-def _eval_tn_cutn(target, A_int, maxiter, n_runs, min_rse, method="pam",
-                  backend="cupy", dtype="float32",
-                  init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
+def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
+             backend="cupy", dtype="float32",
+             init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
     """Eval using cuTensorNetwork decompose (supports sgd, pam, als)."""
     t0 = time.time()
     tgt_np = target.numpy() if hasattr(target, 'numpy') else target
@@ -111,7 +87,7 @@ class BOSS:
         n_runs: int = 1,
         acqf: str = "ei",
         ucb_beta: float = 2.0,
-        decomp_method: str = "pam_legacy",
+        decomp_method: str = "sgd",
         init_lr: float | None = None,
         momentum: float = 0.5,
         loss_patience: int = 2500,
@@ -262,13 +238,8 @@ class BOSS:
         return row
 
     def _evaluate(self, A_int: Tensor):
-        """Dispatch to legacy or cuTN eval based on decomp_method."""
-        if self.decomp_method == "pam_legacy":
-            return _eval_tn(
-                self.target, A_int, self.t_shape,
-                self.maxiter_tn, self.n_runs, self.min_rse,
-            )
-        return _eval_tn_cutn(
+        """Evaluate one candidate structure with cuTensorNetwork."""
+        return _eval_tn(
             self.target, A_int,
             self.maxiter_tn, self.n_runs, self.min_rse,
             method=self.decomp_method,

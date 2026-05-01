@@ -86,7 +86,8 @@ def render_job_status_panel(ROOT: Path) -> None:
                 "Step":      step,
                 "N":         cfg_data.get("n_cores", "-"),
                 "Budget":    cfg_data.get("budget", "-"),
-                "Epochs":    cfg_data.get("warm_start_epochs", "-"),
+                "MABSS Epochs": cfg_data.get("mabss_decomp_epochs", "-"),
+                "BOSS Epochs":  cfg_data.get("boss_decomp_epochs", "-"),
                 "MaxRank":   cfg_data.get("max_edge_rank", "-"),
                 "Submitted": _fmt_ts(submitted_at),
                 "Started":   _fmt_ts(started_at),
@@ -113,13 +114,13 @@ def render_load_mode(ROOT: Path):
     """
     Render the Load Past Artifact sidebar widgets and load data from disk.
 
-    Returns (data_ready, df_rows, summaries, decomp_dict, df_summary, out_dir).
+    Returns (data_ready, df_mabss, df_boss, summaries, decomp_dict, df_summary, out_dir).
     When data_ready is False all other values are None / empty.
     """
     from app.sidebar import DEFAULT_PARAMS
     from app.utils import _load_artifact, _artifact_fully_done
 
-    _empty = (False, None, None, {}, None, None)
+    _empty = (False, None, None, None, {}, None, None)
 
     st.sidebar.markdown("### Historical Archives")
     artifact_dir = ROOT / "artifacts"
@@ -150,8 +151,8 @@ def render_load_mode(ROOT: Path):
     out_dir = artifact_dir / selected_run
     st.sidebar.success(f"Viewing Historical Artifact: `{selected_run}`")
     try:
-        df_rows, summaries, decomp_dict = _load_artifact(out_dir)
-        if df_rows is None:
+        df_mabss, df_boss, summaries, decomp_dict = _load_artifact(out_dir)
+        if df_mabss is None and df_boss is None:
             st.error(
                 "Artifact contains no valid multi-seed environments. "
                 "Legacy runs without seeded geometries are strictly deprecated."
@@ -168,12 +169,12 @@ def render_load_mode(ROOT: Path):
         c2.metric("Max Search Rank", cfg_json.get("max_edge_rank", "-"))
         b1, b2 = st.sidebar.columns(2)
         b1.metric("Steps Budget", cfg_json.get("budget", "-"))
-        b2.metric("Decomp Epochs", cfg_json.get("warm_start_epochs", "-"))
+        b2.metric("Decomp Epochs", f"{cfg_json.get('mabss_decomp_epochs', '-')}/{cfg_json.get('boss_decomp_epochs', '-')}")
         with st.sidebar.expander("Underlying Hyperparameters", expanded=False):
             st.json(cfg_json)
 
         df_summary = pd.DataFrame(summaries)
-        return True, df_rows, summaries, decomp_dict, df_summary, out_dir
+        return True, df_mabss, df_boss, summaries, decomp_dict, df_summary, out_dir
 
     except Exception:
         st.error("Failed to load artifact due to filesystem drift.")
@@ -220,7 +221,8 @@ def _render_global_summary(artifact_dir: Path, past_runs: list[str], DEFAULT_PAR
 # ---------------------------------------------------------------------------
 
 def render_results(
-    df_rows: pd.DataFrame,
+    df_mabss: pd.DataFrame,
+    df_boss: pd.DataFrame,
     summaries: list[dict],
     decomp_dict: dict,
     df_summary: pd.DataFrame,
@@ -238,6 +240,9 @@ def render_results(
         plot_pareto_at_step,
     )
     from app.utils import get_policy_color, _cr_from_adj
+
+    frames = [df for df in (df_mabss, df_boss) if df is not None and not df.empty]
+    df_rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     st.markdown("## Global Performance Overview")
 
