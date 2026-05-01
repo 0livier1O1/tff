@@ -235,19 +235,31 @@ def render_results(
         plot_step_time_breakdown,
         plot_decomp_curves,
         plot_time_to_threshold,
+        plot_pareto_at_step,
     )
     from app.utils import get_policy_color, _cr_from_adj
 
-    st.markdown("## Trajectory Visualization (Averaged Over Seeds)")
+    st.markdown("## Global Performance Overview")
 
     if not df_rows.empty:
+        _all_steps = sorted(df_rows["step"].dropna().unique().astype(int))
+        _slider_col, _ = st.columns([1, 3])
+        with _slider_col:
+            _max_step = st.select_slider(
+                "Max step shown",
+                options=_all_steps,
+                value=_all_steps[-1],
+                key="global_step_crop",
+            )
+        df_vis = df_rows[df_rows["step"] <= _max_step]
+
         st.plotly_chart(
-            plot_loss_and_regret(df_rows),
+            plot_loss_and_regret(df_vis),
             use_container_width=True,
             key="loss_and_regret_global",
         )
 
-        st.markdown("#### Time-to-Threshold")
+        st.markdown("#### Performance vs Runtime")
         _ctrl_col, _chart_col = st.columns([1, 5])
         with _ctrl_col:
             _threshold = st.number_input(
@@ -266,6 +278,28 @@ def render_results(
                 plot_time_to_threshold(df_rows, threshold=_threshold, y_metric=_y_metric),
                 use_container_width=True,
                 key="time_to_threshold_global",
+            )
+
+        st.markdown("#### Pareto Curves")
+        _pareto_ctrl, _pareto_chart = st.columns([1, 5])
+        with _pareto_ctrl:
+            _available_steps = sorted(df_rows["step"].dropna().unique().astype(int))
+            _pareto_step = st.select_slider(
+                "Step",
+                options=_available_steps,
+                value=_available_steps[-1],
+                key="pareto_step",
+            )
+            _pareto_y_metric = st.selectbox(
+                "Y-axis",
+                options=["CR", "Efficiency"] if _has_eff else ["CR"],
+                key="pareto_y_metric",
+            )
+        with _pareto_chart:
+            st.plotly_chart(
+                plot_pareto_at_step(df_rows, step=_pareto_step, y_metric=_pareto_y_metric),
+                use_container_width=True,
+                key="pareto_global",
             )
 
     st.divider()
@@ -364,15 +398,28 @@ def render_results(
 def _render_summary_table(seed_df, seed_summaries, s_dir, get_policy_color, _cr_from_adj):
     import numpy as _np
 
+    _summary_rows = []
+    for s in seed_summaries:
+        _summary_rows.append({
+            "policy": s.get("policy"),
+            "final_step_loss": s.get("final_step_loss", s.get("final_loss_after_move")),
+            "final_cr": s.get("final_cr"),
+            "cumulative_regret": s.get("cumulative_regret"),
+            "oracle_hit_rate": s.get("oracle_hit_rate"),
+            "unique_arms": s.get("unique_arms"),
+            "arm_entropy_norm": s.get("arm_entropy_norm"),
+            "steps": s.get("steps"),
+            "budget": s.get("budget"),
+        })
     _sum_keys = [
-        "policy", "final_loss_after_move", "final_cr", "cumulative_regret",
+        "policy", "final_step_loss", "final_cr", "cumulative_regret",
         "oracle_hit_rate", "unique_arms", "arm_entropy_norm", "steps", "budget",
     ]
     _sum_labels = [
         "Policy", "Final Loss", "Final CR", "Cum. Regret",
         "Oracle Hit Rate", "Unique Arms", "Arm Entropy", "Steps", "Budget",
     ]
-    df_sum = pd.DataFrame([{k: s.get(k) for k in _sum_keys} for s in seed_summaries])
+    df_sum = pd.DataFrame([{k: s.get(k) for k in _sum_keys} for s in _summary_rows])
     df_sum.columns = _sum_labels
 
     _total_time = (
@@ -386,10 +433,9 @@ def _render_summary_table(seed_df, seed_summaries, s_dir, get_policy_color, _cr_
         _shape = _np.load(_target_npz)["data"].shape
         df_sum["Shape"] = "×".join(str(d) for d in _shape)
 
-    
-    _last_eff = seed_df.groupby("Policy")["efficiency"].last()
-    df_sum["Efficiency"] = df_sum["Policy"].map(_last_eff).round(3)
-    
+    if "efficiency" in seed_df.columns:
+        _last_eff = seed_df.groupby("Policy")["efficiency"].last()
+        df_sum["Efficiency"] = df_sum["Policy"].map(_last_eff).round(3)
 
     df_sum["Final Loss"] = df_sum["Final Loss"].round(4)
     df_sum["Final CR"] = df_sum["Final CR"].round(3)

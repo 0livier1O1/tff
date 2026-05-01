@@ -2,6 +2,8 @@ import torch
 import numpy as np
 import cupy as cp
 import random
+import gc
+import psutil
 
 from torch import Tensor
 from tensors.networks.cutensor_network import cuTensorNetwork, increment_mode_rank
@@ -158,15 +160,16 @@ class TNSearchEnv:
         done when loss < stopping_threshold or no valid arms remain.
         """
         parent_cr = self.current_cr()
+        par_loss = self.cur_loss
         A_next, cores_next, losses = self.evaluate_arm(arm_idx, inplace=True)
-        reward = self.cur_loss - losses[-1]
+        reward = par_loss - losses[-1]
 
         done = bool(self.cur_loss.item() < self.stopping_threshold) or not bool(
             self.valid_arm_mask().any().item()
         )
         info = {
             "losses": losses,
-            "parent_loss": self.cur_loss + reward,  # Reconstruct parent loss
+            "parent_loss": par_loss,
             "parent_cr": parent_cr,
             "current_cr": self.current_cr(),
             "adj": A_next,
@@ -183,9 +186,6 @@ class TNSearchEnv:
         valid_mask = self.valid_arm_mask()
         final_losses = torch.full((self.K,), float("inf"), dtype=torch.double)
         trajectories = {}
-
-        import gc
-        import psutil
 
         for k in range(self.K):
             if not bool(valid_mask[k].item()):

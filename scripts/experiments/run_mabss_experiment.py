@@ -310,7 +310,6 @@ def run_policy(
                     "started_at": _prev.get("started_at"),
                 }, _pf)
             tmp_p.replace(progress_file)
-        t_step = time.time()
 
         if env.cur_loss.item() < env.stopping_threshold:
             stop_reason = "threshold_reached"
@@ -359,8 +358,8 @@ def run_policy(
         decomp_t0 = time.time()
         _, reward, done, info = env.step(action)
         decomp_time = time.time() - decomp_t0
-        cur_loss = info["parent_loss"]
-        chosen_loss = info["losses"][-1].item()
+        par_loss = info["parent_loss"]
+        step_loss = info["losses"][-1].item()
         decomp_histories.append({
             "step": step + 1,
             "arm": int(action),
@@ -391,8 +390,8 @@ def run_policy(
         _current_cr = float(info["current_cr"].item())
         row = {
             "step": step + 1,
-            "cur_loss": float(cur_loss.item()),
-            "chosen_loss": float(chosen_loss),
+            "par_loss": float(par_loss.item()),
+            "step_loss": float(step_loss),
             "current_cr": _current_cr,
             "efficiency": _current_cr / target_cr if target_cr else float("nan"),
             "selected_arm": int(action),
@@ -436,8 +435,8 @@ def run_policy(
 def _summarize_policy(rows: list[dict], n_arms: int, budget: int, policy: str) -> dict:
     if not rows:
         return {"policy": policy, "steps": 0, "budget": budget}
-    losses = np.asarray([r["cur_loss"] for r in rows], dtype=np.float64)
-    chosen_losses = np.asarray([r["chosen_loss"] for r in rows], dtype=np.float64)
+    par_losses = np.asarray([r["par_loss"] for r in rows], dtype=np.float64)
+    step_losses = np.asarray([r["step_loss"] for r in rows], dtype=np.float64)
     rewards = np.asarray([r["chosen_reward"] for r in rows], dtype=np.float64)
     oracle_rewards = np.asarray(
         [r["oracle_best_reward"] for r in rows], dtype=np.float64
@@ -449,11 +448,17 @@ def _summarize_policy(rows: list[dict], n_arms: int, budget: int, policy: str) -
         "policy": policy,
         "steps": len(rows),
         "budget": budget,
-        "initial_loss": float(losses[0]),
-        "final_loss_before_move": float(losses[-1]),
-        "final_loss_after_move": float(chosen_losses[-1]),
-        "best_loss_before_move": float(losses.min()),
-        "best_loss_after_move": float(chosen_losses.min()),
+        "initial_loss": float(par_losses[0]),
+        "final_par_loss": float(par_losses[-1]),
+        "final_step_loss": float(step_losses[-1]),
+        "best_par_loss": float(par_losses.min()),
+        "best_step_loss": float(step_losses.min()),
+        # Legacy summary keys retained so older dashboard views and notebooks
+        # that read summary.json do not break on freshly generated artifacts.
+        "final_loss_before_move": float(par_losses[-1]),
+        "final_loss_after_move": float(step_losses[-1]),
+        "best_loss_before_move": float(par_losses.min()),
+        "best_loss_after_move": float(step_losses.min()),
         "mean_reward": float(rewards.mean()),
         "mean_oracle_reward": float(oracle_rewards.mean()),
         "mean_regret": float(regrets.mean()),
@@ -482,7 +487,7 @@ def main() -> None:
     parser.add_argument("--policies", type=str, nargs="+", default=["ucb"])
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--dtype", type=str, default="float32")
-    parser.add_argument("--stopping-threshold", type=float, default=1e-5)
+    parser.add_argument("--stopping-threshold", type=float, default=1e-8)
     parser.add_argument(
         "--target-path",
         type=str,

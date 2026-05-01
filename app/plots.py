@@ -3,7 +3,7 @@ Reusable Plotly plot functions for the BOSS dashboard.
 Each function accepts a df_rows DataFrame (standard traces format) and
 returns a plotly.graph_objects.Figure.
 
-Expected columns: step, cur_loss, chosen_loss, current_cr, selected_arm,
+Expected columns: step, par_loss, step_loss, current_cr, selected_arm,
   oracle_best_arm, oracle_arm_rank, oracle_best_loss, regret, cum_regret,
   arm_match, pick_time_s, decomp_time_s, gp_fit_time_s, oracle_time_s, step_time_s, Policy, Seed.
 """
@@ -51,34 +51,15 @@ def _mean_std_over_seeds(df_rows, y_col, x_col="step"):
             pol["cum_time_s"] = pol.groupby("Seed")["step_time_s"].cumsum()
         gb = pol.groupby("step")
         mean = gb[y_col].mean()
-        std = gb[y_col].std().fillna(0)
         x = gb[x_col].mean() if x_col != "step" else mean.index
         result[policy] = (
             x.values,
             mean.values,
-            (mean - std).values,
-            (mean + std).values,
+            gb[y_col].min().values,
+            gb[y_col].max().values,
         )
     return result
 
-
-def _effective_step_time(df: pd.DataFrame, policy: str) -> pd.Series:
-    """
-    Algorithmic wall-clock time per step, excluding oracle evaluation time
-    for non-greedy policies (oracle is only bookkeeping overhead there).
-    For greedy, oracle IS the selection cost, so it is included.
-    """
-    is_greedy = policy.lower().replace("mabss-", "") == "greedy"
-    base_cols = ["decomp_time_s", "gp_fit_time_s", "pick_time_s"]
-    # Fall back to step_time_s if new columns aren't present (legacy traces)
-    if "decomp_time_s" not in df.columns:
-        if is_greedy:
-            return df["step_time_s"]
-        return df["step_time_s"] - df.get("oracle_time_s", 0)
-    t = df[base_cols].sum(axis=1)
-    if is_greedy:
-        t = t + df["oracle_time_s"]
-    return t
 
 
 def _interpolate_on_time_grid(
@@ -91,8 +72,7 @@ def _interpolate_on_time_grid(
     Grid runs 0 → earliest seed finish to avoid extrapolation.
     """
     pol = df_rows[df_rows["Policy"] == policy].copy().sort_values(["Seed", "step"])
-    pol["_eff_t"] = _effective_step_time(pol, policy)
-    pol["cum_time_s"] = pol.groupby("Seed")["_eff_t"].cumsum()
+    pol["cum_time_s"] = pol.groupby("Seed")["step_time_s"].cumsum()
     seeds = pol["Seed"].unique()
     t_max = min(pol[pol["Seed"] == s]["cum_time_s"].max() for s in seeds)
     grid = np.linspace(0, t_max, n_points)
@@ -104,8 +84,7 @@ def _interpolate_on_time_grid(
         curves.append(s[y_col].values[idx])
     curves = np.array(curves)
     mean = curves.mean(axis=0)
-    std = curves.std(axis=0)
-    return grid, mean, mean - std, mean + std
+    return grid, mean, curves.min(axis=0), curves.max(axis=0)
 
 
 # ---------------------------------------------------------------------------
@@ -124,10 +103,10 @@ def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
         rows=2,
         cols=2,
         subplot_titles=(
-            "Loss vs. Step (± 1 SD)",
-            "Regret vs. Step (± 1 SD)",
-            "Loss vs. Cumulative Runtime (± 1 SD)",
-            "Regret vs. Cumulative Runtime (± 1 SD)",
+            "Loss vs. Step (min–max band)",
+            "Regret vs. Step (min–max band)",
+            "Loss vs. Cumulative Runtime (min–max band)",
+            "Regret vs. Cumulative Runtime (min–max band)",
         ),
         vertical_spacing=0.18,
     )
@@ -139,13 +118,15 @@ def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
         gb = sub.groupby("step")
         steps = list(gb.groups.keys())
 
-        mean_loss = gb["chosen_loss"].mean()
-        std_loss = gb["chosen_loss"].std().fillna(0)
+        mean_loss = gb["step_loss"].mean()
+        min_loss = gb["step_loss"].min()
+        max_loss = gb["step_loss"].max()
         mean_regret = gb["cum_regret"].mean()
-        std_regret = gb["cum_regret"].std().fillna(0)
+        min_regret = gb["cum_regret"].min()
+        max_regret = gb["cum_regret"].max()
 
         t_loss, m_loss, lo_loss, hi_loss = _interpolate_on_time_grid(
-            df_rows, policy, "chosen_loss", n_points
+            df_rows, policy, "step_loss", n_points
         )
         t_regret, m_regret, lo_regret, hi_regret = _interpolate_on_time_grid(
             df_rows, policy, "cum_regret", n_points
@@ -180,7 +161,7 @@ def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
             )
 
         # Row 1 — vs step
-        _band(steps, mean_loss - std_loss, mean_loss + std_loss, 1, 1)
+        _band(steps, min_loss, max_loss, 1, 1)
         fig.add_trace(
             go.Scatter(
                 x=steps,
@@ -194,7 +175,7 @@ def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
             col=1,
         )
 
-        _band(steps, mean_regret - std_regret, mean_regret + std_regret, 1, 2)
+        _band(steps, min_regret, max_regret, 1, 2)
         fig.add_trace(
             go.Scatter(
                 x=steps,
@@ -328,11 +309,11 @@ def plot_loss_vs_runtime_seed(seed_df: pd.DataFrame) -> go.Figure:
     for policy in sorted(seed_df["Policy"].unique()):
         c = get_policy_color(policy)
         pol = seed_df[seed_df["Policy"] == policy].sort_values("step").copy()
-        pol["cum_time_s"] = _effective_step_time(pol, policy).cumsum()
+        pol["cum_time_s"] = pol["step_time_s"].cumsum()
         fig.add_trace(
             go.Scatter(
                 x=pol["cum_time_s"].values,
-                y=pol["cur_loss"].values,
+                y=pol["step_loss"].values,
                 mode="lines",
                 line=dict(color=c, width=2, shape="hv"),
                 name=policy.upper(),
@@ -359,7 +340,7 @@ def plot_loss_vs_runtime(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
     fig = go.Figure()
     for policy in sorted(df_rows["Policy"].unique()):
         x, mean, lo, hi = _interpolate_on_time_grid(
-            df_rows, policy, "cur_loss", n_points
+            df_rows, policy, "step_loss", n_points
         )
         c = get_policy_color(policy)
         fig.add_trace(
@@ -415,8 +396,7 @@ def plot_loss_vs_runtime_per_seed(df_rows: pd.DataFrame) -> go.Figure:
     for policy in sorted(df_rows["Policy"].unique()):
         c = get_policy_color(policy)
         pol = df_rows[df_rows["Policy"] == policy].copy().sort_values(["Seed", "step"])
-        pol["_eff_t"] = _effective_step_time(pol, policy)
-        pol["cum_time_s"] = pol.groupby("Seed")["_eff_t"].cumsum()
+        pol["cum_time_s"] = pol.groupby("Seed")["step_time_s"].cumsum()
         seeds = sorted(pol["Seed"].unique())
         n_seeds = len(seeds)
         for i, seed in enumerate(seeds):
@@ -425,7 +405,7 @@ def plot_loss_vs_runtime_per_seed(df_rows: pd.DataFrame) -> go.Figure:
             fig.add_trace(
                 go.Scatter(
                     x=s["cum_time_s"].values,
-                    y=s["cur_loss"].values,
+                    y=s["step_loss"].values,
                     mode="lines",
                     line=dict(color=_rgba(c, alpha), width=1.5),
                     name=f"{policy.upper()} seed {seed}",
@@ -567,7 +547,7 @@ def plot_loss_cr_tradeoff(df_rows: pd.DataFrame) -> go.Figure:
         fig.add_trace(
             go.Scatter(
                 x=last["current_cr"],
-                y=last["cur_loss"],
+                y=last["step_loss"],
                 mode="markers",
                 marker=dict(
                     color=c,
@@ -659,12 +639,12 @@ def plot_decomp_curves(decomp_data: list[dict], pol_name: str, color: str) -> go
 def plot_time_to_threshold(
     df_rows: pd.DataFrame, threshold: float = 0.05, y_metric: str = "CR"
 ) -> go.Figure:
-    """Scatter: cumulative runtime vs CR or Efficiency at first step where chosen_loss <= threshold.
+    """Scatter: cumulative runtime vs CR or Efficiency at first step where step_loss <= threshold.
 
     Each point is one (policy, seed) pair. Colored by policy.
     Points where the threshold is never reached are omitted.
     """
-    if "chosen_loss" not in df_rows.columns or "step_time_s" not in df_rows.columns:
+    if "step_loss" not in df_rows.columns or "step_time_s" not in df_rows.columns:
         return go.Figure()
 
     use_efficiency = y_metric == "Efficiency" and "efficiency" in df_rows.columns
@@ -675,13 +655,13 @@ def plot_time_to_threshold(
     df = df_rows.sort_values(["Policy", "Seed", "step"]).copy()
     df["cum_time"] = df.groupby(["Policy", "Seed"])["step_time_s"].cumsum()
 
-    keep_cols = ["Policy", "Seed", "step", "chosen_loss", "current_cr", "cum_time"]
+    keep_cols = ["Policy", "Seed", "step", "step_loss", "current_cr", "cum_time"]
     if use_efficiency:
         keep_cols.append("efficiency")
 
     # First row per (Policy, Seed) where loss hits threshold
     hits = (
-        df[df["chosen_loss"] <= threshold]
+        df[df["step_loss"] <= threshold]
         .groupby(["Policy", "Seed"], sort=False)
         .first()
         .reset_index()[keep_cols]
@@ -701,7 +681,7 @@ def plot_time_to_threshold(
             f"Runtime: {r['cum_time']:.1f}s<br>"
             f"CR: {r['current_cr']:.3f}"
             + (f"<br>Efficiency: {r['efficiency']:.3f}" if use_efficiency else "")
-            + f"<br>Step: {int(r['step'])}<br>Loss: {r['chosen_loss']:.5f}"
+            + f"<br>Step: {int(r['step'])}<br>Loss: {r['step_loss']:.5f}"
         ), axis=1
     )
 
@@ -709,7 +689,7 @@ def plot_time_to_threshold(
 
     for policy in policies:
         p = hits[hits["Policy"] == policy]
-        sizes = 9 + (p["chosen_loss"] / threshold) * 10
+        sizes = 9 + (p["step_loss"] / threshold) * 10
         fig.add_trace(go.Scatter(
             x=p["cum_time"], y=p[y_col],
             mode="markers",
@@ -735,12 +715,72 @@ def plot_time_to_threshold(
 
     fig.update_layout(
         title=dict(
-            text=f"Time-to-threshold (loss ≤ {threshold}): Runtime vs {y_metric}",
+            text=f"Runtime vs {y_metric}",
             font=dict(size=13),
         ),
         xaxis_title="Cumulative runtime at threshold (s)",
         yaxis_title=y_label,
         height=420,
+        template="plotly_white",
+        legend=dict(orientation="v", x=1.02, y=1, xanchor="left"),
+        margin=dict(l=40, r=160, t=50, b=50),
+    )
+    return fig
+
+
+def plot_pareto_at_step(
+    df_rows: pd.DataFrame, step: int, y_metric: str = "CR"
+) -> go.Figure:
+    """Pareto-style scatter: loss vs CR/Efficiency at a fixed search step.
+
+    One point per (policy, seed). Points per policy are connected sorted by loss.
+    """
+    use_efficiency = y_metric == "Efficiency" and "efficiency" in df_rows.columns
+    y_col = "efficiency" if use_efficiency else "current_cr"
+    y_label = "Efficiency" if use_efficiency else "Compression Ratio (CR)"
+
+    at_step = df_rows[df_rows["step"] == step]
+    if at_step.empty:
+        return go.Figure().update_layout(
+            title=f"No data at step {step}",
+            template="plotly_white", height=380,
+        )
+
+    fig = go.Figure()
+
+    for policy in sorted(at_step["Policy"].unique()):
+        p = at_step[at_step["Policy"] == policy].sort_values("step_loss")
+        color = get_policy_color(policy)
+        labels = p.apply(
+            lambda r: (
+                f"<b>{policy.upper()}</b> — Seed {r['Seed']}<br>"
+                f"Loss: {r['step_loss']:.5f}<br>"
+                + (f"Efficiency: {r[y_col]:.3f}" if use_efficiency else f"CR: {r[y_col]:.3f}")
+            ), axis=1
+        )
+        fig.add_trace(go.Scatter(
+            x=p["step_loss"],
+            y=p[y_col],
+            mode="lines+markers",
+            line=dict(color=color, width=1.5, dash="dot"),
+            marker=dict(color=color, size=10, line=dict(color="white", width=1)),
+            name=policy.upper(),
+            text=labels.tolist(),
+            hovertemplate="%{text}<extra></extra>",
+        ))
+
+    fig.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.4)
+    fig.add_hline(
+        y=1, line_dash="dash", line_color="gray", opacity=0.6,
+        annotation_text="y = 1", annotation_position="right",
+        annotation_font=dict(color="gray", size=11),
+    )
+
+    fig.update_layout(
+        title=dict(text=f"Pareto view at step {step}: Loss vs {y_metric}", font=dict(size=13)),
+        xaxis=dict(title="Step loss", autorange="reversed" if use_efficiency else True),
+        yaxis_title=y_label,
+        height=380,
         template="plotly_white",
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left"),
         margin=dict(l=40, r=160, t=50, b=50),
