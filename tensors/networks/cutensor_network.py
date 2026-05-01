@@ -305,6 +305,7 @@ class cuTensorNetwork:
         method="sgd",
         warm_start_method=None,
         warm_start_epochs=0,
+        return_recon=False,
         **kwargs,
     ):
         # Automatically toggle Adam if requested via method string
@@ -318,12 +319,13 @@ class cuTensorNetwork:
         warm_losses = []
         if warm_start_method and warm_start_epochs > 0:
             warm_kw = dict(
-                target=target, tol=tol, max_epochs=warm_start_epochs, **kwargs
+                target=target, tol=tol, max_epochs=warm_start_epochs,
+                **kwargs
             )
             if warm_start_method == "pam":
-                warm_losses = self._decompose_pam(**warm_kw)
+                warm_losses, _ = self._decompose_pam(**warm_kw)
             elif warm_start_method == "als":
-                warm_losses = self._decompose_als_cp(**warm_kw)
+                warm_losses, _ = self._decompose_als_cp(**warm_kw)
             elif warm_start_method == "sgd":
                 sgd_kw = dict(
                     target=target,
@@ -337,9 +339,9 @@ class cuTensorNetwork:
                     **kwargs,
                 )
                 if self.backend == "torch":
-                    warm_losses = self._decompose_torch_sgd(**sgd_kw)
+                    warm_losses, _ = self._decompose_torch_sgd(**sgd_kw)
                 else:
-                    warm_losses = self._decompose_cupy_cutn_sgd(**sgd_kw)
+                    warm_losses, _ = self._decompose_cupy_cutn_sgd(**sgd_kw)
             # Rebuild network after warm-start mutated cores
             self._rebuild_network()
 
@@ -356,21 +358,18 @@ class cuTensorNetwork:
             **kwargs,
         )
         if method == "als":
-            main_losses = self._decompose_als_cp(**main_kwargs)
+            main_losses, recon = self._decompose_als_cp(**main_kwargs)
         elif method == "pam":
-            main_losses = self._decompose_pam(**main_kwargs)
+            main_losses, recon = self._decompose_pam(**main_kwargs)
         elif method in ("sgd", "adam"):
             if self.backend == "torch":
-                main_losses = self._decompose_torch_sgd(**main_kwargs)
+                main_losses, recon = self._decompose_torch_sgd(**main_kwargs)
             else:
-                main_losses = self._decompose_cupy_cutn_sgd(**main_kwargs)
+                main_losses, recon = self._decompose_cupy_cutn_sgd(**main_kwargs)
         else:
             raise ValueError(f"Unsupported method '{method}' or backend '{self.backend}'.")
 
-        # Concatenate warm-start + main losses for full history
-        if isinstance(warm_losses, list) and isinstance(main_losses, list):
-            return warm_losses + main_losses
-        return main_losses
+        return (warm_losses + main_losses, recon) if return_recon else warm_losses + main_losses
 
     def _decompose_torch_sgd(
         self,
@@ -419,12 +418,13 @@ class cuTensorNetwork:
         wait = 0
         epoch = 0
         min_delta = 0
+        recon = None
 
         while epoch < max_epochs:
             optimizer.zero_grad(set_to_none=True)
 
-            contracted_t = cutn.contract(self.eq, *self.cores, optimize=optimize_cfg)
-            loss = torch.norm(target - contracted_t) / target_norm
+            recon = cutn.contract(self.eq, *self.cores, optimize=optimize_cfg)
+            loss = torch.norm(target - recon) / target_norm
 
             loss.backward()
             optimizer.step()
@@ -451,9 +451,10 @@ class cuTensorNetwork:
                 print(
                     f"\rEpoch {epoch}, Loss: {loss_value:0.5f}, "
                     f"Learning Rate: {optimizer.param_groups[0]['lr']:0.6f}"
-                )
+        )
 
-        return loss, epoch
+        result = (loss, epoch)
+        return result, recon
 
     def _decompose_cupy_cutn_sgd(
         self,
@@ -500,6 +501,7 @@ class cuTensorNetwork:
         min_delta = 0.0
         bad_lr_steps = 0
         loss_history = []
+        recon = None
 
         unfrozen = {}
         unfrozen_edge = kwargs.get("unfrozen_edge", None)
@@ -521,8 +523,8 @@ class cuTensorNetwork:
                 active_masks[idx] = active
 
         while epoch < max_epochs:
-            contracted_t = self.ntwrk.contract()
-            residual = contracted_t - target
+            recon = self.ntwrk.contract()
+            residual = recon - target
             loss = cp.linalg.norm(residual) / target_norm
             loss_history.append(loss.item())
 
@@ -587,9 +589,12 @@ class cuTensorNetwork:
                     f"\rEpoch {epoch}, Loss: {loss_history[-1]:0.5f}, Learning Rate: {lr:0.6f}"
                 )
 
-        return loss_history
+        return loss_history, recon
 
-    def _decompose_als_cp(self, target, tol=0.01, pct_loss_improvment=0.025, **kwargs):
+    def _decompose_als_cp(
+        self, target, tol=0.01, pct_loss_improvment=0.025,
+        **kwargs
+    ):
         if self.backend != "cupy":
             raise NotImplementedError(
                 "ALS decomposition is implemented only for backend='cupy'."
@@ -668,6 +673,7 @@ class cuTensorNetwork:
         prev_loss = float("inf")
         loss_history = []
 
+        recon = None
         for it in range(max_iter):
             for v in vertices:
                 env_eq, env_path, n_rows, n_cols, solve_shape = env_specs[v]
@@ -696,9 +702,12 @@ class cuTensorNetwork:
                     break
             prev_loss = loss
 
-        return loss_history
+        return loss_history, recon
 
-    def _decompose_pam(self, target, tol=None, max_epochs=1000, rho=0.1, **kwargs):
+    def _decompose_pam(
+        self, target, tol=None, max_epochs=1000, rho=0.1,
+        **kwargs
+    ):
         """PAM — optimized CuPy/Torch port of decomp_pam.
 
         Same algorithm as decomp_pam / _pam_fctn_comp_partial + pinv, but faster:
@@ -757,6 +766,7 @@ class cuTensorNetwork:
         full_path = full_path_info[0]
 
         loss_history = []
+        recon = None
         for _ in range(max_epochs):
             for k in range(N):
                 env_eq, other_ids, n_rows, n_cols, path_arg = env_specs[k]
@@ -780,7 +790,7 @@ class cuTensorNetwork:
             if tol is not None and loss_history[-1] <= tol:
                 break
 
-        return loss_history
+        return loss_history, recon
 
 
 def einsum_expr(adj_matrix, keep_rank1=True):

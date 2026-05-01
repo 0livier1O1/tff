@@ -3,7 +3,6 @@ import time
 import warnings
 from pathlib import Path
 
-import numpy as np
 import cupy as cp
 import torch
 from torch import Tensor
@@ -56,6 +55,7 @@ def _eval_tn_cutn(target, A_int, maxiter, n_runs, min_rse, method="pam",
                   backend="cupy", dtype="float32",
                   init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
     """Eval using cuTensorNetwork decompose (supports sgd, pam, als)."""
+    t0 = time.time()
     tgt_np = target.numpy() if hasattr(target, 'numpy') else target
     tgt_cp = cp.asarray(tgt_np)
     A_cp = cp.asarray(A_int.numpy() if hasattr(A_int, 'numpy') else A_int)
@@ -63,8 +63,6 @@ def _eval_tn_cutn(target, A_int, maxiter, n_runs, min_rse, method="pam",
     cr = float(ntwrk.network_size()) / float(ntwrk.target_size())
 
     best_rse = float("inf")
-    best_recon = None
-    t0 = time.time()
     for _ in range(n_runs):
         losses = ntwrk.decompose(
             tgt_cp, max_epochs=maxiter, method=method,
@@ -72,12 +70,11 @@ def _eval_tn_cutn(target, A_int, maxiter, n_runs, min_rse, method="pam",
             loss_patience=loss_patience, lr_patience=lr_patience,
         )
         val = float(losses[-1]) if losses else float("inf")
-        if val < best_rse:
-            best_rse = val
-            best_recon = ntwrk.contract()
+        best_rse = min(best_rse, val)
         if best_rse < min_rse:
             break
-    return cr, best_rse, time.time() - t0, best_recon
+    eval_time = time.time() - t0
+    return cr, best_rse, eval_time, ntwrk.contract()
 
 
 class BOSS:
@@ -161,7 +158,6 @@ class BOSS:
         # Results
         self.rows: list[dict] = []
         self._gp_state = None
-        self._best_objective = float("inf")
 
     # ------------------------------------------------------------------
     # Public API
@@ -172,8 +168,6 @@ class BOSS:
         X, Y_rse, Y_cr, T = self._sobol_init(progress_file)
 
         for b in range(self.budget):
-            t_step = time.time()
-
             t0 = time.time()
             Y_ = self._get_objective(Y_rse, Y_cr)
             model = self._fit_gp(X, Y_)
@@ -190,7 +184,6 @@ class BOSS:
                 gp_fit_time=gp_fit_time,
                 suggest_time=suggest_time,
             )
-            row["step_time_s"] = time.time() - t_step
 
             X = torch.cat([X, cand_std])
             Y_rse = torch.cat([Y_rse, torch.tensor([[row["rse"]]], dtype=torch.double)])
@@ -200,7 +193,7 @@ class BOSS:
             if self.verbose:
                 print(f"[BO {b+1}/{self.budget}] obj={row['objective']:.5f}  "
                       f"RSE={row['rse']:.5f}  CR={row['cr']:.5f}  "
-                      f"best_obj={self._best_objective:.5f}  "
+                      f"best_obj={min(float(Y_.min()), row['objective']):.5f}  "
                       f"GP={gp_fit_time:.1f}s  acqf={suggest_time:.1f}s  eval={row['eval_time_s']:.1f}s")
 
             self._atomic_write(progress_file, {"phase": "bo", "step": b + 1,
@@ -245,11 +238,10 @@ class BOSS:
         phase: str,
         gp_fit_time: float = 0.0,
         suggest_time: float = 0.0,
-        step_time: float | None = None,
     ) -> dict:
         x_int_flat = self._to_int(x_std).squeeze(0)
         A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-        cr, rse, eval_time, recon = self._evaluate(A_int)
+        cr, rse, eval_time, _ = self._evaluate(A_int)
         objective = float(cr + self.lamda * rse)
 
         row = {
@@ -264,7 +256,7 @@ class BOSS:
             "eval_time_s": eval_time,
             "gp_fit_time_s": gp_fit_time,
             "suggest_time_s": suggest_time,
-            "step_time_s": eval_time if step_time is None else step_time,
+            "step_time_s": gp_fit_time + suggest_time + eval_time,
         }
         self.rows.append(row)
         return row
@@ -274,7 +266,7 @@ class BOSS:
         if self.decomp_method == "pam_legacy":
             return _eval_tn(
                 self.target, A_int, self.t_shape,
-                self.maxiter_tn, self.n_runs, self.min_rse
+                self.maxiter_tn, self.n_runs, self.min_rse,
             )
         return _eval_tn_cutn(
             self.target, A_int,
@@ -362,14 +354,17 @@ class BOSS:
     def _summarize(self) -> dict:
         if not self.rows:
             return {}
-        objectives = [r["objective"] for r in self.rows]
-        best_idx = int(np.argmin(objectives))
-        bo_rows = [r for r in self.rows if r["phase"] == "bo"]
+        objective = self._get_objective(self.train_Y_rse, self.train_Y_cr).squeeze(-1)
+        best_idx = int(torch.argmin(objective).item())
+        best_x_int = self._to_int(self.train_X_std)[best_idx]
         return {
             "n_init": self.n_init,
             "budget": self.budget,
             "objective_lambda": self.lamda,
-            "best_objective": objectives[best_idx],
+            "best_idx": best_idx,
+            "best_x_int": best_x_int,
+            "best_adj": _triu_to_full(best_x_int, self.t_shape).int(),
+            "best_objective": float(objective[best_idx].item()),
         }
 
     @staticmethod

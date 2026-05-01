@@ -6,7 +6,6 @@ over the bond rank space to minimize RSE subject to a CR trade-off.
 
 Results are written to --out-dir:
   traces.csv       per-step metrics (rse, cr, runtime)
-  summary.json     aggregated statistics
   progress.json    live progress file polled by Streamlit dashboard
   .done            sentinel file written on clean exit
 
@@ -173,14 +172,16 @@ def main():
         )
     )
     summary, rows = boss.run(progress_file=progress_file)
-    summary["total_time_s"] = time.time() - t0
-    summary["Seed"] = args.seed
 
-    # Save best reconstruction
-    if boss.best_recon is not None:
-        save_tensor(out_dir / "reconstruction.npz", boss.best_recon)
+    best_x_int = summary["best_x_int"]
+    best_adj = summary["best_adj"]
+    np.save(out_dir / "best_x_int.npy", best_x_int.numpy())
+
+    _, _, _, best_recon = boss._evaluate(best_adj)
+    if best_recon is not None:
+        save_tensor(out_dir / "reconstruction.npz", best_recon)
         if args.target_path:  # Image experiment
-            save_image(out_dir / "reconstruction.png", boss.best_recon)
+            save_image(out_dir / "reconstruction.png", best_recon)
 
     # Persist traces
     df = pd.DataFrame(rows)
@@ -188,16 +189,12 @@ def main():
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
 
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump([summary], f, indent=2)
-
-    if boss.best_adj is not None:
-        draw_tn_graph(
-            boss.best_adj,
-            out_dir / f"tn_graph_{args.acqf}.png",
-            title=f"[{args.acqf.upper()}] Post-Search Topology",
-            node_color=POLICY_COLORS.get(f"boss-{args.acqf}", "#888888"),
-        )
+    draw_tn_graph(
+        best_adj,
+        out_dir / f"tn_graph_{args.acqf}.png",
+        title=f"[{args.acqf.upper()}] Post-Search Topology",
+        node_color=POLICY_COLORS.get(f"boss-{args.acqf}", "#888888"),
+    )
 
     res = boss.get_results()
     np.savez(
@@ -205,6 +202,7 @@ def main():
         X_int=res["X_int"].numpy(),
         Y_rse=res["Y_rse"].numpy(),
         Y_cr=res["Y_cr"].numpy(),
+        Y_objective=res["Y_objective"].numpy(),
         t=res["t"].numpy(),
     )
 
@@ -212,7 +210,7 @@ def main():
         f.write("ok")
 
     print(f"Done → {out_dir}")
-    print(f"Best RSE: {summary['best_rse']:.5f}  CR: {summary['best_cr']:.5f}")
+    print(f"Best objective: {summary['best_objective']:.5f}")
 
 
 if __name__ == "__main__":
