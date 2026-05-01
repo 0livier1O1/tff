@@ -17,7 +17,6 @@ from botorch.optim import optimize_acqf
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize
 from gpytorch.kernels import MaternKernel, ScaleKernel
-from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from tensors.decomp.fctn import decomp_pam
@@ -87,7 +86,7 @@ class BOSS:
 
     Searches over the upper-triangular bond rank vector
     $x \in \{1, \ldots, \text{max\_rank}\}^D$, $D = N(N-1)/2$,
-    minimizing RSE while tracking CR.
+    minimizing CR + lambda * RSE while tracking reconstruction loss and CR.
 
     Parameters
     ----------
@@ -162,9 +161,7 @@ class BOSS:
         # Results
         self.rows: list[dict] = []
         self._gp_state = None
-        self.best_recon = None
-        self.best_adj = None
-        self._best_rse = float("inf")
+        self._best_objective = float("inf")
 
     # ------------------------------------------------------------------
     # Public API
@@ -179,43 +176,32 @@ class BOSS:
 
             t0 = time.time()
             Y_ = self._get_objective(Y_rse, Y_cr)
-            model = self._fit_gp(X, Y_rse)
+            model = self._fit_gp(X, Y_)
             gp_fit_time = time.time() - t0
 
             t0 = time.time()
-            cand_std = self._suggest(model, best_f=Y_rse.min())
+            cand_std = self._suggest(model, best_f=Y_.min())
             suggest_time = time.time() - t0
 
-            x_int_flat = self._to_int(cand_std).squeeze(0)
-            A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-            cr, rse, eval_time, recon = self._evaluate(A_int)
-
-            if rse < self._best_rse:
-                self._best_rse = rse
-                self.best_recon = recon
-                self.best_adj = A_int.cpu()
+            row = self._observe(
+                cand_std,
+                step=self.n_init + b,
+                phase="bo",
+                gp_fit_time=gp_fit_time,
+                suggest_time=suggest_time,
+            )
+            row["step_time_s"] = time.time() - t_step
 
             X = torch.cat([X, cand_std])
-            Y_rse = torch.cat([Y_rse, torch.tensor([[rse]])])
-            Y_cr = torch.cat([Y_cr, torch.tensor([[cr]])])
-            T = torch.cat([T, torch.tensor([eval_time])])
+            Y_rse = torch.cat([Y_rse, torch.tensor([[row["rse"]]], dtype=torch.double)])
+            Y_cr = torch.cat([Y_cr, torch.tensor([[row["cr"]]], dtype=torch.double)])
+            T = torch.cat([T, torch.tensor([row["eval_time_s"]], dtype=torch.double)])
 
-            row = {
-                "step": self.n_init + b,
-                "phase": "bo",
-                "cr": cr, "rse": rse,
-                "eval_time_s": eval_time,
-                "gp_fit_time_s": gp_fit_time,
-                "suggest_time_s": suggest_time,
-                "step_time_s": time.time() - t_step,
-                "best_rse": self._best_rse,
-                "best_cr": Y_cr[Y_rse.argmin()].item(),
-            }
-            self.rows.append(row)
             if self.verbose:
-                print(f"[BO {b+1}/{self.budget}] RSE={rse:.5f}  CR={cr:.5f}  "
-                      f"best_RSE={row['best_rse']:.5f}  "
-                      f"GP={gp_fit_time:.1f}s  acqf={suggest_time:.1f}s  eval={eval_time:.1f}s")
+                print(f"[BO {b+1}/{self.budget}] obj={row['objective']:.5f}  "
+                      f"RSE={row['rse']:.5f}  CR={row['cr']:.5f}  "
+                      f"best_obj={self._best_objective:.5f}  "
+                      f"GP={gp_fit_time:.1f}s  acqf={suggest_time:.1f}s  eval={row['eval_time_s']:.1f}s")
 
             self._atomic_write(progress_file, {"phase": "bo", "step": b + 1,
                                                 "budget": self.budget})
@@ -239,6 +225,7 @@ class BOSS:
             "X_int": x_int,
             "Y_rse": self.train_Y_rse,
             "Y_cr": self.train_Y_cr,
+            "Y_objective": self._get_objective(self.train_Y_rse, self.train_Y_cr),
             "t": self.train_t,
         }
 
@@ -248,8 +235,39 @@ class BOSS:
 
     def _get_objective(self, Y_rse: Tensor, Y_cr: Tensor) -> Tensor:
         """Combine RSE and CR into a single scalar objective for GP modeling."""
-        Y = Y_cr + self.lamda * Y_rse
-        return Y        
+        return Y_cr + self.lamda * Y_rse
+
+    def _observe(
+        self,
+        x_std: Tensor,
+        *,
+        step: int,
+        phase: str,
+        gp_fit_time: float = 0.0,
+        suggest_time: float = 0.0,
+        step_time: float | None = None,
+    ) -> dict:
+        x_int_flat = self._to_int(x_std).squeeze(0)
+        A_int = _triu_to_full(x_int_flat, self.t_shape).int()
+        cr, rse, eval_time, recon = self._evaluate(A_int)
+        objective = float(cr + self.lamda * rse)
+
+        row = {
+            "step": step,
+            "phase": phase,
+            "cr": cr,
+            "rse": rse,
+            "step_loss": rse,
+            "current_cr": cr,
+            "objective": objective,
+            "objective_lambda": self.lamda,
+            "eval_time_s": eval_time,
+            "gp_fit_time_s": gp_fit_time,
+            "suggest_time_s": suggest_time,
+            "step_time_s": eval_time if step_time is None else step_time,
+        }
+        self.rows.append(row)
+        return row
 
     def _evaluate(self, A_int: Tensor):
         """Dispatch to legacy or cuTN eval based on decomp_method."""
@@ -274,29 +292,13 @@ class BOSS:
 
         rse_list, cr_list, t_list = [], [], []
         for i, x in enumerate(X):
-            x_int_flat = self._to_int(x.unsqueeze(0)).squeeze(0)  # (D,) int ranks
-            A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-            cr, rse, runtime, recon = self._evaluate(A_int)
-            
-            if rse < self._best_rse:
-                self._best_rse = rse
-                self.best_recon = recon
-                self.best_adj = A_int.cpu()
-                
-            rse_list.append(rse)
-            cr_list.append(cr)
-            t_list.append(runtime)
-
-            row = {"step": i, "phase": "init", "cr": cr, "rse": rse,
-                   "eval_time_s": runtime,
-                   "gp_fit_time_s": 0.0,
-                   "suggest_time_s": 0.0,
-                   "step_time_s": runtime,
-                   "best_rse": self._best_rse,
-                   "best_cr": cr_list[int(np.argmin(rse_list))]}
-            self.rows.append(row)
+            row = self._observe(x.unsqueeze(0), step=i, phase="init")
+            rse_list.append(row["rse"])
+            cr_list.append(row["cr"])
+            t_list.append(row["eval_time_s"])
             if self.verbose:
-                print(f"[Init {i+1}/{self.n_init}] RSE={rse:.5f}  CR={cr:.5f}")
+                print(f"[Init {i+1}/{self.n_init}] obj={row['objective']:.5f}  "
+                      f"RSE={row['rse']:.5f}  CR={row['cr']:.5f}")
 
             self._atomic_write(progress_file, {"phase": "init", "step": i + 1,
                                                 "budget": self.n_init})
@@ -360,20 +362,14 @@ class BOSS:
     def _summarize(self) -> dict:
         if not self.rows:
             return {}
-        rses = [r["rse"] for r in self.rows]
-        crs  = [r["cr"]  for r in self.rows]
-        best_idx = int(np.argmin(rses))
+        objectives = [r["objective"] for r in self.rows]
+        best_idx = int(np.argmin(objectives))
         bo_rows = [r for r in self.rows if r["phase"] == "bo"]
         return {
             "n_init": self.n_init,
             "budget": self.budget,
-            "best_rse": rses[best_idx],
-            "best_cr":  crs[best_idx],
-            "best_step": self.rows[best_idx]["step"],
-            "mean_eval_time_s":    float(np.mean([r["eval_time_s"]    for r in self.rows])),
-            "mean_gp_fit_time_s":  float(np.mean([r["gp_fit_time_s"]  for r in bo_rows])) if bo_rows else 0.0,
-            "mean_suggest_time_s": float(np.mean([r["suggest_time_s"] for r in bo_rows])) if bo_rows else 0.0,
-            "mean_step_time_s":    float(np.mean([r["step_time_s"]    for r in self.rows])),
+            "objective_lambda": self.lamda,
+            "best_objective": objectives[best_idx],
         }
 
     @staticmethod
