@@ -392,7 +392,11 @@ def run_policy(
             "step": step + 1,
             "par_loss": float(par_loss.item()),
             "step_loss": float(step_loss),
+            "rse": float(step_loss),
             "current_cr": _current_cr,
+            "cr": _current_cr,
+            "objective": float(step_loss),
+            "objective_name": "RSE",
             "efficiency": _current_cr / target_cr if target_cr else float("nan"),
             "selected_arm": int(action),
             "oracle_best_arm": int(oracle_best_arm.item()),
@@ -443,22 +447,23 @@ def _summarize_policy(rows: list[dict], n_arms: int, budget: int, policy: str) -
     )
     regrets = np.asarray([r["regret"] for r in rows], dtype=np.float64)
     arms = [r["selected_arm"] for r in rows]
+    best_objective_idx = int(np.argmin(step_losses))
 
     return {
         "policy": policy,
         "steps": len(rows),
         "budget": budget,
+        "objective_name": "RSE",
+        "final_objective": float(step_losses[-1]),
+        "best_objective": float(step_losses[best_objective_idx]),
+        "best_objective_step": int(rows[best_objective_idx]["step"]),
+        "best_objective_rse": float(step_losses[best_objective_idx]),
+        "best_objective_cr": float(rows[best_objective_idx]["current_cr"]),
         "initial_loss": float(par_losses[0]),
         "final_par_loss": float(par_losses[-1]),
         "final_step_loss": float(step_losses[-1]),
         "best_par_loss": float(par_losses.min()),
         "best_step_loss": float(step_losses.min()),
-        # Legacy summary keys retained so older dashboard views and notebooks
-        # that read summary.json do not break on freshly generated artifacts.
-        "final_loss_before_move": float(par_losses[-1]),
-        "final_loss_after_move": float(step_losses[-1]),
-        "best_loss_before_move": float(par_losses.min()),
-        "best_loss_after_move": float(step_losses.min()),
         "mean_reward": float(rewards.mean()),
         "mean_oracle_reward": float(oracle_rewards.mean()),
         "mean_regret": float(regrets.mean()),
@@ -520,9 +525,6 @@ def main() -> None:
         type=int,
         default=0,
         help="Number of warm-start iterations (0 = disabled)",
-    )
-    parser.add_argument(
-        "--objective", type=str, default="reward", choices=["reward", "loss"]
     )
     parser.add_argument(
         "--kernel-name", type=str, default="matern", choices=["matern", "rbf"]
