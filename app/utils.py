@@ -10,6 +10,7 @@ import shlex
 import subprocess as _subprocess
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import psutil
 
@@ -42,15 +43,28 @@ def get_policy_color(name: str) -> str:
     return "#888888"
 
 
+# ── Compression ratio (numpy, no GPU) ─────────────────────────────────────────
+
+
+def _cr_from_adj(adj: np.ndarray) -> float:
+    """Compute compression ratio from adjacency matrix using pure numpy."""
+    a = adj.astype(np.float64)
+    target_size = np.prod(np.diag(a))
+    network_size = np.sum(np.prod(a, axis=1))
+    return float(target_size / network_size)
+
+
 # ── Artifact loading ───────────────────────────────────────────────────────────
 
 
 def _load_artifact(out_dir: Path):
     """Load results from all seed_*/policy_name/ subdirs.
 
-    Returns (traces_df, summaries_list) or (None, []) if nothing found.
+    Returns (mabss_df, boss_df, summaries_list, decomp_dict), with separate
+    trace dataframes because MABSS and BOSS optimize/report different metrics.
+    decomp_dict is keyed by (seed, pol_name) -> list of {step, arm, losses} dicts.
     """
-    traces, summaries = [], []
+    mabss_traces, boss_traces, summaries, decomp_dict, pol_diagnostics_dict = [], [], [], {}, {}
     for seed_d in sorted(out_dir.iterdir()):
         if not (seed_d.is_dir() and seed_d.name.startswith("seed_")):
             continue
@@ -68,7 +82,10 @@ def _load_artifact(out_dir: Path):
                 df_p = pd.read_csv(t_path)
                 df_p["Policy"] = pol_name
                 df_p["Seed"] = seed_val
-                traces.append(df_p)
+                if pol_name.startswith("boss-"):
+                    boss_traces.append(df_p)
+                elif pol_name.startswith("mabss-"):
+                    mabss_traces.append(df_p)
 
             s_path = pol_d / "summary.json"
             if not s_path.exists():
@@ -82,9 +99,21 @@ def _load_artifact(out_dir: Path):
                         s["policy"] = pol_name
                         summaries.append(s)
 
-    if not traces:
-        return None, []
-    return pd.concat(traces, ignore_index=True), summaries
+            d_path = pol_d / "decomp_traces.json"
+            if d_path.exists():
+                with open(d_path) as f:
+                    decomp_dict[(seed_val, pol_name)] = json.load(f)
+
+            pd_path = pol_d / "policy_diagnostics.json"
+            if pd_path.exists():
+                with open(pd_path) as f:
+                    pol_diagnostics_dict[(seed_val, pol_name)] = json.load(f)
+
+    if not mabss_traces and not boss_traces:
+        return None, None, [], {}, {}
+    mabss_df = pd.concat(mabss_traces, ignore_index=True) if mabss_traces else pd.DataFrame()
+    boss_df = pd.concat(boss_traces, ignore_index=True) if boss_traces else pd.DataFrame()
+    return mabss_df, boss_df, summaries, decomp_dict, pol_diagnostics_dict
 
 
 # ── Run completion sentinel ────────────────────────────────────────────────────

@@ -121,11 +121,17 @@ def random_adj_matrix(
     diag: torch.Tensor = None,
     num_zero_edges: int = None,
     n_samples: int = 1,
+    seed: int | None = None,
 ):
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed))
+
     D = int(n_cores * (n_cores - 1) / 2)
     bounds = torch.ones((2, D))
     bounds[1] = max(1, max_rank)
-    X = torch.rand((n_samples, D))
+    X = torch.rand((n_samples, D), generator=generator)
 
     if num_zero_edges is None:
         X = unnormalize(X, bounds).round()
@@ -133,14 +139,14 @@ def random_adj_matrix(
         # For legacy / specific constraints
         bounds[0] = 2
         X = unnormalize(X, bounds).round()
-        idx = torch.randperm(D)[:num_zero_edges]
+        idx = torch.randperm(D, generator=generator)[:num_zero_edges]
         X[:, idx] = 1
 
     if diag is None:
         # Default physical dimension baseline
         low = 2
         high = max(3, max_rank + 1)
-        diag = torch.randint(low, high, size=(n_cores,))
+        diag = torch.randint(low, high, size=(n_cores,), generator=generator)
     else:
         if not isinstance(diag, torch.Tensor):
             diag = torch.from_numpy(np.array(diag)).to(torch.int)
@@ -273,37 +279,109 @@ def retensorize_image(img, n_cores):
     return tensor
 
 
+def resolve_adj_spec(adj_spec: list[list[str]], r_min: int, r_max: int, seed: int) -> "np.ndarray":
+    """Resolve 'R' entries in an adjacency spec to random integers.
+
+    Moved here from app/problem.py so data logic stays out of the UI layer.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(adj_spec)
+    adj = np.zeros((n, n), dtype=np.int32)
+    for i in range(n):
+        for j in range(i, n):
+            raw = str(adj_spec[i][j]).strip()
+            if raw.upper() == "R":
+                low = max(2, r_min) if i == j else r_min
+                val = int(rng.integers(low, r_max + 1))
+            elif raw.lstrip("-").isdigit():
+                low = 2 if i == j else 1
+                val = max(low, int(raw))
+            else:
+                val = 2 if i == j else 1
+            adj[i, j] = val
+            adj[j, i] = val
+    return adj
+
+
 def make_problem(args):
     """
     Unified problem factory for MABSS and BOSS runners.
-    If args.target_path is provided, loads from file.
-    Automatically reshapes if args.n_cores differs from file order.
+
+    Dispatch:
+      target_path set  → load from file (.npz image, .npy lightfield/raw, .pt)
+      adj_path set     → pre-resolved adjacency; simulate cores from it
+      otherwise        → synthetic: random adj + simulated cores
     """
     from tensors.networks.cutensor_network import sim_tensor_from_adj
+    seed = getattr(args, "seed", None)
 
     if hasattr(args, "target_path") and args.target_path:
         adj, target = load_target_tensor(args.target_path, args.dtype)
 
-        # Check if we need to reshape to a different number of cores
-        if hasattr(args, "n_cores") and args.n_cores != target.ndim:
-            import cupy as cp
-
-            # 1. Canonicalize back to 2D image
+        # Only retensorize if the loaded target is a flat 2D image that needs
+        # to be reshaped into a different core count. Lightfield and other
+        # pre-shaped tensors (ndim > 2) are used as-is.
+        if target.ndim <= 2 and hasattr(args, "n_cores") and args.n_cores != target.ndim:
+            # 1. Canonicalize back to 2D
             img_2d = reconstruct_image(target)
-            # 2. Re-tensorize to new N
+            # 2. Re-tensorize to requested core count
             target = cp.array(retensorize_image(img_2d, args.n_cores))
             if args.dtype == "float64":
                 target = target.astype(cp.float64)
             else:
                 target = target.astype(cp.float32)
-            # 3. New topology is needed as N changed
             adj = None
 
         if adj is None:
-            max_r = getattr(args, "max_rank", 1)  # Default for image start
-            adj = random_adj_matrix(args.n_cores, max_r, diag=target.shape)
+            max_r = getattr(args, "max_rank", 1)
+            adj = random_adj_matrix(args.n_cores, max_r, diag=target.shape, seed=seed)
+
+    elif hasattr(args, "adj_path") and args.adj_path:
+        adj = torch.from_numpy(np.load(args.adj_path)).to(torch.int)
+        target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype, seed=seed)
+
     else:
-        adj = random_adj_matrix(args.n_cores, args.max_rank)
-        target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype)
+        adj = random_adj_matrix(args.n_cores, args.max_rank, seed=0)
+        target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype, seed=seed)
 
     return adj, target
+
+
+def eval_generating_structure(init_adj, target, max_epochs: int, decomp_method: str,
+                               out_path: Path, dtype: str = "float32") -> float:
+    """Decompose target using the ground-truth generating adjacency matrix.
+
+    Provides a reference RSE showing what is achievable if the search
+    recovers the exact generating structure. Result is saved to out_path.
+    Only runs if out_path does not already exist.
+    """
+    import json
+    import time
+    from tensors.networks.cutensor_network import cuTensorNetwork
+
+    if out_path.exists():
+        with open(out_path) as f:
+            return json.load(f)["rse"]
+
+    adj_cp = cp.asarray(init_adj)
+    target_cp = cp.asarray(target)
+    ntwrk = cuTensorNetwork(adj_cp, backend="cupy", dtype=dtype)
+
+    t0 = time.time()
+    losses = ntwrk.decompose(target_cp, max_epochs=max_epochs, method=decomp_method)
+    elapsed = time.time() - t0
+    rse = float(losses[-1]) if losses else float("nan")
+
+    result = {
+        "rse": rse,
+        "cr": float(ntwrk.compression_ratio()),
+        "max_epochs": max_epochs,
+        "decomp_method": decomp_method,
+        "elapsed_s": elapsed,
+        "losses": losses if isinstance(losses, list) else [],
+    }
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"[Generating structure] RSE={rse:.5f}  CR={result['cr']:.5f}  ({elapsed:.1f}s)")
+    return rse

@@ -97,6 +97,7 @@ from scripts.utils import (
     save_tensor,
     save_image,
     draw_tn_graph,
+    eval_generating_structure,
     POLICY_COLORS,
 )
 from tnss.algo.mabs.env import TNSearchEnv
@@ -214,6 +215,7 @@ def run_policy(
     args: argparse.Namespace,
     target,
     policy_str: str,
+    target_cr: float = 1.0,
     ui_bar=None,
     mem_ui=None,
     mem_history=None,
@@ -231,6 +233,10 @@ def run_policy(
         decomp_method=getattr(args, "decomp_method", "sgd"),
         warm_start_method=getattr(args, "warm_start_method", None),
         warm_start_decomp_epochs=getattr(args, "warm_start_decomp_epochs", 0),
+        init_lr=getattr(args, "init_lr", None),
+        momentum=getattr(args, "momentum", 0.5),
+        loss_patience=getattr(args, "loss_patience", 2500),
+        lr_patience=getattr(args, "lr_patience", 250),
     )
     encoder = LocalEncoder(
         include_arm=args.include_arm_feature,
@@ -281,6 +287,8 @@ def run_policy(
         raise ValueError(f"Unknown policy {policy_str}")
 
     rows = []
+    decomp_histories = []
+    diagnostics = []
     stop_reason = "budget_exhausted"
 
     for step in range(args.budget):
@@ -303,7 +311,6 @@ def run_policy(
                     "started_at": _prev.get("started_at"),
                 }, _pf)
             tmp_p.replace(progress_file)
-        t_step = time.time()
 
         if env.cur_loss.item() < env.stopping_threshold:
             stop_reason = "threshold_reached"
@@ -332,6 +339,7 @@ def run_policy(
             )
 
         # Arm selection — policy.act() only (posterior query / weight sampling)
+        p_info = {}
         pick_t0 = time.time()
         if step < args.bootstrap_oracle_steps:
             action = int(oracle_best_arm.item())
@@ -342,16 +350,39 @@ def run_policy(
                 )
                 if isinstance(policy, EXP4Policy):
                     action, p_info = policy.act(env, valid_mask, pre_gp_scores=p_info)
+            elif isinstance(policy, GreedyOraclePolicy):
+                action = policy.act(env, valid_mask, precomputed_rewards=oracle_rewards)
             else:
                 action = policy.act(env, valid_mask)
         pick_time = time.time() - pick_t0
+
+        # Diagnostic snapshot: oracle rewards, GP predictions, expert weights
+        def _to_list(t):
+            return t.tolist() if hasattr(t, "tolist") else list(t)
+
+        gp_scores = p_info.get("gp_scores", p_info)  # EXP4 nests under "gp_scores"
+        diag = {
+            "step": step + 1,
+            "arm": int(action),
+            "oracle_rewards": _to_list(oracle_rewards),
+            "gp_mean":  _to_list(gp_scores["mean"]) if "mean" in gp_scores else None,
+            "gp_ucb":   _to_list(gp_scores["ucb"])  if "ucb"  in gp_scores else None,
+            "gp_std":   _to_list(gp_scores["std"])  if "std"  in gp_scores else None,
+            "expert_weights": p_info.get("expert_weights"),  # EXP4 only, else None
+        }
+        diagnostics.append(diag)
 
         # Decomposition — env.step() performs the actual rank increment + fit
         decomp_t0 = time.time()
         _, reward, done, info = env.step(action)
         decomp_time = time.time() - decomp_t0
-        cur_loss = info["parent_loss"]
-        chosen_loss = info["losses"][-1].item()
+        par_loss = info["parent_loss"]
+        step_loss = info["losses"][-1].item()
+        decomp_histories.append({
+            "step": step + 1,
+            "arm": int(action),
+            "losses": info["losses"].tolist(),
+        })
 
         # GP fitting — policy.update() refits the surrogate on new observations
         gp_fit_t0 = time.time()
@@ -369,12 +400,22 @@ def run_policy(
             int((oracle_sorted_indices == action).nonzero(as_tuple=True)[0].item()) + 1
         )
 
+        step_time = gp_fit_time + decomp_time + pick_time
+        if policy_str == "greedy":
+            step_time += oracle_time - decomp_time
+
         # Logging
+        _current_cr = float(info["current_cr"].item())
         row = {
             "step": step + 1,
-            "cur_loss": float(cur_loss.item()),
-            "chosen_loss": float(chosen_loss),
-            "current_cr": float(info["current_cr"].item()),
+            "par_loss": float(par_loss.item()),
+            "step_loss": float(step_loss),
+            "rse": float(step_loss),
+            "current_cr": _current_cr,
+            "cr": _current_cr,
+            "objective": float(step_loss),
+            "objective_name": "RSE",
+            "efficiency": _current_cr / target_cr if target_cr else float("nan"),
             "selected_arm": int(action),
             "oracle_best_arm": int(oracle_best_arm.item()),
             "oracle_arm_rank": chosen_arm_rank,
@@ -388,7 +429,7 @@ def run_policy(
             "decomp_time_s": decomp_time,
             "gp_fit_time_s": gp_fit_time,
             "oracle_time_s": oracle_time,
-            "step_time_s": time.time() - t_step,
+            "step_time_s": step_time,
         }
         rows.append(row)
 
@@ -410,30 +451,37 @@ def run_policy(
     )
     best_recon = ntwrk.contract()
 
-    return summary, rows, best_recon
+    return summary, rows, best_recon, decomp_histories, diagnostics
 
 
 def _summarize_policy(rows: list[dict], n_arms: int, budget: int, policy: str) -> dict:
     if not rows:
         return {"policy": policy, "steps": 0, "budget": budget}
-    losses = np.asarray([r["cur_loss"] for r in rows], dtype=np.float64)
-    chosen_losses = np.asarray([r["chosen_loss"] for r in rows], dtype=np.float64)
+    par_losses = np.asarray([r["par_loss"] for r in rows], dtype=np.float64)
+    step_losses = np.asarray([r["step_loss"] for r in rows], dtype=np.float64)
     rewards = np.asarray([r["chosen_reward"] for r in rows], dtype=np.float64)
     oracle_rewards = np.asarray(
         [r["oracle_best_reward"] for r in rows], dtype=np.float64
     )
     regrets = np.asarray([r["regret"] for r in rows], dtype=np.float64)
     arms = [r["selected_arm"] for r in rows]
+    best_objective_idx = int(np.argmin(step_losses))
 
     return {
         "policy": policy,
         "steps": len(rows),
         "budget": budget,
-        "initial_loss": float(losses[0]),
-        "final_loss_before_move": float(losses[-1]),
-        "final_loss_after_move": float(chosen_losses[-1]),
-        "best_loss_before_move": float(losses.min()),
-        "best_loss_after_move": float(chosen_losses.min()),
+        "objective_name": "RSE",
+        "final_objective": float(step_losses[-1]),
+        "best_objective": float(step_losses[best_objective_idx]),
+        "best_objective_step": int(rows[best_objective_idx]["step"]),
+        "best_objective_rse": float(step_losses[best_objective_idx]),
+        "best_objective_cr": float(rows[best_objective_idx]["current_cr"]),
+        "initial_loss": float(par_losses[0]),
+        "final_par_loss": float(par_losses[-1]),
+        "final_step_loss": float(step_losses[-1]),
+        "best_par_loss": float(par_losses.min()),
+        "best_step_loss": float(step_losses.min()),
         "mean_reward": float(rewards.mean()),
         "mean_oracle_reward": float(oracle_rewards.mean()),
         "mean_regret": float(regrets.mean()),
@@ -462,12 +510,18 @@ def main() -> None:
     parser.add_argument("--policies", type=str, nargs="+", default=["ucb"])
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--dtype", type=str, default="float32")
-    parser.add_argument("--stopping-threshold", type=float, default=1e-5)
+    parser.add_argument("--stopping-threshold", type=float, default=1e-8)
     parser.add_argument(
         "--target-path",
         type=str,
         default=None,
         help="Path to an image .npz for real-world data experiments",
+    )
+    parser.add_argument(
+        "--adj-path",
+        type=str,
+        default=None,
+        help="Path to a .npy file containing an integer adjacency matrix (overrides random generation).",
     )
     parser.add_argument("--deterministic-eval", action="store_true", default=True)
     parser.add_argument(
@@ -491,9 +545,6 @@ def main() -> None:
         help="Number of warm-start iterations (0 = disabled)",
     )
     parser.add_argument(
-        "--objective", type=str, default="reward", choices=["reward", "loss"]
-    )
-    parser.add_argument(
         "--kernel-name", type=str, default="matern", choices=["matern", "rbf"]
     )
     parser.add_argument("--include-arm-feature", action="store_true", default=True)
@@ -501,6 +552,10 @@ def main() -> None:
     parser.add_argument("--include-parent-context", action="store_true", default=True)
     parser.add_argument("--fixed-noise", type=float, default=1e-6)
     parser.add_argument("--learn-noise", action="store_true")
+    parser.add_argument("--init-lr", type=float, default=None, help="Initial LR for SGD/Adam (None = auto)")
+    parser.add_argument("--momentum", type=float, default=0.5, help="SGD momentum")
+    parser.add_argument("--loss-patience", type=int, default=2500, help="Early stop: epochs without loss improvement")
+    parser.add_argument("--lr-patience", type=int, default=250, help="LR decay patience in epochs")
     parser.add_argument("--bootstrap-oracle-steps", type=int, default=0)
     parser.add_argument("--warm-start-full-steps", type=int, default=0)
     parser.add_argument("--exp3-gamma", type=float, default=0.2)
@@ -528,13 +583,28 @@ def main() -> None:
     # Heuristic: If out_dir is a policy subdirectory, save shared target artifacts one level up
     seed_dir = out_dir.parent if out_dir.name.startswith("mabss_") else out_dir
 
+    _seed_all(args.seed)
     init_adj, target = make_problem(args)
 
-    # Save target artifacts ONCE at the seed root
-    if not (seed_dir / "target_tensor.npz").exists():
-        save_tensor(seed_dir / "target_tensor.npz", target)
-    if args.target_path and not (seed_dir / "target_image.png").exists():
+    # Refresh shared target artifacts from this seeded subprocess.  The
+    # dashboard may have an older imported problem factory in memory, so the
+    # CLI process is the source of truth for the target used by the algorithm.
+    _adj_np = cp.asnumpy(cp.asarray(init_adj))
+    np.save(seed_dir / "target_adj.npy", _adj_np)
+    _a = _adj_np.astype(np.float64)
+    target_cr = float(np.prod(np.diag(_a)) / np.sum(np.prod(_a, axis=1)))
+    save_tensor(seed_dir / "target_tensor.npz", target)
+    if args.target_path:
         save_image(seed_dir / "target_image.png", target)
+
+    if not args.target_path:  # Synthetic only — ground truth structure is known
+        eval_generating_structure(
+            init_adj, target,
+            max_epochs=args.warm_start_epochs,
+            decomp_method=getattr(args, "decomp_method", "sgd"),
+            out_path=seed_dir / "generating_rse.json",
+            dtype=args.dtype,
+        )
     if not (seed_dir / "target_graph.png").exists():
         draw_tn_graph(
             init_adj,
@@ -551,8 +621,8 @@ def main() -> None:
         progress_file.write_text(json.dumps(
             {"policy": p, "step": 0, "budget": args.budget, "started_at": time.time()}
         ))
-        summary, rows, best_recon = run_policy(
-            args, target, policy_str=p, progress_file=progress_file
+        summary, rows, best_recon, decomp_histories, diagnostics = run_policy(
+            args, target, policy_str=p, target_cr=target_cr, progress_file=progress_file
         )
 
         # Save reconstruction
@@ -584,6 +654,12 @@ def main() -> None:
         with open(out_dir / "summary.json", "w") as f:
             json.dump([clean_summary], f, indent=2)
 
+        with open(out_dir / "decomp_traces.json", "w") as f:
+            json.dump(decomp_histories, f)
+
+        with open(out_dir / "policy_diagnostics.json", "w") as f:
+            json.dump(diagnostics, f)
+
         (out_dir / ".done").write_text("ok")
 
     print(f"[Seed {args.seed}] Done -> {out_dir}")
@@ -602,6 +678,22 @@ def _seed_all(seed: int) -> None:
 
 
 if __name__ == "__main__":
+    import sys as _sys
+    if len(_sys.argv) == 1:
+        # Debug session — explicit arguments
+        _sys.argv = [
+            _sys.argv[0],
+            "--policies",           "greedy", "ucb", "exp3", "exp4",
+            "--n-cores",            "5",
+            "--max-rank",           "6",
+            "--seed",               "1",
+            "--budget",             "5",
+            "--warm-start-epochs",  "30",
+            "--max-edge-rank",      "10",
+            "--deterministic-eval",
+            "--out-dir",            "artifacts/debug_mabss/seed_1",
+        ]
+
     try:
         main()
     except BaseException as exc:

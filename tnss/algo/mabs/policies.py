@@ -113,10 +113,10 @@ class GPUCBPolicy(BasePolicy):
                 optimizer_kwargs={
                     "options": {"maxiter": 150, "gtol": 1e-5, "ftol": 1e-5}
                 },
-                timeout_sec=30.0,
+                timeout_sec=60.0,
             )
         except:
-            pass  # Keep untrained or fallback depending on strictness
+            raise Warning("GP fitting failed; retaining previous model if available.")
         self.model = gp
 
     def act(self, env, valid_mask, return_all_scores=False):

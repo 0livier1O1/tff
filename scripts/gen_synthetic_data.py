@@ -1,30 +1,30 @@
 import torch
 import numpy as np
 import os
-import glob 
+import glob
 
 from scripts.utils import random_adj_matrix
 from decomp.tn import sim_tensor_from_adj
 
 from botorch.utils.transforms import unnormalize
-from tnss.algo.boss import BOSS
+from tnss.algo.boss.boss import BOSS
 
-if __name__=="__main__":
+if __name__ == "__main__":
     torch.manual_seed(5)
     gp_training = True
-    
+
     n_samples = 500
     order = 5
     max_r = 6
     cpu_id = 0
     iter = 300
-    
-    D = int(order * (order-1)/2)
+
+    D = int(order * (order - 1) / 2)
     A = random_adj_matrix(order, max_r)
     X, _ = sim_tensor_from_adj(A)
     a = X.max()
-    X = X/a
-    
+    X = X / a
+
     boss = BOSS(
         X,
         n_init=n_samples,
@@ -38,13 +38,13 @@ if __name__=="__main__":
         max_stalling_aqcf=300,
         maxiter_tn=iter,
         discrete_search=False,
-        decomp = "FCTN"
+        decomp="FCTN",
     )
-    
+
     boss()
-    res = boss.get_bo_results() 
-    
+    res = boss.get_bo_results()
+
     save_folder = f"./data/synthetic/order{order}_maxr{max_r}/"
-    os.makedirs(save_folder, exist_ok=True)    
+    os.makedirs(save_folder, exist_ok=True)
     i = len(glob.glob(save_folder + "*.npz"))
     np.savez(save_folder + f"{i}.npz", Z=X, A=A, X=res["X"], Y=res["Y"], t=res["t"])

@@ -2,6 +2,8 @@ import torch
 import numpy as np
 import cupy as cp
 import random
+import gc
+import psutil
 
 from torch import Tensor
 from tensors.networks.cutensor_network import cuTensorNetwork, increment_mode_rank
@@ -39,6 +41,10 @@ class TNSearchEnv:
         self.decomp_method = kwargs.get("decomp_method", "sgd")
         self.warm_start_method = kwargs.get("warm_start_method", None)
         self.warm_start_decomp_epochs = kwargs.get("warm_start_decomp_epochs", 0)
+        self.init_lr = kwargs.get("init_lr", None)
+        self.momentum = kwargs.get("momentum", 0.5)
+        self.loss_patience = kwargs.get("loss_patience", 2500)
+        self.lr_patience = kwargs.get("lr_patience", 250)
         self.seed = int(seed)
 
         k = len(self.Z_dim)
@@ -132,6 +138,10 @@ class TNSearchEnv:
             method=self.decomp_method,
             warm_start_method=self.warm_start_method,
             warm_start_epochs=self.warm_start_decomp_epochs,
+            init_lr=self.init_lr,
+            momentum=self.momentum,
+            loss_patience=self.loss_patience,
+            lr_patience=self.lr_patience,
         )
         losses = torch.tensor(decomp_losses, dtype=torch.double).cpu()
 
@@ -150,15 +160,16 @@ class TNSearchEnv:
         done when loss < stopping_threshold or no valid arms remain.
         """
         parent_cr = self.current_cr()
+        par_loss = self.cur_loss
         A_next, cores_next, losses = self.evaluate_arm(arm_idx, inplace=True)
-        reward = self.cur_loss - losses[-1]
+        reward = par_loss - losses[-1]
 
         done = bool(self.cur_loss.item() < self.stopping_threshold) or not bool(
             self.valid_arm_mask().any().item()
         )
         info = {
             "losses": losses,
-            "parent_loss": self.cur_loss + reward,  # Reconstruct parent loss
+            "parent_loss": par_loss,
             "parent_cr": parent_cr,
             "current_cr": self.current_cr(),
             "adj": A_next,
@@ -175,9 +186,6 @@ class TNSearchEnv:
         valid_mask = self.valid_arm_mask()
         final_losses = torch.full((self.K,), float("inf"), dtype=torch.double)
         trajectories = {}
-
-        import gc
-        import psutil
 
         for k in range(self.K):
             if not bool(valid_mask[k].item()):

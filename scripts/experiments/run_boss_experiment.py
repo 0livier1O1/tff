@@ -6,7 +6,6 @@ over the bond rank space to minimize RSE subject to a CR trade-off.
 
 Results are written to --out-dir:
   traces.csv       per-step metrics (rse, cr, runtime)
-  summary.json     aggregated statistics
   progress.json    live progress file polled by Streamlit dashboard
   .done            sentinel file written on clean exit
 
@@ -51,9 +50,10 @@ from scripts.utils import (
     save_tensor,
     save_image,
     draw_tn_graph,
+    eval_generating_structure,
     POLICY_COLORS,
 )
-from tnss.algo.boss import BOSS
+from tnss.algo.boss.boss import BOSS
 
 
 def _seed_all(seed: int) -> None:
@@ -78,18 +78,32 @@ def main():
     parser.add_argument("--acqf", type=str, default="ei", choices=["ei", "ucb"])
     parser.add_argument("--ucb-beta", type=float, default=2.0)
     parser.add_argument(
+        "--lamda", type=float, default=1.0,
+        help="Trade-off weight between RSE and CR in the BOSS objective."
+    )
+    parser.add_argument(
         "--decomp-method",
         type=str,
-        default="pam_legacy",
-        choices=["pam_legacy", "pam", "sgd", "adam", "als"],
-        help="pam_legacy=fctn.py, pam/sgd/adam/als=cuTensorNetwork",
+        default="sgd",
+        choices=["pam", "sgd", "adam", "als"],
+        help="pam/sgd/adam/als=cuTensorNetwork",
     )
+    parser.add_argument("--init-lr", type=float, default=None, help="Initial LR for SGD/Adam (None = auto)")
+    parser.add_argument("--momentum", type=float, default=0.5, help="SGD momentum")
+    parser.add_argument("--loss-patience", type=int, default=2500, help="Early stop: epochs without loss improvement")
+    parser.add_argument("--lr-patience", type=int, default=250, help="LR decay patience in epochs")
     parser.add_argument("--out-dir", type=str, default="artifacts/debug_boss")
     parser.add_argument(
         "--target-path",
         type=str,
         default=None,
         help="Path to an image .npz for real-world data experiments",
+    )
+    parser.add_argument(
+        "--adj-path",
+        type=str,
+        default=None,
+        help="Path to a .npy file containing an integer adjacency matrix (overrides random generation).",
     )
     parser.add_argument("--dtype", type=str, default="float32")
     args = parser.parse_args()
@@ -108,11 +122,26 @@ def main():
     init_adj, target_cp = make_problem(args)
     target = torch.from_numpy(cp.asnumpy(target_cp)).to(torch.double)
 
-    # Save target artifacts ONCE at the seed root
-    if not (seed_dir / "target_tensor.npz").exists():
-        save_tensor(seed_dir / "target_tensor.npz", target)
-    if args.target_path and not (seed_dir / "target_image.png").exists():
+    _adj_np = cp.asnumpy(cp.asarray(init_adj)).astype(np.float64)
+    target_cr = float(np.prod(np.diag(_adj_np)) / np.sum(np.prod(_adj_np, axis=1)))
+
+    # Refresh shared target artifacts from this seeded subprocess.  The
+    # dashboard may have an older imported problem factory in memory, so the
+    # CLI process is the source of truth for the target used by the algorithm.
+    np.save(seed_dir / "target_adj.npy", cp.asnumpy(cp.asarray(init_adj)))
+    save_tensor(seed_dir / "target_tensor.npz", target)
+    if args.target_path:
         save_image(seed_dir / "target_image.png", target)
+
+    if not args.target_path:  # Synthetic only — ground truth structure is known
+        eval_generating_structure(
+            init_adj, target_cp,
+            max_epochs=args.maxiter_tn,
+            decomp_method=args.decomp_method,
+            out_path=seed_dir / "generating_rse.json",
+            dtype=args.dtype,
+        )
+
     if not (seed_dir / "target_graph.png").exists():
         draw_tn_graph(
             init_adj,
@@ -127,43 +156,49 @@ def main():
         max_rank=args.max_bond,
         min_rse=args.min_rse,
         maxiter_tn=args.maxiter_tn,
+        lamda=args.lamda,
         n_runs=args.n_runs,
         acqf=args.acqf,
         ucb_beta=args.ucb_beta,
         decomp_method=args.decomp_method,
+        init_lr=args.init_lr,
+        momentum=args.momentum,
+        loss_patience=args.loss_patience,
+        lr_patience=args.lr_patience,
         verbose=True,
     )
 
     t0 = time.time()
-    progress_file.write_text(json.dumps(
-        {"phase": "init", "step": 0, "budget": args.budget, "started_at": t0}
-    ))
+    progress_file.write_text(
+        json.dumps(
+            {"phase": "init", "step": 0, "budget": args.budget, "started_at": t0}
+        )
+    )
     summary, rows = boss.run(progress_file=progress_file)
-    summary["total_time_s"] = time.time() - t0
-    summary["Seed"] = args.seed
 
-    # Save best reconstruction
-    if boss.best_recon is not None:
-        save_tensor(out_dir / "reconstruction.npz", boss.best_recon)
+    best_x_int = summary["best_x_int"]
+    best_adj = summary["best_adj"]
+    np.save(out_dir / "best_x_int.npy", best_x_int.numpy())
+
+    _, _, _, best_recon = boss._evaluate(best_adj)
+    if best_recon is not None:
+        save_tensor(out_dir / "reconstruction.npz", best_recon)
         if args.target_path:  # Image experiment
-            save_image(out_dir / "reconstruction.png", boss.best_recon)
+            save_image(out_dir / "reconstruction.png", best_recon)
 
     # Persist traces
     df = pd.DataFrame(rows)
+    df["efficiency"] = df["cr"] / target_cr if target_cr else float("nan")
     df["Policy"] = f"boss-{args.acqf}"
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
 
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump([summary], f, indent=2)
-
-    if boss.best_adj is not None:
-        draw_tn_graph(
-            boss.best_adj,
-            out_dir / f"tn_graph_{args.acqf}.png",
-            title=f"[{args.acqf.upper()}] Post-Search Topology",
-            node_color=POLICY_COLORS.get(f"boss-{args.acqf}", "#888888"),
-        )
+    draw_tn_graph(
+        best_adj,
+        out_dir / f"tn_graph_{args.acqf}.png",
+        title=f"[{args.acqf.upper()}] Post-Search Topology",
+        node_color=POLICY_COLORS.get(f"boss-{args.acqf}", "#888888"),
+    )
 
     res = boss.get_results()
     np.savez(
@@ -171,6 +206,7 @@ def main():
         X_int=res["X_int"].numpy(),
         Y_rse=res["Y_rse"].numpy(),
         Y_cr=res["Y_cr"].numpy(),
+        Y_objective=res["Y_objective"].numpy(),
         t=res["t"].numpy(),
     )
 
@@ -178,14 +214,33 @@ def main():
         f.write("ok")
 
     print(f"Done → {out_dir}")
-    print(f"Best RSE: {summary['best_rse']:.5f}  CR: {summary['best_cr']:.5f}")
+    print(f"Best objective: {summary['best_objective']:.5f}")
 
 
 if __name__ == "__main__":
+    import sys as _sys
+    if len(_sys.argv) == 1:
+        # Debug session — explicit arguments
+        _sys.argv = [
+            _sys.argv[0],
+            "--n-cores",    "5",
+            "--max-rank",   "6",
+            "--seed",       "1",
+            "--budget",     "10",
+            "--n-init",     "5",
+            "--max-bond",   "6",
+            "--min-rse",    "0.01",
+            "--maxiter-tn", "200",
+            "--acqf",       "ei",
+            "--decomp-method", "sgd",
+            "--out-dir",    "artifacts/debug_boss/seed_1/boss_ei",
+        ]
+
     try:
         main()
     except BaseException as exc:
         import argparse as _ap, traceback as _tb
+
         _p = _ap.ArgumentParser()
         _p.add_argument("--out-dir")
         _args, _ = _p.parse_known_args()
