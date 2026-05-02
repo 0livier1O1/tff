@@ -160,7 +160,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         "n_cores": cfg.n_cores, "max_rank": cfg.max_rank,
         "problem_source": cfg.problem_source, "target_path": cfg.target_path,
         "adj_spec": cfg.adj_spec, "adj_r_min": cfg.adj_r_min, "adj_r_max": cfg.adj_r_max,
-        "topology": cfg.topology,
+        "topology": cfg.topology, "fix_adj": cfg.fix_adj,
         # Algorithm
         "budget": cfg.budget, "max_edge_rank": cfg.max_edge_rank,
         "seeds": all_seeds, "policies": cfg.policies_to_run,
@@ -207,13 +207,12 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         adj_path_arg: str | None = None
 
         if cfg.problem_source == "Synthetic":
+            adj_seed = 0 if cfg.fix_adj else seed
             if cfg.adj_spec is not None:
-                # Explicit template: resolve "R" entries deterministically per seed
-                adj_np = resolve_adj_spec(cfg.adj_spec, cfg.adj_r_min, cfg.adj_r_max, seed)
+                adj_np = resolve_adj_spec(cfg.adj_spec, cfg.adj_r_min, cfg.adj_r_max, adj_seed)
             else:
-                # Legacy random mode: pass seed directly to topology generation.
                 from scripts.utils import random_adj_matrix
-                _adj_t = random_adj_matrix(cfg.n_cores, cfg.max_rank, seed=seed)
+                _adj_t = random_adj_matrix(cfg.n_cores, cfg.max_rank, seed=adj_seed)
                 adj_np = _adj_t.numpy().astype(np.int32)
             np.save(adj_npy, adj_np)
             adj_path_arg = str(adj_npy)

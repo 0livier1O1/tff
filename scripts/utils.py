@@ -313,7 +313,7 @@ def make_problem(args):
         adj = torch.from_numpy(np.load(args.adj_path)).to(torch.int)
         target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype, seed=seed)
     else:
-        adj = random_adj_matrix(args.n_cores, args.max_rank, seed=seed)
+        adj = random_adj_matrix(args.n_cores, args.max_rank, seed=0)
         target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype, seed=seed)
 
     return adj, target

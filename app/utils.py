@@ -64,7 +64,7 @@ def _load_artifact(out_dir: Path):
     trace dataframes because MABSS and BOSS optimize/report different metrics.
     decomp_dict is keyed by (seed, pol_name) -> list of {step, arm, losses} dicts.
     """
-    mabss_traces, boss_traces, summaries, decomp_dict = [], [], [], {}
+    mabss_traces, boss_traces, summaries, decomp_dict, pol_diagnostics_dict = [], [], [], {}, {}
     for seed_d in sorted(out_dir.iterdir()):
         if not (seed_d.is_dir() and seed_d.name.startswith("seed_")):
             continue
@@ -104,11 +104,16 @@ def _load_artifact(out_dir: Path):
                 with open(d_path) as f:
                     decomp_dict[(seed_val, pol_name)] = json.load(f)
 
+            pd_path = pol_d / "policy_diagnostics.json"
+            if pd_path.exists():
+                with open(pd_path) as f:
+                    pol_diagnostics_dict[(seed_val, pol_name)] = json.load(f)
+
     if not mabss_traces and not boss_traces:
-        return None, None, [], {}
+        return None, None, [], {}, {}
     mabss_df = pd.concat(mabss_traces, ignore_index=True) if mabss_traces else pd.DataFrame()
     boss_df = pd.concat(boss_traces, ignore_index=True) if boss_traces else pd.DataFrame()
-    return mabss_df, boss_df, summaries, decomp_dict
+    return mabss_df, boss_df, summaries, decomp_dict, pol_diagnostics_dict
 
 
 # ── Run completion sentinel ────────────────────────────────────────────────────

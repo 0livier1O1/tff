@@ -288,6 +288,7 @@ def run_policy(
 
     rows = []
     decomp_histories = []
+    diagnostics = []
     stop_reason = "budget_exhausted"
 
     for step in range(args.budget):
@@ -338,6 +339,7 @@ def run_policy(
             )
 
         # Arm selection — policy.act() only (posterior query / weight sampling)
+        p_info = {}
         pick_t0 = time.time()
         if step < args.bootstrap_oracle_steps:
             action = int(oracle_best_arm.item())
@@ -353,6 +355,22 @@ def run_policy(
             else:
                 action = policy.act(env, valid_mask)
         pick_time = time.time() - pick_t0
+
+        # Diagnostic snapshot: oracle rewards, GP predictions, expert weights
+        def _to_list(t):
+            return t.tolist() if hasattr(t, "tolist") else list(t)
+
+        gp_scores = p_info.get("gp_scores", p_info)  # EXP4 nests under "gp_scores"
+        diag = {
+            "step": step + 1,
+            "arm": int(action),
+            "oracle_rewards": _to_list(oracle_rewards),
+            "gp_mean":  _to_list(gp_scores["mean"]) if "mean" in gp_scores else None,
+            "gp_ucb":   _to_list(gp_scores["ucb"])  if "ucb"  in gp_scores else None,
+            "gp_std":   _to_list(gp_scores["std"])  if "std"  in gp_scores else None,
+            "expert_weights": p_info.get("expert_weights"),  # EXP4 only, else None
+        }
+        diagnostics.append(diag)
 
         # Decomposition — env.step() performs the actual rank increment + fit
         decomp_t0 = time.time()
@@ -433,7 +451,7 @@ def run_policy(
     )
     best_recon = ntwrk.contract()
 
-    return summary, rows, best_recon, decomp_histories
+    return summary, rows, best_recon, decomp_histories, diagnostics
 
 
 def _summarize_policy(rows: list[dict], n_arms: int, budget: int, policy: str) -> dict:
@@ -603,7 +621,7 @@ def main() -> None:
         progress_file.write_text(json.dumps(
             {"policy": p, "step": 0, "budget": args.budget, "started_at": time.time()}
         ))
-        summary, rows, best_recon, decomp_histories = run_policy(
+        summary, rows, best_recon, decomp_histories, diagnostics = run_policy(
             args, target, policy_str=p, target_cr=target_cr, progress_file=progress_file
         )
 
@@ -638,6 +656,9 @@ def main() -> None:
 
         with open(out_dir / "decomp_traces.json", "w") as f:
             json.dump(decomp_histories, f)
+
+        with open(out_dir / "policy_diagnostics.json", "w") as f:
+            json.dump(diagnostics, f)
 
         (out_dir / ".done").write_text("ok")
 

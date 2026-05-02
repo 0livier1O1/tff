@@ -122,6 +122,9 @@ def main():
     init_adj, target_cp = make_problem(args)
     target = torch.from_numpy(cp.asnumpy(target_cp)).to(torch.double)
 
+    _adj_np = cp.asnumpy(cp.asarray(init_adj)).astype(np.float64)
+    target_cr = float(np.prod(np.diag(_adj_np)) / np.sum(np.prod(_adj_np, axis=1)))
+
     # Refresh shared target artifacts from this seeded subprocess.  The
     # dashboard may have an older imported problem factory in memory, so the
     # CLI process is the source of truth for the target used by the algorithm.
@@ -185,6 +188,7 @@ def main():
 
     # Persist traces
     df = pd.DataFrame(rows)
+    df["efficiency"] = df["cr"] / target_cr if target_cr else float("nan")
     df["Policy"] = f"boss-{args.acqf}"
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)

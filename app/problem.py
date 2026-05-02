@@ -102,6 +102,12 @@ def render_adj_matrix_editor(cfg: SidebarConfig) -> None:
         help="Max rank when a cell is 'R'.",
     ))
 
+    cfg.fix_adj = st.sidebar.toggle(
+        "Fix adjacency across seeds",
+        value=True,
+        help="When on, all seeds share the same bond rank structure; only core values change. When off, each seed draws its own random structure.",
+    )
+
     topology = st.sidebar.radio(
         "Topology", ["FCTN", "TT", "TR"],
         horizontal=True, label_visibility="collapsed", key="adj_topology",
@@ -130,8 +136,9 @@ def render_adj_matrix_editor(cfg: SidebarConfig) -> None:
             for j in range(n):
                 cell_key = f"adj_{n}_{i}_{j}"
                 if j < i:
-                    # Lower triangle: read-only mirror
-                    mirrored = st.session_state.get(f"adj_{n}_{j}_{i}", "R")
+                    # Lower triangle: mirror the already-resolved upper triangle value,
+                    # so locked cells (topology-constrained to "1") are reflected correctly.
+                    mirrored = adj_spec[j][i]
                     rcols[j + 1].markdown(
                         f'<div class="adj-mirror">{mirrored}</div>', unsafe_allow_html=True
                     )

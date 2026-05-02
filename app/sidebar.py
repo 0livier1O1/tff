@@ -43,6 +43,7 @@ class SidebarConfig:
     adj_r_min: int = 2
     adj_r_max: int = 8
     topology: str = "FCTN"
+    fix_adj: bool = True
     # Run control
     seeds_str: str = "1"
     cuda_device: int = 0
@@ -152,7 +153,12 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
 
     st.sidebar.markdown("### Storage Options")
     exp_src = "image" if cfg.problem_source == "Images" else "synthetic"
-    default_name = f"exp_{exp_src}_{cfg.budget}s_{cfg.mabss_decomp_method}_{cfg.boss_decomp_method}"
+    _name_parts = [f"exp_{exp_src}_{cfg.budget}s"]
+    if any(p.startswith("mabss-") for p in cfg.policies_to_run):
+        _name_parts.append(f"mabss-{cfg.mabss_decomp_epochs}ep-{cfg.mabss_decomp_method}")
+    if any(p.startswith("boss-") for p in cfg.policies_to_run):
+        _name_parts.append(f"boss-{cfg.boss_decomp_epochs}ep-{cfg.boss_decomp_method}")
+    default_name = "_".join(_name_parts)
     cfg.run_name = st.sidebar.text_input("Run Name", value=default_name)
 
 
@@ -480,6 +486,7 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.adj_r_min             = _get("adj_r_min", 2)
     cfg.adj_r_max             = _get("adj_r_max", 8)
     cfg.topology              = _get("topology", "FCTN")
+    cfg.fix_adj               = _get("fix_adj", True)
 
     st.sidebar.markdown("### Locked Settings (from existing run)")
     st.sidebar.json(existing_cfg)

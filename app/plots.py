@@ -92,6 +92,87 @@ def _interpolate_on_time_grid(
 # ---------------------------------------------------------------------------
 
 
+def plot_boss_objective(df_boss: pd.DataFrame, n_points: int = 300) -> go.Figure:
+    """
+    2-subplot side-by-side figure for BOSS:
+      Left  — cumulative min objective (CR + λ·RSE) vs search step (min–max band over seeds)
+      Right — cumulative min objective vs cumulative wall-clock runtime (zero-order hold)
+    """
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=(
+            "Cumulative Min Objective vs. Step (min–max band)",
+            "Cumulative Min Objective vs. Cumulative Runtime (min–max band)",
+        ),
+    )
+
+    for policy in sorted(df_boss["Policy"].unique()):
+        color = get_policy_color(policy)
+        rgb = _rgba(color, 0.2)
+        pol = df_boss[df_boss["Policy"] == policy].copy().sort_values(["Seed", "step"])
+        pol["cum_min_obj"] = pol.groupby("Seed")["objective"].cummin()
+        pol["cum_time_s"] = pol.groupby("Seed")["step_time_s"].cumsum()
+
+        # Left: vs step — aggregate over seeds
+        gb = pol.groupby("step")
+        steps = list(gb.groups.keys())
+        mean_obj = gb["cum_min_obj"].mean().values
+        lo_obj = gb["cum_min_obj"].min().values
+        hi_obj = gb["cum_min_obj"].max().values
+
+        fig.add_trace(go.Scatter(
+            x=steps, y=hi_obj, mode="lines", line=dict(width=0),
+            showlegend=False, hoverinfo="skip",
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=steps, y=lo_obj, mode="lines", line=dict(width=0),
+            fill="tonexty", fillcolor=rgb, showlegend=False, hoverinfo="skip",
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=steps, y=mean_obj, mode="lines",
+            line=dict(color=color, width=2),
+            name=policy.upper(), showlegend=False,
+        ), row=1, col=1)
+
+        # Right: vs cumulative runtime — zero-order hold interpolation
+        seeds = pol["Seed"].unique()
+        t_max = min(pol[pol["Seed"] == s]["cum_time_s"].max() for s in seeds)
+        grid = np.linspace(0, t_max, n_points)
+        curves = []
+        for seed in seeds:
+            s = pol[pol["Seed"] == seed].sort_values("cum_time_s")
+            idx = np.clip(np.searchsorted(s["cum_time_s"].values, grid, side="right") - 1, 0, len(s) - 1)
+            curves.append(s["cum_min_obj"].values[idx])
+        curves = np.array(curves)
+        m_rt, lo_rt, hi_rt = curves.mean(axis=0), curves.min(axis=0), curves.max(axis=0)
+
+        fig.add_trace(go.Scatter(
+            x=grid, y=hi_rt, mode="lines", line=dict(width=0),
+            showlegend=False, hoverinfo="skip",
+        ), row=1, col=2)
+        fig.add_trace(go.Scatter(
+            x=grid, y=lo_rt, mode="lines", line=dict(width=0),
+            fill="tonexty", fillcolor=rgb, showlegend=False, hoverinfo="skip",
+        ), row=1, col=2)
+        fig.add_trace(go.Scatter(
+            x=grid, y=m_rt, mode="lines",
+            line=dict(color=color, width=2),
+            name=policy.upper(), showlegend=True,
+        ), row=1, col=2)
+
+    fig.update_xaxes(title_text="Search Step", row=1, col=1)
+    fig.update_xaxes(title_text="Cumulative Runtime (s)", row=1, col=2)
+    fig.update_yaxes(title_text="Cumulative Min Objective", row=1, col=1)
+    fig.update_yaxes(title_text="Cumulative Min Objective", row=1, col=2)
+    fig.update_layout(
+        height=380,
+        template="plotly_white",
+        hovermode="x unified",
+        margin=dict(l=0, r=0, t=50, b=0),
+    )
+    return fig
+
+
 def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figure:
     """
     2×2 subplot sharing one legend:

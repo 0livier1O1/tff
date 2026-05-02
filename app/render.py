@@ -120,7 +120,7 @@ def render_load_mode(ROOT: Path):
     from app.sidebar import DEFAULT_PARAMS
     from app.utils import _load_artifact, _artifact_fully_done
 
-    _empty = (False, None, None, None, {}, None, None)
+    _empty = (False, None, None, None, {}, {}, None, None)
 
     st.sidebar.markdown("### Historical Archives")
     artifact_dir = ROOT / "artifacts"
@@ -151,7 +151,7 @@ def render_load_mode(ROOT: Path):
     out_dir = artifact_dir / selected_run
     st.sidebar.success(f"Viewing Historical Artifact: `{selected_run}`")
     try:
-        df_mabss, df_boss, summaries, decomp_dict = _load_artifact(out_dir)
+        df_mabss, df_boss, summaries, decomp_dict, pol_diagnostics_dict = _load_artifact(out_dir)
         if df_mabss is None and df_boss is None:
             st.error(
                 "Artifact contains no valid multi-seed environments. "
@@ -174,7 +174,7 @@ def render_load_mode(ROOT: Path):
             st.json(cfg_json)
 
         df_summary = pd.DataFrame(summaries)
-        return True, df_mabss, df_boss, summaries, decomp_dict, df_summary, out_dir
+        return True, df_mabss, df_boss, summaries, decomp_dict, pol_diagnostics_dict, df_summary, out_dir
 
     except Exception:
         st.error("Failed to load artifact due to filesystem drift.")
@@ -225,12 +225,14 @@ def render_results(
     df_boss: pd.DataFrame,
     summaries: list[dict],
     decomp_dict: dict,
+    pol_diagnostics_dict: dict,
     df_summary: pd.DataFrame,
     out_dir: Path,
     ROOT: Path,
 ) -> None:
     """Render the full results view: macro plots, per-seed drill-downs, export."""
     from app.plots import (
+        plot_boss_objective,
         plot_loss_and_regret,
         plot_arm_trace,
         plot_loss_vs_runtime_seed,
@@ -246,24 +248,44 @@ def render_results(
 
     st.markdown("## Global Performance Overview")
 
-    if not df_rows.empty:
-        _all_steps = sorted(df_rows["step"].dropna().unique().astype(int))
-        _slider_col, _ = st.columns([1, 3])
-        with _slider_col:
-            _max_step = st.select_slider(
-                "Max step shown",
-                options=_all_steps,
-                value=_all_steps[-1],
-                key="global_step_crop",
-            )
-        df_vis = df_rows[df_rows["step"] <= _max_step]
+    _has_mabss = df_mabss is not None and not df_mabss.empty
+    _has_boss = df_boss is not None and not df_boss.empty
 
+    if _has_mabss:
+        st.markdown("#### MABSS — Loss & Regret")
+        _mabss_steps = sorted(df_mabss["step"].dropna().unique().astype(int))
+        _mabss_slider_col, _ = st.columns([1, 3])
+        with _mabss_slider_col:
+            _mabss_max_step = st.select_slider(
+                "Max step shown (MABSS)",
+                options=_mabss_steps,
+                value=_mabss_steps[-1],
+                key="mabss_step_crop",
+            )
         st.plotly_chart(
-            plot_loss_and_regret(df_vis),
+            plot_loss_and_regret(df_mabss[df_mabss["step"] <= _mabss_max_step]),
             use_container_width=True,
-            key="loss_and_regret_global",
+            key="loss_and_regret_mabss",
         )
 
+    if _has_boss:
+        st.markdown("#### BOSS — Objective Convergence")
+        _boss_steps = sorted(df_boss["step"].dropna().unique().astype(int))
+        _boss_slider_col, _ = st.columns([1, 3])
+        with _boss_slider_col:
+            _boss_max_step = st.select_slider(
+                "Max step shown (BOSS)",
+                options=_boss_steps,
+                value=_boss_steps[-1],
+                key="boss_step_crop",
+            )
+        st.plotly_chart(
+            plot_boss_objective(df_boss[df_boss["step"] <= _boss_max_step]),
+            use_container_width=True,
+            key="boss_objective_global",
+        )
+
+    if not df_rows.empty:
         st.markdown("#### Performance vs Runtime")
         _ctrl_col, _chart_col = st.columns([1, 5])
         with _ctrl_col:
