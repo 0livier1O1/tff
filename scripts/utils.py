@@ -279,11 +279,38 @@ def retensorize_image(img, n_cores):
     return tensor
 
 
+def resolve_adj_spec(adj_spec: list[list[str]], r_min: int, r_max: int, seed: int) -> "np.ndarray":
+    """Resolve 'R' entries in an adjacency spec to random integers.
+
+    Moved here from app/problem.py so data logic stays out of the UI layer.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(adj_spec)
+    adj = np.zeros((n, n), dtype=np.int32)
+    for i in range(n):
+        for j in range(i, n):
+            raw = str(adj_spec[i][j]).strip()
+            if raw.upper() == "R":
+                low = max(2, r_min) if i == j else r_min
+                val = int(rng.integers(low, r_max + 1))
+            elif raw.lstrip("-").isdigit():
+                low = 2 if i == j else 1
+                val = max(low, int(raw))
+            else:
+                val = 2 if i == j else 1
+            adj[i, j] = val
+            adj[j, i] = val
+    return adj
+
+
 def make_problem(args):
     """
     Unified problem factory for MABSS and BOSS runners.
-    If args.target_path is provided, loads from file.
-    Automatically reshapes if args.n_cores differs from file order.
+
+    Dispatch:
+      target_path set  → load from file (.npz image, .npy lightfield/raw, .pt)
+      adj_path set     → pre-resolved adjacency; simulate cores from it
+      otherwise        → synthetic: random adj + simulated cores
     """
     from tensors.networks.cutensor_network import sim_tensor_from_adj
     seed = getattr(args, "seed", None)
@@ -291,27 +318,28 @@ def make_problem(args):
     if hasattr(args, "target_path") and args.target_path:
         adj, target = load_target_tensor(args.target_path, args.dtype)
 
-        # Check if we need to reshape to a different number of cores
-        if hasattr(args, "n_cores") and args.n_cores != target.ndim:
-            import cupy as cp
-
-            # 1. Canonicalize back to 2D image
+        # Only retensorize if the loaded target is a flat 2D image that needs
+        # to be reshaped into a different core count. Lightfield and other
+        # pre-shaped tensors (ndim > 2) are used as-is.
+        if target.ndim <= 2 and hasattr(args, "n_cores") and args.n_cores != target.ndim:
+            # 1. Canonicalize back to 2D
             img_2d = reconstruct_image(target)
-            # 2. Re-tensorize to new N
+            # 2. Re-tensorize to requested core count
             target = cp.array(retensorize_image(img_2d, args.n_cores))
             if args.dtype == "float64":
                 target = target.astype(cp.float64)
             else:
                 target = target.astype(cp.float32)
-            # 3. New topology is needed as N changed
             adj = None
 
         if adj is None:
-            max_r = getattr(args, "max_rank", 1)  # Default for image start
+            max_r = getattr(args, "max_rank", 1)
             adj = random_adj_matrix(args.n_cores, max_r, diag=target.shape, seed=seed)
+
     elif hasattr(args, "adj_path") and args.adj_path:
         adj = torch.from_numpy(np.load(args.adj_path)).to(torch.int)
         target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype, seed=seed)
+
     else:
         adj = random_adj_matrix(args.n_cores, args.max_rank, seed=0)
         target, _ = sim_tensor_from_adj(adj, backend="cupy", dtype=args.dtype, seed=seed)

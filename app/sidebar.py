@@ -38,6 +38,7 @@ class SidebarConfig:
     n_cores: int = 5
     max_rank: int = 6          # kept for Images mode and backward-compat
     target_path: str | None = None
+    lightfield_dataset: str | None = None
     # Adjacency matrix editor (Synthetic mode)
     adj_spec: list | None = None  # N×N list of lists of str; None = use old random path
     adj_r_min: int = 2
@@ -152,7 +153,8 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
     _render_advanced_policy(cfg)
 
     st.sidebar.markdown("### Storage Options")
-    exp_src = "image" if cfg.problem_source == "Images" else "synthetic"
+    _src_map = {"Images": "image", "Lightfield": "lightfield"}
+    exp_src = _src_map.get(cfg.problem_source, "synthetic")
     _name_parts = [f"exp_{exp_src}_{cfg.budget}s"]
     if any(p.startswith("mabss-") for p in cfg.policies_to_run):
         _name_parts.append(f"mabss-{cfg.mabss_decomp_epochs}ep-{cfg.mabss_decomp_method}")
@@ -487,6 +489,7 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.adj_r_max             = _get("adj_r_max", 8)
     cfg.topology              = _get("topology", "FCTN")
     cfg.fix_adj               = _get("fix_adj", True)
+    cfg.lightfield_dataset    = _get("lightfield_dataset", None)
 
     st.sidebar.markdown("### Locked Settings (from existing run)")
     st.sidebar.json(existing_cfg)

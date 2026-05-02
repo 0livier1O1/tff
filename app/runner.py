@@ -159,6 +159,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         # Problem
         "n_cores": cfg.n_cores, "max_rank": cfg.max_rank,
         "problem_source": cfg.problem_source, "target_path": cfg.target_path,
+        "lightfield_dataset": cfg.lightfield_dataset,
         "adj_spec": cfg.adj_spec, "adj_r_min": cfg.adj_r_min, "adj_r_max": cfg.adj_r_max,
         "topology": cfg.topology, "fix_adj": cfg.fix_adj,
         # Algorithm
@@ -194,7 +195,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         json.dump(config_dict, f, indent=4)
 
     import numpy as np
-    from app.problem import resolve_adj_spec
+    from scripts.utils import resolve_adj_spec
 
     jobs: list[dict] = []
     cmds: list[list[str]] = []
@@ -228,6 +229,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         save_tensor(seed_dir / "target_tensor.npz", target)
         if cfg.problem_source == "Images":
             save_image(seed_dir / "target_image.png", target)
+        # Lightfield: no per-seed image saved (use preview from problem.py)
 
         for p in cfg.policies_to_run:
             pol_dir = seed_dir / p.replace("-", "_")
