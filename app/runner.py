@@ -17,7 +17,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from app.config import SidebarConfig
+from app.constants.config import SidebarConfig
 from app.utils import _write_run_script, _script_alive
 
 

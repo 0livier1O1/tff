@@ -14,7 +14,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from app.config import SidebarConfig
+from app.constants.config import SidebarConfig
 
 # ── Source registry ─────────────────────────────────────────────────────────
 # Add new entries here to extend the source selector without touching UI logic.

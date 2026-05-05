@@ -8,8 +8,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import streamlit as st
-from app.config import SidebarConfig
-from app.tooltips import (
+from app.constants.config import SidebarConfig
+from app.constants.tooltips import (
     EXTEND_RUN, EXTEND_SEEDS,
     SEEDS, CUDA_DEVICE, TMUX_SESSION, RUN_NAME, SELECTED_ALGORITHMS,
     DECOMP_EPOCHS, DECOMP_ENGINE, DECOMP_INIT_LR, DECOMP_MOMENTUM,

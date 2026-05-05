@@ -134,7 +134,7 @@ def render_load_mode(ROOT: Path):
     When data_ready is False all other values are None / empty.
     """
     from dataclasses import asdict
-    from app.config import SidebarConfig
+    from app.constants.config import SidebarConfig
     DEFAULT_PARAMS = asdict(SidebarConfig())
     from app.utils import _load_artifact, _artifact_fully_done
 
