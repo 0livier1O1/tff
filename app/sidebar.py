@@ -94,7 +94,7 @@ class SidebarConfig:
     boss_lamda: float = 1.0
     # TnALE — decomposition
     tnale_decomp_epochs: int = 2000
-    tnale_decomp_method: str = "adam"
+    tnale_decomp_method: str = "sgd"
     tnale_decomp_init_lr: float | None = None
     tnale_decomp_momentum: float = 0.9
     tnale_decomp_loss_patience: int = 2500
@@ -362,10 +362,21 @@ def _render_decomp_family(
 def _render_advanced_policy(cfg: SidebarConfig) -> None:
     if not cfg.policies_to_run:
         return
-    with st.sidebar.expander("Advanced Policy Tuning"):
-        has_tnale = "tnale" in cfg.policies_to_run
-        if has_tnale:
-            st.markdown("**TnALE · ALE Parameters**")
+
+    has_tnale = "tnale" in cfg.policies_to_run
+    has_ucb = "mabss-ucb" in cfg.policies_to_run or "mabss-exp4" in cfg.policies_to_run
+    has_exp3 = "mabss-exp3" in cfg.policies_to_run
+    has_exp4 = "mabss-exp4" in cfg.policies_to_run
+    has_mabss_adv = has_ucb or has_exp3 or has_exp4
+    has_boss = any(p.startswith("boss-") for p in cfg.policies_to_run)
+
+    if not (has_tnale or has_mabss_adv or has_boss):
+        return
+
+    st.sidebar.markdown("#### Advanced algorithm settings")
+
+    if has_tnale:
+        with st.sidebar.expander("TnALE"):
             t1, t2 = st.columns(2)
             cfg.tnale_topology = t1.selectbox(
                 "Topology", ["ring", "full"], index=0,
@@ -416,7 +427,7 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
                 help="Force-accept init-phase best as main-phase warm-start.",
             )
             if cfg.tnale_topology == "ring":
-                st.markdown("**TnALE · Permutation Search**")
+                st.markdown("**Permutation Search**")
                 p1, p2 = st.columns(2)
                 cfg.tnale_n_perm_samples = p1.number_input(
                     "Perm Samples", value=cfg.tnale_n_perm_samples, min_value=0, step=1,
@@ -429,66 +440,57 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
                     key="tnale_perm_radius",
                     help="Transpositions per sample (Algorithm 1 radius d). radius=1 = single swap.",
                 )
-            has_other = (
-                "mabss-ucb" in cfg.policies_to_run or "mabss-exp4" in cfg.policies_to_run
-                or "mabss-exp3" in cfg.policies_to_run
-                or any(p.startswith("boss-") for p in cfg.policies_to_run)
-            )
-            if has_other:
+
+    if has_mabss_adv:
+        with st.sidebar.expander("MABSS"):
+            if has_ucb:
+                st.markdown("**GP-UCB Surrogate**")
+                u1, u2 = st.columns(2)
+                cfg.kernel_name = u1.selectbox(
+                    "Kernel", ["matern", "rbf"], index=0,
+                    help="Non-linear interpolation projection $k(x, x')$ powering the Gaussian Process backend.",
+                )
+                cfg.beta = u2.slider(
+                    "Exploration Beta", 1.0, 10.0, 5.0, 0.5,
+                    help=r"Upper Confidence Bound tuning scalar: $\mu_{t}(x) + \beta \sigma_{t}(x)$.",
+                )
+                n1, n2 = st.columns(2)
+                cfg.learn_noise = n1.checkbox("Learn Noise", value=False)
+                _fn_str = n2.text_input("Fixed Noise", "1e-6")
+                if not cfg.learn_noise:
+                    try:
+                        cfg.fixed_noise = float(_fn_str)
+                    except ValueError:
+                        pass
+
+            if has_ucb and has_exp3:
                 st.markdown("---")
 
-        has_ucb = "mabss-ucb" in cfg.policies_to_run or "mabss-exp4" in cfg.policies_to_run
+            if has_exp3:
+                st.markdown("**EXP3 Parameters**")
+                e1, e2 = st.columns(2)
+                cfg.exp3_gamma = e1.slider(
+                    "EXP3 Gamma", 0.0, 1.0, 0.2,
+                    help=r"$\gamma \in (0,1]$ smoothing parameter.",
+                )
+                cfg.exp3_decay = e2.number_input("EXP3 Decay", value=0.95, step=0.01)
 
-        if has_ucb:
-            st.markdown("**MABSS · GP-UCB Surrogate**")
-            u1, u2 = st.columns(2)
-            cfg.kernel_name = u1.selectbox(
-                "Kernel", ["matern", "rbf"], index=0,
-                help="Non-linear interpolation projection $k(x, x')$ powering the Gaussian Process backend.",
-            )
-            cfg.beta = u2.slider(
-                "Exploration Beta", 1.0, 10.0, 5.0, 0.5,
-                help=r"Upper Confidence Bound tuning scalar: $\mu_{t}(x) + \beta \sigma_{t}(x)$.",
-            )
-            n1, n2 = st.columns(2)
-            cfg.learn_noise = n1.checkbox("Learn Noise", value=False)
-            _fn_str = n2.text_input("Fixed Noise", "1e-6")
-            if not cfg.learn_noise:
-                try:
-                    cfg.fixed_noise = float(_fn_str)
-                except ValueError:
-                    pass
-
-        if has_ucb and "mabss-exp3" in cfg.policies_to_run:
-            st.markdown("---")
-
-        if "mabss-exp3" in cfg.policies_to_run:
-            st.markdown("**MABSS · EXP3 Parameters**")
-            e1, e2 = st.columns(2)
-            cfg.exp3_gamma = e1.slider(
-                "EXP3 Gamma", 0.0, 1.0, 0.2,
-                help=r"$\gamma \in (0,1]$ smoothing parameter.",
-            )
-            cfg.exp3_decay = e2.number_input("EXP3 Decay", value=0.95, step=0.01)
-
-        if (has_ucb or "mabss-exp3" in cfg.policies_to_run) and "mabss-exp4" in cfg.policies_to_run:
-            st.markdown("---")
-
-        if "mabss-exp4" in cfg.policies_to_run:
-            st.markdown("**MABSS · EXP4 Parameters**")
-            e3, e4 = st.columns(2)
-            cfg.exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, 0.1)
-            cfg.exp4_eta = e4.number_input("EXP4 Eta", value=0.5, step=0.1)
-            st.markdown("**EXP4 Context Discretization**")
-            b1, b2 = st.columns(2)
-            cfg.exp3_loss_bins = b1.number_input("Loss Bins", value=4, min_value=1)
-            cfg.exp3_cr_bins = b2.number_input("CR Bins", value=4, min_value=1)
-
-        has_boss = any(p.startswith("boss-") for p in cfg.policies_to_run)
-        if has_boss:
-            if has_ucb or "mabss-exp3" in cfg.policies_to_run or "mabss-exp4" in cfg.policies_to_run:
+            if (has_ucb or has_exp3) and has_exp4:
                 st.markdown("---")
-            st.markdown("**BOSS · Global Bayesian Optimization**")
+
+            if has_exp4:
+                st.markdown("**EXP4 Parameters**")
+                e3, e4 = st.columns(2)
+                cfg.exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, 0.1)
+                cfg.exp4_eta = e4.number_input("EXP4 Eta", value=0.5, step=0.1)
+                st.markdown("**EXP4 Context Discretization**")
+                b1, b2 = st.columns(2)
+                cfg.exp3_loss_bins = b1.number_input("Loss Bins", value=4, min_value=1)
+                cfg.exp3_cr_bins = b2.number_input("CR Bins", value=4, min_value=1)
+
+    if has_boss:
+        with st.sidebar.expander("BOSS"):
+            st.markdown("**Global Bayesian Optimization**")
             ba1, ba2 = st.columns(2)
             cfg.boss_n_init = ba1.number_input(
                 "Init Points ($n_{\\text{init}}$)", value=10, min_value=2,

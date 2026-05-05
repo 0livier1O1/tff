@@ -94,7 +94,7 @@ class TnALE:
         n_runs: int = 2,
         maxiter_tn: int = 40000,
         min_rse: float = 1e-8,
-        decomp_method: str = "adam",
+        decomp_method: str = "sgd",
         backend: str = "cupy",
         dtype: str = "float32",
         init_lr: float = 0.01,
