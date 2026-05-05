@@ -79,16 +79,32 @@ def render_job_status_panel(ROOT: Path) -> None:
                     pass
             completed_at = done_f.stat().st_mtime if done_f.exists() else None
 
+            _algo = job["algo"]
+            if _algo.startswith("mabss-"):
+                _budget = cfg_data.get("mabss_budget", "-")
+                _epochs = cfg_data.get("mabss_decomp_epochs", "-")
+                _max_rank = cfg_data.get("mabss_max_rank", "-")
+            elif _algo.startswith("boss-"):
+                _budget = cfg_data.get("boss_budget", "-")
+                _epochs = cfg_data.get("boss_decomp_epochs", "-")
+                _max_rank = cfg_data.get("boss_max_bond", "-")
+            elif _algo == "tnale":
+                _budget = cfg_data.get("tnale_budget", "-")
+                _epochs = cfg_data.get("tnale_decomp_epochs", "-")
+                _max_rank = cfg_data.get("tnale_max_rank", "-")
+            else:
+                _budget = "-"
+                _epochs = "-"
+                _max_rank = "-"
             rows.append({
                 "Seed":      job["seed"],
-                "Algo":    job["algo"],
+                "Algo":      _algo,
                 "Status":    status,
                 "Step":      step,
                 "N":         cfg_data.get("n_cores", "-"),
-                "Budget":    cfg_data.get("budget", "-"),
-                "MABSS Epochs": cfg_data.get("mabss_decomp_epochs", "-"),
-                "BOSS Epochs":  cfg_data.get("boss_decomp_epochs", "-"),
-                "MaxRank":   cfg_data.get("max_edge_rank", "-"),
+                "Budget":    _budget,
+                "Epochs":    _epochs,
+                "MaxRank":   _max_rank,
                 "Submitted": _fmt_ts(submitted_at),
                 "Started":   _fmt_ts(started_at),
                 "Duration":  _fmt_dur(started_at, completed_at),
@@ -114,13 +130,13 @@ def render_load_mode(ROOT: Path):
     """
     Render the Load Past Artifact sidebar widgets and load data from disk.
 
-    Returns (data_ready, df_mabss, df_boss, summaries, decomp_dict, df_summary, out_dir).
+    Returns (data_ready, df_mabss, df_boss, df_tnale, summaries, decomp_dict, df_summary, out_dir).
     When data_ready is False all other values are None / empty.
     """
     from app.sidebar import DEFAULT_PARAMS
     from app.utils import _load_artifact, _artifact_fully_done
 
-    _empty = (False, None, None, None, {}, {}, None, None)
+    _empty = (False, None, None, None, None, {}, {}, None, None)
 
     st.sidebar.markdown("### Historical Archives")
     artifact_dir = ROOT / "artifacts"
@@ -151,8 +167,8 @@ def render_load_mode(ROOT: Path):
     out_dir = artifact_dir / selected_run
     st.sidebar.success(f"Viewing Historical Artifact: `{selected_run}`")
     try:
-        df_mabss, df_boss, summaries, decomp_dict, pol_diagnostics_dict = _load_artifact(out_dir)
-        if df_mabss is None and df_boss is None:
+        df_mabss, df_boss, df_tnale, summaries, decomp_dict, pol_diagnostics_dict = _load_artifact(out_dir)
+        if df_mabss is None and df_boss is None and df_tnale is None:
             st.error(
                 "Artifact contains no valid multi-seed environments. "
                 "Legacy runs without seeded geometries are strictly deprecated."
@@ -174,7 +190,7 @@ def render_load_mode(ROOT: Path):
             st.json(cfg_json)
 
         df_summary = pd.DataFrame(summaries)
-        return True, df_mabss, df_boss, summaries, decomp_dict, pol_diagnostics_dict, df_summary, out_dir
+        return True, df_mabss, df_boss, df_tnale, summaries, decomp_dict, pol_diagnostics_dict, df_summary, out_dir
 
     except Exception:
         st.error("Failed to load artifact due to filesystem drift.")
@@ -223,6 +239,7 @@ def _render_global_summary(artifact_dir: Path, past_runs: list[str], DEFAULT_PAR
 def render_results(
     df_mabss: pd.DataFrame,
     df_boss: pd.DataFrame,
+    df_tnale: pd.DataFrame,
     summaries: list[dict],
     decomp_dict: dict,
     pol_diagnostics_dict: dict,
@@ -243,7 +260,7 @@ def render_results(
     )
     from app.utils import get_policy_color, _cr_from_adj
 
-    frames = [df for df in (df_mabss, df_boss) if df is not None and not df.empty]
+    frames = [df for df in (df_mabss, df_boss, df_tnale) if df is not None and not df.empty]
     df_rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     st.markdown("## Global Performance Overview")

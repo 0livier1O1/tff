@@ -60,11 +60,13 @@ def _cr_from_adj(adj: np.ndarray) -> float:
 def _load_artifact(out_dir: Path):
     """Load results from all seed_*/policy_name/ subdirs.
 
-    Returns (mabss_df, boss_df, summaries_list, decomp_dict), with separate
-    trace dataframes because MABSS and BOSS optimize/report different metrics.
+    Returns (mabss_df, boss_df, tnale_df, summaries_list, decomp_dict,
+    pol_diagnostics_dict). Each df is empty (not None) when that algo family
+    has no data.
     decomp_dict is keyed by (seed, algo_name) -> list of {step, arm, losses} dicts.
     """
-    mabss_traces, boss_traces, summaries, decomp_dict, pol_diagnostics_dict = [], [], [], {}, {}
+    mabss_traces, boss_traces, tnale_traces = [], [], []
+    summaries, decomp_dict, pol_diagnostics_dict = [], {}, {}
     for seed_d in sorted(out_dir.iterdir()):
         if not (seed_d.is_dir() and seed_d.name.startswith("seed_")):
             continue
@@ -89,6 +91,8 @@ def _load_artifact(out_dir: Path):
                     boss_traces.append(df_p)
                 elif algo_name.startswith("mabss-"):
                     mabss_traces.append(df_p)
+                elif algo_name == "tnale":
+                    tnale_traces.append(df_p)
 
             s_path = pol_d / "summary.json"
             if not s_path.exists():
@@ -112,11 +116,12 @@ def _load_artifact(out_dir: Path):
                 with open(pd_path) as f:
                     pol_diagnostics_dict[(seed_val, algo_name)] = json.load(f)
 
-    if not mabss_traces and not boss_traces:
-        return None, None, [], {}, {}
+    if not mabss_traces and not boss_traces and not tnale_traces:
+        return None, None, None, [], {}, {}
     mabss_df = pd.concat(mabss_traces, ignore_index=True) if mabss_traces else pd.DataFrame()
     boss_df = pd.concat(boss_traces, ignore_index=True) if boss_traces else pd.DataFrame()
-    return mabss_df, boss_df, summaries, decomp_dict, pol_diagnostics_dict
+    tnale_df = pd.concat(tnale_traces, ignore_index=True) if tnale_traces else pd.DataFrame()
+    return mabss_df, boss_df, tnale_df, summaries, decomp_dict, pol_diagnostics_dict
 
 
 # ── Run completion sentinel ────────────────────────────────────────────────────

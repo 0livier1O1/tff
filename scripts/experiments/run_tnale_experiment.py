@@ -166,6 +166,21 @@ def main() -> None:
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
 
+    clean_summary = {
+        "algo": "tnale",
+        "Seed": args.seed,
+        "steps": len(rows),
+        "budget": args.budget,
+        "total_evals": summary.get("total_evals", len(rows)),
+        "best_rse": float(summary.get("best_rse", float("nan"))),
+        "best_cr": float(summary.get("best_cr", float("nan"))),
+        "final_step_loss": float(df["rse"].iloc[-1]) if not df.empty else float("nan"),
+        "final_cr": float(df["cr"].iloc[-1]) if not df.empty else float("nan"),
+        "mean_eval_time_s": float(df["eval_time_s"].mean()) if "eval_time_s" in df.columns else float("nan"),
+    }
+    with open(out_dir / "summary.json", "w") as f:
+        json.dump([clean_summary], f, indent=2)
+
     with open(out_dir / ".done", "w") as f:
         f.write("ok")
 
