@@ -581,9 +581,10 @@ class cuTensorNetwork:
 
             if epoch % 100 == 0:
                 sys.stdout.flush()
-                print(
-                    f"\rEpoch {epoch}, Loss: {loss_history[-1]:0.5f}, Learning Rate: {lr:0.6f}"
-                )
+                if kwargs.get("verbose", False):
+                    print(
+                        f"\rEpoch {epoch}, Loss: {loss_history[-1]:0.5f}, Learning Rate: {lr:0.6f}"
+                    )
 
         return loss_history
 

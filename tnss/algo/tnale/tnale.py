@@ -11,7 +11,15 @@ import numpy as np
 
 from tensors.networks.cutensor_network import cuTensorNetwork
 from tnss.algo.tnale.structure import Structure
-from tnss.algo.tnale.neighborhood import make_grid, select_3_indices, propagate_index
+from tnss.algo.tnale.neighborhood import (
+    make_grid,
+    select_3_indices,
+    propagate_index,
+    permutation_candidates,
+    sample_permutation_candidates,
+    ring_bonds,
+    full_bonds,
+)
 from tnss.algo.tnale.interpolation import interpolate_rse
 
 
@@ -21,24 +29,28 @@ _MAX_CR = 10.0
 
 class TnALE:
     """
-    Alternating Local Enumeration for TN Structure Search (TS / full-topology variant).
+    Alternating Local Enumeration for TN Structure Search — ring topology (TR) variant.
 
     Mirrors the TNALE_TS algorithm from Li et al. 2023, with the SGE worker pool
     replaced by direct cuTensorNetwork calls.
 
     Search space
     ------------
-    All N*(N-1)/2 upper-triangular bond ranks in {1, …, max_rank-1}.
-    rank=1 encodes "no bond" (edge absent), so topology and rank are jointly searched.
+    D bond ranks in {1, …, max_rank-1} where D is determined by the topology:
+      "ring" (default) — N ring bonds + vertex permutation search (Algorithm 3).
+      "full"           — all N*(N-1)/2 bonds, no permutation (classic FCTN search).
+      list of (i,j)    — custom bond set, no permutation.
+    rank=1 encodes "no bond" (edge absent).  Non-topology bonds are held at 1
+    (trivial dimension required by cuTN).
 
     Algorithm
     ---------
-    Starting from a random sparse centre, the algorithm does forward-backward
-    round-trip sweeps: for each bond position in turn, it enumerates a small window
-    of candidate ranks, evaluates them (or linearly interpolates RSE from 3 samples
-    in the init phase), selects the best, and locks that position before moving on.
-    After each complete round-trip the centre is updated if improvement was found,
-    or a random perturbation is applied otherwise.
+    Forward-backward round-trip sweeps over all D bond positions.  For "ring",
+    permutation is updated once per round-trip between the forward and backward rank
+    sweeps (all N*(N-1)/2 pairwise transpositions, no interpolation).  RSE for rank
+    positions is optionally linearly interpolated from 3 sample points during the init
+    phase.  After each complete round-trip the centre is updated if improvement was
+    found, or a random rank perturbation is applied otherwise.
 
     Parameters
     ----------
@@ -46,6 +58,13 @@ class TnALE:
     phys_dims     : (N,) physical mode sizes
     max_rank      : exclusive upper bound on any bond rank (ranks in [1, max_rank-1])
     budget        : number of ALE position-update steps (one step = one position sweep)
+    topology      : "ring" (TR, default), "full" (FCTN), or a list of (i,j) bond pairs
+    n_perm_samples: candidates per permutation step. None = enumerate all N*(N-1)/2
+                    transpositions; int = sample that many via Algorithm 1 of
+                    Li et al. (2022). Default 10.
+    perm_radius   : number of random transpositions per sample (Algorithm 1 radius d).
+                    radius=1 draws one swap, covering the single-transposition
+                    neighbourhood stochastically. Default 1.
     local_step_init  : neighbourhood radius during the init (interpolation) phase
     local_step_main  : neighbourhood radius in the main phase
     interp_on     : enable 3-point RSE interpolation (init phase)
@@ -62,6 +81,9 @@ class TnALE:
         phys_dims: np.ndarray,
         max_rank: int = 5,
         budget: int = 200,
+        topology: str | list = "ring",
+        n_perm_samples: int | None = 10,
+        perm_radius: int = 1,
         local_step_init: int = 2,
         local_step_main: int = 1,
         interp_on: bool = True,
@@ -70,22 +92,39 @@ class TnALE:
         init_sparsity: float = 0.6,
         lambda_fitness: float = 5.0,
         n_runs: int = 2,
-        maxiter_tn: int = 10000,
+        maxiter_tn: int = 40000,
         min_rse: float = 1e-8,
         decomp_method: str = "adam",
         backend: str = "cupy",
         dtype: str = "float32",
-        init_lr: float | None = None,
-        momentum: float = 0.5,
+        init_lr: float = 0.01,
+        momentum: float = 0.9,
         loss_patience: int = 2500,
         lr_patience: int = 250,
+        phase_change_reset: bool = True,
         verbose: bool = True,
     ) -> None:
         tgt = target.numpy() if hasattr(target, "numpy") else np.asarray(target)
         self._target_cp = cp.asarray(tgt)
         self.phys_dims = np.asarray(phys_dims, dtype=int)
         self.N = len(phys_dims)
-        self.D = self.N * (self.N - 1) // 2
+
+        # Resolve topology → bond list and permutation flag
+        if topology == "ring":
+            self._bonds = ring_bonds(self.N)
+            self._use_perm = True
+        elif topology == "full":
+            self._bonds = full_bonds(self.N)
+            self._use_perm = False
+        elif isinstance(topology, list):
+            self._bonds = topology
+            self._use_perm = False
+        else:
+            raise ValueError(f"topology must be 'ring', 'full', or a bond list; got {topology!r}")
+        self.topology = topology
+        self.D = len(self._bonds)
+        self.n_perm_samples = n_perm_samples
+        self.perm_radius = perm_radius
 
         self.max_rank = max_rank
         self.budget = budget
@@ -107,6 +146,7 @@ class TnALE:
         self.momentum = momentum
         self.loss_patience = loss_patience
         self.lr_patience = lr_patience
+        self.phase_change_reset = phase_change_reset
         self.verbose = verbose
 
         self.rows: list[dict] = []
@@ -134,7 +174,7 @@ class TnALE:
                     f"[TnALE {step+1}/{self.budget}] "
                     f"pos={self._update_idx}  "
                     f"best_RSE={self.best_rse:.5f}  best_CR={self.best_cr:.4f}  "
-                    f"evals={self.eval_count}  phase={'interp' if self._interp_on else 'main'}"
+                    f"evals={self.eval_count}  phase={'init' if self._in_init_phase else 'main'}"
                 )
             self._atomic_write(progress_file, {"step": step + 1, "budget": self.budget})
 
@@ -145,41 +185,54 @@ class TnALE:
     # ------------------------------------------------------------------
 
     def _initialize(self) -> None:
-        # Random sparse initial structure
+        N = self.N
+        D = self.D
+
+        # Random sparse initial bond ranks (shape D)
         raw = np.array(
             [
                 0 if np.random.random() <= self.init_sparsity
                 else np.random.randint(2, self.max_rank)
-                for _ in range(self.D)
+                for _ in range(D)
             ],
             dtype=int,
         )
         raw[raw == 0] = 1  # 0 → rank=1 (no bond)
 
-        self._center = Structure(raw, self.phys_dims)
+        if self._use_perm:
+            # Ring: permutation searched at position D (= N), between fwd/bwd rank sweeps
+            self._fixed_permute = np.random.permutation(N)
+            self._PERM_IDX = D          # = N for ring
+            fwd = np.arange(D + 1)      # rank positions 0..D-1 plus permutation at D
+            bwd = np.arange(1, D)[::-1] # backward rank sweep D-1..1 (no permutation)
+            self._round_trip_len = 2 * D * self.local_opt_iter + 1
+        else:
+            # Full / custom: identity permutation, no permutation step
+            self._fixed_permute = np.arange(N)
+            self._PERM_IDX = -1         # disabled
+            fwd = np.arange(D)
+            bwd = np.arange(1, D - 1)[::-1]
+            self._round_trip_len = 2 * (D - 1) * self.local_opt_iter + 1
+
+        self._center = Structure(raw, self.phys_dims, self._fixed_permute, self._bonds)
         self._center_fitness = float("inf")
         self._center_rse = float("inf")
         self._center_cr = float("inf")
 
         self._interp_on = self.interp_on
+        self._in_init_phase = self.interp_on  # False once local_step shrinks to local_step_main
         self._local_step = self.local_step_init if self._interp_on else self.local_step_main
         self._times_of_local_sampling = 1
 
         self._grid = make_grid(raw, self.max_rank, self._local_step)
 
-        # fixed_ranks[i] = currently locked-in rank for position i
-        # (updated one position at a time as the sweep progresses)
+        # fixed_ranks[i] = currently locked-in rank for bond position i
         self._fixed_ranks = raw.copy()
 
-        # Position cycling sequence: forward [0..D-1] then backward [D-2..1],
-        # repeated local_opt_iter times, with a trailing 0.
-        fwd = np.arange(self.D)
-        bwd = np.arange(1, self.D - 1)[::-1]
         self._position_seq = np.concatenate(
             [np.tile(np.concatenate([fwd, bwd]), self.local_opt_iter), [0]]
         )
-        self._round_trip_len = 2 * (self.D - 1) * self.local_opt_iter + 1
-        self._times_of_update = 1  # starts at 1; position_seq[0] = pos 0 (done below)
+        self._times_of_update = 1  # position_seq[0] = pos 0 evaluated in bootstrap below
 
         # Temporary best within the current round-trip
         self._temp_best = self._center.copy()
@@ -209,13 +262,14 @@ class TnALE:
     def _ale_step(self) -> None:
         t = self._times_of_update
         self._update_idx = int(self._position_seq[t % len(self._position_seq)])
-        former_idx = int(self._position_seq[(t - 1) % len(self._position_seq)])
 
-        # The current fixed rank for update_idx may appear in the new candidate list —
-        # if so, we can propagate the best-known RSE to that slot.
-        self._rse_propagate_index = propagate_index(
-            int(self._fixed_ranks[self._update_idx]), self._grid[self._update_idx]
-        )
+        # RSE propagation only applies to rank positions (not the permutation position)
+        if self._update_idx != self._PERM_IDX:
+            self._rse_propagate_index = propagate_index(
+                int(self._fixed_ranks[self._update_idx]), self._grid[self._update_idx]
+            )
+        else:
+            self._rse_propagate_index = None
 
         self._eval_position(self._update_idx)
         self._check_convergence()
@@ -231,9 +285,13 @@ class TnALE:
 
     def _eval_position(self, update_idx: int) -> None:
         """
-        Enumerate all candidate ranks for `update_idx`, evaluate (or interpolate),
-        score, and lock the position to the best rank found.
+        If update_idx == N: evaluate all permutation transpositions (no interpolation).
+        Otherwise: enumerate candidate ranks for the ring bond at update_idx.
         """
+        if update_idx == self._PERM_IDX:
+            self._eval_permutation_position()
+            return
+
         candidates = self._grid[update_idx]
 
         # Build one candidate Structure per rank value in the grid
@@ -244,6 +302,8 @@ class TnALE:
                     dtype=int,
                 ),
                 self.phys_dims,
+                self._fixed_permute,
+                self._bonds,
             )
             for c in candidates
         ]
@@ -265,6 +325,48 @@ class TnALE:
             self._temp_best_fitness = scores[best_i]
             self._temp_best_rse = rse_all[best_i]
             self._temp_best_cr = cr_all[best_i]
+
+    def _eval_permutation_position(self) -> None:
+        """
+        Evaluate permutation candidates; no interpolation — each is fully evaluated.
+        If n_perm_samples is None: enumerate all N*(N-1)/2 pairwise transpositions.
+        Otherwise: draw n_perm_samples candidates via Algorithm 1 of Li et al. (2022),
+        each formed by applying perm_radius random transpositions to _fixed_permute.
+        Locks _fixed_permute to the best candidate found (or keeps current if none improve).
+        """
+        if self.n_perm_samples is None:
+            candidates = permutation_candidates(self._fixed_permute)
+        else:
+            candidates = sample_permutation_candidates(
+                self._fixed_permute, self.n_perm_samples, self.perm_radius
+            )
+        if not candidates:
+            return
+
+        best_score = float("inf")
+        best_perm = self._fixed_permute.copy()
+        best_rse = float("inf")
+        best_cr = float("inf")
+
+        for perm in candidates:
+            s = Structure(self._fixed_ranks.copy(), self.phys_dims, perm, self._bonds)
+            rse, cr, _ = self._eval_one(s, update_idx=None)
+            score = cr + self.lambda_fitness * rse
+            if score < best_score:
+                best_score = score
+                best_perm = perm.copy()
+                best_rse = rse
+                best_cr = cr
+
+        self._fixed_permute = best_perm
+        self._rse_propagate = best_rse
+
+        if best_score <= self._temp_best_fitness:
+            best_s = Structure(self._fixed_ranks.copy(), self.phys_dims, self._fixed_permute, self._bonds)
+            self._temp_best = best_s.copy()
+            self._temp_best_fitness = best_score
+            self._temp_best_rse = best_rse
+            self._temp_best_cr = best_cr
 
     # ------------------------------------------------------------------
     # Evaluation paths
@@ -331,7 +433,7 @@ class TnALE:
             return rse, cr_analytical, 0.0
 
         t0 = time.time()
-        A = cp.asarray(s.to_adj_matrix())
+        A = cp.asarray(s.to_network_adj())
         net = cuTensorNetwork(A, backend=self.backend, dtype=self.dtype)
         cr = float(net.network_size()) / float(net.target_size())
 
@@ -345,6 +447,7 @@ class TnALE:
                 momentum=self.momentum,
                 loss_patience=self.loss_patience,
                 lr_patience=self.lr_patience,
+                verbose=False
             )
             rse = float(losses[-1]) if losses else float("inf")
             best_rse = min(best_rse, rse)
@@ -372,15 +475,19 @@ class TnALE:
 
     def _check_convergence(self) -> None:
         """
-        If the best structure found in this step equals the centre for `D` consecutive
+        If the fixed state (ranks + permutation) matches the centre for `N` consecutive
         steps, declare convergence and trigger a round-trip restart.
         Also triggers immediately when in perturbation mode and the centre recurs.
         """
-        best_ranks = self._fixed_ranks.copy()
-        if np.array_equal(best_ranks, self._center.ranks):
+        ranks_equal = np.array_equal(self._fixed_ranks, self._center.ranks)
+        perm_equal = (
+            np.array_equal(self._fixed_permute, self._center.permute)
+            if self._use_perm else True
+        )
+
+        if ranks_equal and perm_equal:
             self._unchange_count += 1
             if self._local_reinit:
-                # Already in perturbation mode and still hitting the centre → restart now
                 self._local_reupdate = True
         if self._unchange_count >= self.D:
             self._local_reupdate = True
@@ -396,10 +503,19 @@ class TnALE:
         self._local_reupdate = False
         self._unchange_count = 0
 
-        # Phase transition: switch from init (interpolation) to main after interp_iters rounds
-        if self._interp_on and self._times_of_local_sampling > self.interp_iters:
-            self._interp_on = False
+        # Phase transition: shrink neighbourhood radius after interp_iters round-trips.
+        # Interpolation stays on — the original never disables it, only reduces local_step.
+        # With local_step_main=1 the grid has 3 points and all are sampled, so interpolation
+        # is vacuous and equivalent to full evaluation.
+        at_phase_change = self._interp_on and self._times_of_local_sampling > self.interp_iters
+        if at_phase_change:
             self._local_step = self.local_step_main
+            self._in_init_phase = False
+            # Force-accept the init-phase best as the new centre regardless of its fitness.
+            # The init phase is exploratory (large radius, interpolated) — its winner is always
+            # committed as the warm-start for the precise main phase.
+            if self.phase_change_reset:
+                self._center_fitness = float("inf")
 
         improvement = self._temp_best_fitness <= self._center_fitness
 
@@ -418,19 +534,24 @@ class TnALE:
             )
             self._rse_propagate = self._center_rse
             self._fixed_ranks = self._center.ranks.copy()
+            if self._use_perm:
+                self._fixed_permute = self._center.permute.copy()
             self._local_reinit = False
 
         else:
-            # No improvement: perturb fixed_ranks away from centre to escape the basin
+            # No improvement: perturb fixed_ranks away from centre to escape the basin.
+            # Permutation is reset to centre (permutation neighbourhood handles its own search).
             self._local_reinit = True
             self._grid = make_grid(self._center.ranks, self.max_rank, self._local_step)
             self._fixed_ranks = self._center.ranks.copy()
+            if self._use_perm:
+                self._fixed_permute = self._center.permute.copy()
 
             # Pick random (possibly non-centre) values for positions 1..D-1
             for i in range(1, self.D):
                 self._fixed_ranks[i] = choice(self._grid[i])
 
-            # Guard: ensure at least one position differs from centre
+            # Guard: ensure at least one rank position differs from centre
             attempts = 0
             while (
                 np.array_equal(self._fixed_ranks[1:], self._center.ranks[1:])
@@ -465,7 +586,7 @@ class TnALE:
                 "step": self.eval_count,
                 "ale_position": int(self._update_idx),
                 "ale_round": int(self._times_of_local_sampling),
-                "phase": "interp" if self._interp_on else "main",
+                "phase": "init" if self._in_init_phase else "main",
                 "rse": rse,
                 "cr": cr,
                 "step_loss": rse,
@@ -510,47 +631,65 @@ class TnALE:
 
 
 if __name__ == "__main__":
-    import torch
-    from scripts.utils import random_adj_matrix
     from tensors.networks.cutensor_network import sim_tensor_from_adj
+    from tnss.algo.tnale.neighborhood import ring_bonds
+    from tnss.algo.tnale.structure import Structure
 
-    SEED = 42
-    N = 4
-    MAX_RANK = 4
+    SEED = 7
+    N = 6
+    MAX_RANK = 5
 
-    # Ground-truth adjacency for the synthetic target
-    A_true = random_adj_matrix(n_cores=N, max_rank=MAX_RANK, seed=SEED)
-    print("Ground-truth adj:\n", A_true.numpy())
+    # Build a ring-topology ground-truth target:
+    # choose random ring bond ranks and a random vertex permutation, then
+    # synthesize the target tensor from the permuted ring adjacency.
+    rng = np.random.default_rng(SEED)
+    phys_dims = np.full(N, 4, dtype=int)
+    true_ranks = rng.integers(2, MAX_RANK, size=N)   # ranks in [2, MAX_RANK-1]
+    true_perm = rng.permutation(N)
 
-    # Simulate a target tensor from the ground-truth structure
-    target_cp, _ = sim_tensor_from_adj(A_true.numpy(), backend="cupy", dtype="float32", seed=SEED)
-    target = target_cp.get()  # bring to numpy for TnALE constructor
+    true_struct = Structure(true_ranks, phys_dims, true_perm)
 
-    phys_dims = np.diag(A_true.numpy()).astype(int)
-    print("phys_dims:", phys_dims)
-    print("target shape:", target.shape)
+    print(f"N={N}  MAX_RANK={MAX_RANK}  SEED={SEED}")
+    print(f"Ring bonds : {ring_bonds(N)}")
+    print(f"True ranks : {true_ranks.tolist()}")
+    print(f"True perm  : {true_perm.tolist()}")
+    print(f"True adj (vis):\n{true_struct.to_adj_matrix()}")
+
+    # to_network_adj keeps absent bonds at 1 (cuTN requires all dims > 0)
+    target_cp, _ = sim_tensor_from_adj(true_struct.to_network_adj(), backend="cupy", dtype="float32", seed=SEED)
+    target = target_cp.get()
+    print(f"phys_dims  : {phys_dims.tolist()}")
+    print(f"target shape: {target.shape}\n")
 
     algo = TnALE(
         target=target,
         phys_dims=phys_dims,
         max_rank=MAX_RANK,
-        budget=30,
-        local_step_init=1,
+        budget=60,
+        local_step_init=2,
         local_step_main=1,
         interp_on=True,
-        interp_iters=1,
+        interp_iters=2,
         local_opt_iter=1,
         init_sparsity=0.5,
         lambda_fitness=5.0,
         n_runs=1,
-        maxiter_tn=500,
+        maxiter_tn=2000,
         decomp_method="adam",
         verbose=True,
     )
 
     summary, rows = algo.run()
+    center = algo._center
+
     print("\n--- Summary ---")
-    print(f"  total evals : {summary['total_evals']}")
-    print(f"  best RSE    : {summary['best_rse']:.6f}")
-    print(f"  best CR     : {summary['best_cr']:.4f}")
-    print("  best adj:\n", summary["best_adj"])
+    print(f"  total evals     : {summary['total_evals']}")
+    print(f"  best RSE        : {summary['best_rse']:.6f}")
+    print(f"  best CR         : {summary['best_cr']:.4f}")
+    print(f"  found ranks     : {center.ranks.tolist()}")
+    print(f"  found perm      : {center.permute.tolist()}")
+    print(f"  true  ranks     : {true_ranks.tolist()}")
+    print(f"  true  perm      : {true_perm.tolist()}")
+    print(f"  ranks match     : {np.array_equal(center.ranks, true_ranks)}")
+    print(f"  perm  match     : {np.array_equal(center.permute, true_perm)}")
+    print(f"  best adj (vis):\n{summary['best_adj']}")
