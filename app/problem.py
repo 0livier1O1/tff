@@ -14,7 +14,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from app.sidebar import SidebarConfig, DEFAULT_PARAMS
+from app.config import SidebarConfig
 
 # ── Source registry ─────────────────────────────────────────────────────────
 # Add new entries here to extend the source selector without touching UI logic.
@@ -76,7 +76,7 @@ def render_synthetic_source(cfg: SidebarConfig) -> None:
     nc1, nc2, nc3 = st.sidebar.columns(3)
     n = int(nc1.number_input(
         "N (cores)", min_value=2, max_value=10,
-        value=st.session_state.get("adj_editor_N", DEFAULT_PARAMS["n_cores"]),
+        value=st.session_state.get("adj_editor_N", SidebarConfig.n_cores),
         step=1, key="adj_editor_N",
         help="Number of tensor network cores — sets matrix size.",
     ))
