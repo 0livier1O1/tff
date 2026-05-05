@@ -16,6 +16,7 @@ DEFAULT_PARAMS: dict = {
     "budget": 15,
     "mabss_decomp_epochs": 60,
     "boss_decomp_epochs": 1000,
+    "tnale_decomp_epochs": 2000,
     "max_edge_rank": 10,
     "beta": 5.0,
     "kernel_name": "matern",
@@ -91,6 +92,27 @@ class SidebarConfig:
     boss_min_rse: float = 0.01
     boss_ucb_beta: float = 2.0
     boss_lamda: float = 1.0
+    # TnALE — decomposition
+    tnale_decomp_epochs: int = 2000
+    tnale_decomp_method: str = "adam"
+    tnale_decomp_init_lr: float | None = None
+    tnale_decomp_momentum: float = 0.9
+    tnale_decomp_loss_patience: int = 2500
+    tnale_decomp_lr_patience: int = 250
+    tnale_n_runs: int = 2
+    # TnALE — advanced
+    tnale_topology: str = "ring"
+    tnale_local_step_init: int = 2
+    tnale_local_step_main: int = 1
+    tnale_interp_on: bool = True
+    tnale_interp_iters: int = 2
+    tnale_local_opt_iter: int = 1
+    tnale_init_sparsity: float = 0.6
+    tnale_lambda_fitness: float = 5.0
+    tnale_n_perm_samples: int = 10   # 0 = exhaustive N*(N-1)/2
+    tnale_perm_radius: int = 1
+    tnale_phase_change_reset: bool = True
+    tnale_min_rse: float = 1e-8
 
 
 def render_sidebar() -> SidebarConfig:
@@ -160,6 +182,8 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
         _name_parts.append(f"mabss-{cfg.mabss_decomp_epochs}ep-{cfg.mabss_decomp_method}")
     if any(p.startswith("boss-") for p in cfg.policies_to_run):
         _name_parts.append(f"boss-{cfg.boss_decomp_epochs}ep-{cfg.boss_decomp_method}")
+    if "tnale" in cfg.policies_to_run:
+        _name_parts.append(f"tnale-{cfg.tnale_decomp_epochs}ep-{cfg.tnale_topology}")
     default_name = "_".join(_name_parts)
     cfg.run_name = st.sidebar.text_input("Run Name", value=default_name)
 
@@ -200,9 +224,9 @@ def _render_algorithm_settings(cfg: SidebarConfig) -> None:
         )
         cfg.policies_to_run = st.sidebar.multiselect(
             "Active Policies",
-            ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4", "boss-ei", "boss-ucb"],
+            ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4", "boss-ei", "boss-ucb", "tnale"],
             default=["mabss-greedy", "mabss-exp4"],
-            help="Search algorithms: `mabss-*` are sequential bandit rank-increment policies; `boss-*` are global BO structure search.",
+            help="Search algorithms: `mabss-*` are sequential bandit rank-increment policies; `boss-*` are global BO structure search; `tnale` is Alternating Local Enumeration with ring/full topology.",
         )
 
 
@@ -211,6 +235,7 @@ def _render_decomp_settings(cfg: SidebarConfig) -> None:
     with st.sidebar.container():
         has_mabss = any(p.startswith("mabss-") for p in cfg.policies_to_run)
         has_boss = any(p.startswith("boss-") for p in cfg.policies_to_run)
+        has_tnale = "tnale" in cfg.policies_to_run
 
         specs = []
         if has_mabss:
@@ -229,6 +254,21 @@ def _render_decomp_settings(cfg: SidebarConfig) -> None:
                         "Warm Iters", value=0, min_value=0, step=10
                     )
 
+        if has_tnale:
+            with st.sidebar.expander("TnALE", expanded=True):
+                _render_decomp_family(cfg, "tnale", ["adam", "sgd", "pam", "als"], 2000, st, max_epochs=50000)
+                nr_col1, nr_col2 = st.columns(2)
+                cfg.tnale_n_runs = nr_col1.number_input(
+                    "N Runs", min_value=1, max_value=10, value=cfg.tnale_n_runs,
+                    key="tnale_n_runs",
+                    help="TN decomposition restarts per evaluation; best result is kept.",
+                )
+                cfg.tnale_min_rse = nr_col2.number_input(
+                    "Min RSE", value=cfg.tnale_min_rse, format="%e",
+                    key="tnale_min_rse",
+                    help="Early-stop threshold: stop restarts once RSE falls below this.",
+                )
+
 
 def _render_decomp_family(
     cfg: SidebarConfig,
@@ -236,6 +276,7 @@ def _render_decomp_family(
     engines: list[str],
     default_epochs: int,
     ui,
+    max_epochs: int = 10000,
 ) -> None:
     c1, c2 = ui.columns(2)
     setattr(
@@ -244,7 +285,7 @@ def _render_decomp_family(
         c1.number_input(
             "Decomp Epochs",
             min_value=10,
-            max_value=10000,
+            max_value=max(max_epochs, getattr(cfg, f"{prefix}_decomp_epochs", default_epochs)),
             value=getattr(cfg, f"{prefix}_decomp_epochs", default_epochs),
             step=10,
             key=f"{prefix}_decomp_epochs",
@@ -322,6 +363,80 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
     if not cfg.policies_to_run:
         return
     with st.sidebar.expander("Advanced Policy Tuning"):
+        has_tnale = "tnale" in cfg.policies_to_run
+        if has_tnale:
+            st.markdown("**TnALE · ALE Parameters**")
+            t1, t2 = st.columns(2)
+            cfg.tnale_topology = t1.selectbox(
+                "Topology", ["ring", "full"], index=0,
+                key="tnale_topology",
+                help="ring (TR): N ring bonds + permutation search. full (FCTN): all N*(N-1)/2 bonds.",
+            )
+            cfg.tnale_lambda_fitness = t2.number_input(
+                "λ Fitness", value=cfg.tnale_lambda_fitness, min_value=0.0, step=1.0,
+                key="tnale_lambda_fitness",
+                help="Fitness = CR + λ · RSE.",
+            )
+            t3, t4 = st.columns(2)
+            cfg.tnale_local_step_init = t3.number_input(
+                "Step Init", value=cfg.tnale_local_step_init, min_value=1, step=1,
+                key="tnale_local_step_init",
+                help="Neighbourhood radius during interpolation phase.",
+            )
+            cfg.tnale_local_step_main = t4.number_input(
+                "Step Main", value=cfg.tnale_local_step_main, min_value=1, step=1,
+                key="tnale_local_step_main",
+                help="Neighbourhood radius during main phase.",
+            )
+            t5, t6 = st.columns(2)
+            cfg.tnale_interp_on = t5.checkbox(
+                "Interpolation", value=cfg.tnale_interp_on, key="tnale_interp_on",
+                help="Evaluate only 3 sample points per position and interpolate RSE for the rest.",
+            )
+            cfg.tnale_interp_iters = t6.number_input(
+                "Interp Iters", value=cfg.tnale_interp_iters, min_value=1, step=1,
+                key="tnale_interp_iters",
+                help="Round-trips to run in the interpolation (init) phase.",
+            )
+            t7, t8 = st.columns(2)
+            cfg.tnale_local_opt_iter = t7.number_input(
+                "Local Opt Iter", value=cfg.tnale_local_opt_iter, min_value=1, step=1,
+                key="tnale_local_opt_iter",
+                help="Forward-backward repetitions per round-trip.",
+            )
+            cfg.tnale_init_sparsity = t8.number_input(
+                "Init Sparsity", value=cfg.tnale_init_sparsity, min_value=0.0,
+                max_value=1.0, step=0.05, format="%.2f",
+                key="tnale_init_sparsity",
+                help="Probability of rank=1 (absent bond) in the initial random structure.",
+            )
+            cfg.tnale_phase_change_reset = st.checkbox(
+                "Phase Change Reset", value=cfg.tnale_phase_change_reset,
+                key="tnale_phase_change_reset",
+                help="Force-accept init-phase best as main-phase warm-start.",
+            )
+            if cfg.tnale_topology == "ring":
+                st.markdown("**TnALE · Permutation Search**")
+                p1, p2 = st.columns(2)
+                cfg.tnale_n_perm_samples = p1.number_input(
+                    "Perm Samples", value=cfg.tnale_n_perm_samples, min_value=0, step=1,
+                    key="tnale_n_perm_samples",
+                    help="Candidates per permutation step. 0 = exhaustive N*(N-1)/2 transpositions; "
+                         "N = sample N via Algorithm 1 (Li et al. 2022).",
+                )
+                cfg.tnale_perm_radius = p2.number_input(
+                    "Perm Radius", value=cfg.tnale_perm_radius, min_value=1, step=1,
+                    key="tnale_perm_radius",
+                    help="Transpositions per sample (Algorithm 1 radius d). radius=1 = single swap.",
+                )
+            has_other = (
+                "mabss-ucb" in cfg.policies_to_run or "mabss-exp4" in cfg.policies_to_run
+                or "mabss-exp3" in cfg.policies_to_run
+                or any(p.startswith("boss-") for p in cfg.policies_to_run)
+            )
+            if has_other:
+                st.markdown("---")
+
         has_ucb = "mabss-ucb" in cfg.policies_to_run or "mabss-exp4" in cfg.policies_to_run
 
         if has_ucb:
@@ -484,6 +599,25 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.boss_min_rse          = _get("boss_min_rse", 0.01)
     cfg.boss_ucb_beta         = _get("boss_ucb_beta", 2.0)
     cfg.boss_lamda            = _get("boss_lamda", 1.0)
+    cfg.tnale_decomp_epochs      = _get("tnale_decomp_epochs", 2000)
+    cfg.tnale_decomp_method      = _get("tnale_decomp_method", "adam")
+    cfg.tnale_decomp_init_lr     = _get("tnale_decomp_init_lr", None)
+    cfg.tnale_decomp_momentum    = _get("tnale_decomp_momentum", 0.9)
+    cfg.tnale_decomp_loss_patience = _get("tnale_decomp_loss_patience", 2500)
+    cfg.tnale_decomp_lr_patience   = _get("tnale_decomp_lr_patience", 250)
+    cfg.tnale_n_runs             = _get("tnale_n_runs", 2)
+    cfg.tnale_topology           = _get("tnale_topology", "ring")
+    cfg.tnale_local_step_init    = _get("tnale_local_step_init", 2)
+    cfg.tnale_local_step_main    = _get("tnale_local_step_main", 1)
+    cfg.tnale_interp_on          = _get("tnale_interp_on", True)
+    cfg.tnale_interp_iters       = _get("tnale_interp_iters", 2)
+    cfg.tnale_local_opt_iter     = _get("tnale_local_opt_iter", 1)
+    cfg.tnale_init_sparsity      = _get("tnale_init_sparsity", 0.6)
+    cfg.tnale_lambda_fitness     = _get("tnale_lambda_fitness", 5.0)
+    cfg.tnale_n_perm_samples     = _get("tnale_n_perm_samples", 10)
+    cfg.tnale_perm_radius        = _get("tnale_perm_radius", 1)
+    cfg.tnale_phase_change_reset = _get("tnale_phase_change_reset", True)
+    cfg.tnale_min_rse            = _get("tnale_min_rse", 1e-8)
     cfg.adj_spec              = _get("adj_spec", None)
     cfg.adj_r_min             = _get("adj_r_min", 2)
     cfg.adj_r_max             = _get("adj_r_max", 8)

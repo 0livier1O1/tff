@@ -92,6 +92,44 @@ def mabss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> li
     return cmd  # --adj-path injected by launch_run after saving per-seed .npy
 
 
+def tnale_cmd(cfg: SidebarConfig, seed: int, pol_dir: Path) -> list[str]:
+    """Build the CLI argument list for run_tnale_experiment.py."""
+    cmd = [
+        "conda", "run", "-n", "tensors",
+        "python", "scripts/experiments/run_tnale_experiment.py",
+        "--budget",          str(cfg.budget),
+        "--n-cores",         str(cfg.n_cores),
+        "--max-rank",        str(cfg.max_rank),
+        "--maxiter-tn",      str(cfg.tnale_decomp_epochs),
+        "--n-runs",          str(cfg.tnale_n_runs),
+        "--min-rse",         str(cfg.tnale_min_rse),
+        "--decomp-method",   cfg.tnale_decomp_method,
+        "--momentum",        str(cfg.tnale_decomp_momentum),
+        "--loss-patience",   str(cfg.tnale_decomp_loss_patience),
+        "--lr-patience",     str(cfg.tnale_decomp_lr_patience),
+        "--topology",        cfg.tnale_topology,
+        "--local-step-init", str(cfg.tnale_local_step_init),
+        "--local-step-main", str(cfg.tnale_local_step_main),
+        "--interp-iters",    str(cfg.tnale_interp_iters),
+        "--local-opt-iter",  str(cfg.tnale_local_opt_iter),
+        "--init-sparsity",   str(cfg.tnale_init_sparsity),
+        "--lambda-fitness",  str(cfg.tnale_lambda_fitness),
+        "--n-perm-samples",  str(cfg.tnale_n_perm_samples),
+        "--perm-radius",     str(cfg.tnale_perm_radius),
+        "--seed",            str(seed),
+        "--out-dir",         str(pol_dir),
+    ]
+    if cfg.tnale_decomp_init_lr is not None:
+        cmd.extend(["--init-lr", str(cfg.tnale_decomp_init_lr)])
+    if not cfg.tnale_interp_on:
+        cmd.append("--no-interp")
+    if not cfg.tnale_phase_change_reset:
+        cmd.append("--no-phase-change-reset")
+    if cfg.target_path:
+        cmd.extend(["--target-path", cfg.target_path])
+    return cmd
+
+
 def boss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> list[str]:
     """Build the CLI argument list for run_boss_experiment.py."""
     acqf = pol_name.split("-")[1]  # boss-ei → ei
@@ -190,6 +228,27 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         "boss_n_init": cfg.boss_n_init, "boss_max_bond": cfg.boss_max_bond,
         "boss_min_rse": cfg.boss_min_rse,
         "boss_ucb_beta": cfg.boss_ucb_beta, "boss_lamda": cfg.boss_lamda,
+        # TnALE — decomposition
+        "tnale_decomp_epochs": cfg.tnale_decomp_epochs,
+        "tnale_decomp_method": cfg.tnale_decomp_method,
+        "tnale_decomp_init_lr": cfg.tnale_decomp_init_lr,
+        "tnale_decomp_momentum": cfg.tnale_decomp_momentum,
+        "tnale_decomp_loss_patience": cfg.tnale_decomp_loss_patience,
+        "tnale_decomp_lr_patience": cfg.tnale_decomp_lr_patience,
+        "tnale_n_runs": cfg.tnale_n_runs,
+        # TnALE — advanced
+        "tnale_topology": cfg.tnale_topology,
+        "tnale_local_step_init": cfg.tnale_local_step_init,
+        "tnale_local_step_main": cfg.tnale_local_step_main,
+        "tnale_interp_on": cfg.tnale_interp_on,
+        "tnale_interp_iters": cfg.tnale_interp_iters,
+        "tnale_local_opt_iter": cfg.tnale_local_opt_iter,
+        "tnale_init_sparsity": cfg.tnale_init_sparsity,
+        "tnale_lambda_fitness": cfg.tnale_lambda_fitness,
+        "tnale_n_perm_samples": cfg.tnale_n_perm_samples,
+        "tnale_perm_radius": cfg.tnale_perm_radius,
+        "tnale_phase_change_reset": cfg.tnale_phase_change_reset,
+        "tnale_min_rse": cfg.tnale_min_rse,
     }
     with open(cfg_path, "w") as f:
         json.dump(config_dict, f, indent=4)
@@ -240,7 +299,12 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
             for stale in [pol_dir / "progress.json"]:
                 if stale.exists():
                     stale.unlink()
-            cmd = boss_cmd(cfg, seed, p, pol_dir) if p.startswith("boss-") else mabss_cmd(cfg, seed, p, pol_dir)
+            if p.startswith("boss-"):
+                cmd = boss_cmd(cfg, seed, p, pol_dir)
+            elif p == "tnale":
+                cmd = tnale_cmd(cfg, seed, pol_dir)
+            else:
+                cmd = mabss_cmd(cfg, seed, p, pol_dir)
             if adj_path_arg:
                 cmd.extend(["--adj-path", adj_path_arg])
             cmds.append(cmd)
