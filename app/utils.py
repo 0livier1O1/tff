@@ -62,7 +62,7 @@ def _load_artifact(out_dir: Path):
 
     Returns (mabss_df, boss_df, summaries_list, decomp_dict), with separate
     trace dataframes because MABSS and BOSS optimize/report different metrics.
-    decomp_dict is keyed by (seed, pol_name) -> list of {step, arm, losses} dicts.
+    decomp_dict is keyed by (seed, algo_name) -> list of {step, arm, losses} dicts.
     """
     mabss_traces, boss_traces, summaries, decomp_dict, pol_diagnostics_dict = [], [], [], {}, {}
     for seed_d in sorted(out_dir.iterdir()):
@@ -71,7 +71,7 @@ def _load_artifact(out_dir: Path):
         seed_val = int(seed_d.name.split("_")[1])
 
         for pol_d in sorted(d for d in seed_d.iterdir() if d.is_dir()):
-            pol_name = pol_d.name.replace("_", "-")  # boss_ei -> boss-ei
+            algo_name = pol_d.name.replace("_", "-")  # boss_ei -> boss-ei
 
             t_path = pol_d / "traces.csv"
             if not t_path.exists():
@@ -80,11 +80,14 @@ def _load_artifact(out_dir: Path):
 
             if t_path and t_path.exists():
                 df_p = pd.read_csv(t_path)
-                df_p["Policy"] = pol_name
+                # Normalize legacy "Policy" column to "Algo"
+                if "Policy" in df_p.columns and "Algo" not in df_p.columns:
+                    df_p.rename(columns={"Policy": "Algo"}, inplace=True)
+                df_p["Algo"] = algo_name
                 df_p["Seed"] = seed_val
-                if pol_name.startswith("boss-"):
+                if algo_name.startswith("boss-"):
                     boss_traces.append(df_p)
-                elif pol_name.startswith("mabss-"):
+                elif algo_name.startswith("mabss-"):
                     mabss_traces.append(df_p)
 
             s_path = pol_d / "summary.json"
@@ -96,18 +99,18 @@ def _load_artifact(out_dir: Path):
                 with open(s_path) as f:
                     for s in json.load(f):
                         s["Seed"] = seed_val
-                        s["policy"] = pol_name
+                        s["algo"] = algo_name
                         summaries.append(s)
 
             d_path = pol_d / "decomp_traces.json"
             if d_path.exists():
                 with open(d_path) as f:
-                    decomp_dict[(seed_val, pol_name)] = json.load(f)
+                    decomp_dict[(seed_val, algo_name)] = json.load(f)
 
             pd_path = pol_d / "policy_diagnostics.json"
             if pd_path.exists():
                 with open(pd_path) as f:
-                    pol_diagnostics_dict[(seed_val, pol_name)] = json.load(f)
+                    pol_diagnostics_dict[(seed_val, algo_name)] = json.load(f)
 
     if not mabss_traces and not boss_traces:
         return None, None, [], {}, {}
@@ -128,7 +131,7 @@ def _artifact_fully_done(out_dir: Path) -> bool:
         with open(cfg_file) as f:
             cfg = json.load(f)
         seeds = cfg.get("seeds", [cfg.get("seed", 1)])
-        policies = cfg.get("policies", [])
+        policies = cfg.get("algos", cfg.get("policies", []))
         if not seeds or not policies:
             return False
         for sd in seeds:
@@ -204,12 +207,12 @@ def _job_status(job: dict, script_alive: bool = True) -> tuple:
       Pending     — nothing written yet, script still alive
       Cancelled   — nothing written yet, script is dead
     """
-    pol_dir = Path(job["pol_dir"])
-    if (pol_dir / ".done").exists():
+    algo_dir = Path(job.get("algo_dir", job.get("pol_dir", "")))
+    if (algo_dir / ".done").exists():
         return "Done", ""
-    if (pol_dir / "progress.json").exists():
+    if (algo_dir / "progress.json").exists():
         try:
-            with open(pol_dir / "progress.json") as f:
+            with open(algo_dir / "progress.json") as f:
                 pg = json.load(f)
             if pg.get("status") in ("failed", "interrupted"):
                 return pg.get("status", "Failed").capitalize(), ""

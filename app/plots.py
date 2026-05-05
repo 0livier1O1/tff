@@ -5,7 +5,7 @@ returns a plotly.graph_objects.Figure.
 
 Expected columns: step, par_loss, step_loss, current_cr, selected_arm,
   oracle_best_arm, oracle_arm_rank, oracle_best_loss, regret, cum_regret,
-  arm_match, pick_time_s, decomp_time_s, gp_fit_time_s, oracle_time_s, step_time_s, Policy, Seed.
+  arm_match, pick_time_s, decomp_time_s, gp_fit_time_s, oracle_time_s, step_time_s, Algo, Seed.
 """
 
 import pandas as pd
@@ -45,8 +45,8 @@ def _rgba(hex_color: str, alpha: float) -> str:
 def _mean_std_over_seeds(df_rows, y_col, x_col="step"):
     """Return per-policy (x, mean, lower, upper) aggregated over seeds."""
     result = {}
-    for policy in sorted(df_rows["Policy"].unique()):
-        pol = df_rows[df_rows["Policy"] == policy].copy().sort_values(["Seed", "step"])
+    for policy in sorted(df_rows["Algo"].unique()):
+        pol = df_rows[df_rows["Algo"] == policy].copy().sort_values(["Seed", "step"])
         if x_col == "cum_time_s":
             pol["cum_time_s"] = pol.groupby("Seed")["step_time_s"].cumsum()
         gb = pol.groupby("step")
@@ -71,7 +71,7 @@ def _interpolate_on_time_grid(
     so we hold the last observation until the next step fires.
     Grid runs 0 → earliest seed finish to avoid extrapolation.
     """
-    pol = df_rows[df_rows["Policy"] == policy].copy().sort_values(["Seed", "step"])
+    pol = df_rows[df_rows["Algo"] == policy].copy().sort_values(["Seed", "step"])
     pol["cum_time_s"] = pol.groupby("Seed")["step_time_s"].cumsum()
     seeds = pol["Seed"].unique()
     t_max = min(pol[pol["Seed"] == s]["cum_time_s"].max() for s in seeds)
@@ -106,10 +106,10 @@ def plot_boss_objective(df_boss: pd.DataFrame, n_points: int = 300) -> go.Figure
         ),
     )
 
-    for policy in sorted(df_boss["Policy"].unique()):
+    for policy in sorted(df_boss["Algo"].unique()):
         color = get_policy_color(policy)
         rgb = _rgba(color, 0.2)
-        pol = df_boss[df_boss["Policy"] == policy].copy().sort_values(["Seed", "step"])
+        pol = df_boss[df_boss["Algo"] == policy].copy().sort_values(["Seed", "step"])
         pol["cum_min_obj"] = pol.groupby("Seed")["objective"].cummin()
         pol["cum_time_s"] = pol.groupby("Seed")["step_time_s"].cumsum()
 
@@ -192,10 +192,10 @@ def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
         vertical_spacing=0.18,
     )
 
-    for policy in df_rows["Policy"].unique():
+    for policy in df_rows["Algo"].unique():
         color = get_policy_color(policy)
         rgb = _rgba(color, 0.2)
-        sub = df_rows[df_rows["Policy"] == policy]
+        sub = df_rows[df_rows["Algo"] == policy]
         gb = sub.groupby("step")
         steps = list(gb.groups.keys())
 
@@ -320,7 +320,7 @@ def plot_loss_and_regret(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
     return fig
 
 
-def plot_arm_trace(sub: pd.DataFrame, pol_name: str, color: str) -> go.Figure:
+def plot_arm_trace(sub: pd.DataFrame, algo_name: str, color: str) -> go.Figure:
     """
     Single-policy arm selection trace for one seed: chosen arm vs oracle best
     arm vs oracle arm rank−1. Matches the per-seed trace vector in the dashboard.
@@ -367,7 +367,7 @@ def plot_arm_trace(sub: pd.DataFrame, pol_name: str, color: str) -> go.Figure:
     )
     fig.update_layout(
         title=dict(
-            text=f"{pol_name.upper()} — hit rate={hit_rate:.2f}, unique arms={unique_arms}",
+            text=f"{algo_name.upper()} — hit rate={hit_rate:.2f}, unique arms={unique_arms}",
             font=dict(size=12),
         ),
         height=300,
@@ -391,9 +391,9 @@ def plot_loss_vs_runtime_seed(seed_df: pd.DataFrame) -> go.Figure:
     overlaid on one figure. seed_df must already be filtered to one seed.
     """
     fig = go.Figure()
-    for policy in sorted(seed_df["Policy"].unique()):
+    for policy in sorted(seed_df["Algo"].unique()):
         c = get_policy_color(policy)
-        pol = seed_df[seed_df["Policy"] == policy].sort_values("step").copy()
+        pol = seed_df[seed_df["Algo"] == policy].sort_values("step").copy()
         pol["cum_time_s"] = pol["step_time_s"].cumsum()
         fig.add_trace(
             go.Scatter(
@@ -423,7 +423,7 @@ def plot_loss_vs_runtime(df_rows: pd.DataFrame, n_points: int = 300) -> go.Figur
     using zero-order hold interpolation onto a shared time grid.
     """
     fig = go.Figure()
-    for policy in sorted(df_rows["Policy"].unique()):
+    for policy in sorted(df_rows["Algo"].unique()):
         x, mean, lo, hi = _interpolate_on_time_grid(
             df_rows, policy, "step_loss", n_points
         )
@@ -478,9 +478,9 @@ def plot_loss_vs_runtime_per_seed(df_rows: pd.DataFrame) -> go.Figure:
     Policy color is shared; seeds are distinguished by decreasing opacity.
     """
     fig = go.Figure()
-    for policy in sorted(df_rows["Policy"].unique()):
+    for policy in sorted(df_rows["Algo"].unique()):
         c = get_policy_color(policy)
-        pol = df_rows[df_rows["Policy"] == policy].copy().sort_values(["Seed", "step"])
+        pol = df_rows[df_rows["Algo"] == policy].copy().sort_values(["Seed", "step"])
         pol["cum_time_s"] = pol.groupby("Seed")["step_time_s"].cumsum()
         seeds = sorted(pol["Seed"].unique())
         n_seeds = len(seeds)
@@ -564,7 +564,7 @@ def plot_cr_vs_step(df_rows: pd.DataFrame) -> go.Figure:
 
 def plot_step_time_breakdown(df_rows: pd.DataFrame) -> go.Figure:
     """Stacked bar of per-step time components (decomp, pick, oracle), one panel per policy."""
-    policies = sorted(df_rows["Policy"].unique())
+    policies = sorted(df_rows["Algo"].unique())
     fig = make_subplots(
         rows=1,
         cols=len(policies),
@@ -580,7 +580,7 @@ def plot_step_time_breakdown(df_rows: pd.DataFrame) -> go.Figure:
     legend_shown = {label: False for _, label, _ in components}
     for col_i, policy in enumerate(policies, 1):
         is_greedy = policy.lower().replace("mabss-", "") == "greedy"
-        pol_df = df_rows[df_rows["Policy"] == policy].sort_values(["Seed", "step"])
+        pol_df = df_rows[df_rows["Algo"] == policy].sort_values(["Seed", "step"])
         gb = pol_df.groupby("step")
         steps = gb["step"].first().values
         for col_key, label, color in components:
@@ -620,10 +620,10 @@ def plot_step_time_breakdown(df_rows: pd.DataFrame) -> go.Figure:
 def plot_loss_cr_tradeoff(df_rows: pd.DataFrame) -> go.Figure:
     """Final loss vs. final CR scatter per seed, coloured by policy."""
     fig = go.Figure()
-    for policy in sorted(df_rows["Policy"].unique()):
+    for policy in sorted(df_rows["Algo"].unique()):
         c = get_policy_color(policy)
         last = (
-            df_rows[df_rows["Policy"] == policy]
+            df_rows[df_rows["Algo"] == policy]
             .sort_values("step")
             .groupby("Seed")
             .last()
@@ -657,7 +657,7 @@ def plot_loss_cr_tradeoff(df_rows: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def plot_decomp_curves(decomp_data: list[dict], pol_name: str, color: str) -> go.Figure:
+def plot_decomp_curves(decomp_data: list[dict], algo_name: str, color: str) -> go.Figure:
     """Concatenated decomposition loss across all search steps.
 
     Single continuous curve over global epoch index; vertical dashed lines mark
@@ -708,7 +708,7 @@ def plot_decomp_curves(decomp_data: list[dict], pol_name: str, color: str) -> go
         ))
 
     fig.update_layout(
-        title=dict(text=f"{pol_name.upper()} — decomposition convergence", font=dict(size=12)),
+        title=dict(text=f"{algo_name.upper()} — decomposition convergence", font=dict(size=12)),
         xaxis_title="Global epoch",
         yaxis_title="RSE",
         yaxis_type="log",
@@ -737,17 +737,17 @@ def plot_time_to_threshold(
     y_label = "Efficiency (CR / target CR)" if use_efficiency else "Compression Ratio (CR)"
 
     # Cumulative runtime per (Policy, Seed) in step order
-    df = df_rows.sort_values(["Policy", "Seed", "step"]).copy()
-    df["cum_time"] = df.groupby(["Policy", "Seed"])["step_time_s"].cumsum()
+    df = df_rows.sort_values(["Algo", "Seed", "step"]).copy()
+    df["cum_time"] = df.groupby(["Algo", "Seed"])["step_time_s"].cumsum()
 
-    keep_cols = ["Policy", "Seed", "step", "step_loss", "current_cr", "cum_time"]
+    keep_cols = ["Algo", "Seed", "step", "step_loss", "current_cr", "cum_time"]
     if use_efficiency:
         keep_cols.append("efficiency")
 
     # First row per (Policy, Seed) where loss hits threshold
     hits = (
         df[df["step_loss"] <= threshold]
-        .groupby(["Policy", "Seed"], sort=False)
+        .groupby(["Algo", "Seed"], sort=False)
         .first()
         .reset_index()[keep_cols]
     )
@@ -758,7 +758,7 @@ def plot_time_to_threshold(
             template="plotly_white", height=420,
         )
 
-    policies = sorted(hits["Policy"].unique())
+    policies = sorted(hits["Algo"].unique())
 
     hits["label"] = hits.apply(
         lambda r: (
@@ -773,7 +773,7 @@ def plot_time_to_threshold(
     fig = go.Figure()
 
     for policy in policies:
-        p = hits[hits["Policy"] == policy]
+        p = hits[hits["Algo"] == policy]
         sizes = 9 + (p["step_loss"] / threshold) * 10
         fig.add_trace(go.Scatter(
             x=p["cum_time"], y=p[y_col],
@@ -833,8 +833,8 @@ def plot_pareto_at_step(
 
     fig = go.Figure()
 
-    for policy in sorted(at_step["Policy"].unique()):
-        p = at_step[at_step["Policy"] == policy].sort_values("step_loss")
+    for policy in sorted(at_step["Algo"].unique()):
+        p = at_step[at_step["Algo"] == policy].sort_values("step_loss")
         color = get_policy_color(policy)
         labels = p.apply(
             lambda r: (

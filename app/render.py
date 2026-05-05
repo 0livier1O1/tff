@@ -67,9 +67,9 @@ def render_job_status_panel(ROOT: Path) -> None:
             if status != "Done":
                 all_done = False
 
-            pol_dir = Path(job["pol_dir"])
-            pf = pol_dir / "progress.json"
-            done_f = pol_dir / ".done"
+            algo_dir = Path(job.get("algo_dir", job.get("pol_dir", "")))
+            pf = algo_dir / "progress.json"
+            done_f = algo_dir / ".done"
 
             started_at = None
             if pf.exists():
@@ -81,7 +81,7 @@ def render_job_status_panel(ROOT: Path) -> None:
 
             rows.append({
                 "Seed":      job["seed"],
-                "Policy":    job["policy"],
+                "Algo":    job["algo"],
                 "Status":    status,
                 "Step":      step,
                 "N":         cfg_data.get("n_cores", "-"),
@@ -339,7 +339,7 @@ def render_results(
                 continue
 
             seed_summaries = [s for s in summaries if s.get("Seed") == seed]
-            pol_names = [s["policy"] for s in seed_summaries]
+            algo_names = [s["algo"] for s in seed_summaries]
             s_dir = out_dir / f"seed_{seed}" if (out_dir / f"seed_{seed}").exists() else out_dir
 
             # Summary table
@@ -352,7 +352,7 @@ def render_results(
 
             # Topology images
             st.markdown("#### Visualizing Tensor and Topology")
-            _render_topology(s_dir, pol_names)
+            _render_topology(s_dir, algo_names)
 
             st.divider()
 
@@ -373,28 +373,28 @@ def render_results(
             # Trace vectors
             st.markdown("#### Mathematical Trace Vectors")
             for s in seed_summaries:
-                pol_name = s["policy"]
-                c = get_policy_color(pol_name)
-                sub = seed_df[seed_df["Policy"] == pol_name]
+                algo_name = s["algo"]
+                c = get_policy_color(algo_name)
+                sub = seed_df[seed_df["Algo"] == algo_name]
                 if sub.empty:
                     continue
-                _decomp_data = decomp_dict.get((seed, pol_name), [])
+                _decomp_data = decomp_dict.get((seed, algo_name), [])
                 if _decomp_data:
                     _col_arm, _col_decomp = st.columns(2)
                     with _col_arm:
                         st.plotly_chart(
-                            plot_arm_trace(sub, pol_name, c),
-                            use_container_width=True, key=f"arm_trace_{seed}_{pol_name}",
+                            plot_arm_trace(sub, algo_name, c),
+                            use_container_width=True, key=f"arm_trace_{seed}_{algo_name}",
                         )
                     with _col_decomp:
                         st.plotly_chart(
-                            plot_decomp_curves(_decomp_data, pol_name, c),
-                            use_container_width=True, key=f"decomp_curves_{seed}_{pol_name}",
+                            plot_decomp_curves(_decomp_data, algo_name, c),
+                            use_container_width=True, key=f"decomp_curves_{seed}_{algo_name}",
                         )
                 else:
                     st.plotly_chart(
-                        plot_arm_trace(sub, pol_name, c),
-                        use_container_width=True, key=f"arm_trace_{seed}_{pol_name}",
+                        plot_arm_trace(sub, algo_name, c),
+                        use_container_width=True, key=f"arm_trace_{seed}_{algo_name}",
                     )
 
     st.divider()
@@ -428,7 +428,7 @@ def _render_summary_table(seed_df, seed_summaries, s_dir, get_policy_color, _cr_
     _summary_rows = []
     for s in seed_summaries:
         _summary_rows.append({
-            "policy": s.get("policy"),
+            "algo": s.get("algo"),
             "final_step_loss": s.get("final_step_loss", s.get("final_loss_after_move")),
             "final_cr": s.get("final_cr"),
             "cumulative_regret": s.get("cumulative_regret"),
@@ -439,21 +439,21 @@ def _render_summary_table(seed_df, seed_summaries, s_dir, get_policy_color, _cr_
             "budget": s.get("budget"),
         })
     _sum_keys = [
-        "policy", "final_step_loss", "final_cr", "cumulative_regret",
+        "algo", "final_step_loss", "final_cr", "cumulative_regret",
         "oracle_hit_rate", "unique_arms", "arm_entropy_norm", "steps", "budget",
     ]
     _sum_labels = [
-        "Policy", "Final Loss", "Final CR", "Cum. Regret",
+        "Algo", "Final Loss", "Final CR", "Cum. Regret",
         "Oracle Hit Rate", "Unique Arms", "Arm Entropy", "Steps", "Budget",
     ]
     df_sum = pd.DataFrame([{k: s.get(k) for k in _sum_keys} for s in _summary_rows])
     df_sum.columns = _sum_labels
 
     _total_time = (
-        seed_df.groupby("Policy")["step_time_s"].sum().round(1)
+        seed_df.groupby("Algo")["step_time_s"].sum().round(1)
         if "step_time_s" in seed_df.columns else pd.Series(dtype=float)
     )
-    df_sum["Total Time (s)"] = df_sum["Policy"].map(_total_time)
+    df_sum["Total Time (s)"] = df_sum["Algo"].map(_total_time)
 
     _target_npz = s_dir / "target_tensor.npz"
     if _target_npz.exists():
@@ -461,8 +461,8 @@ def _render_summary_table(seed_df, seed_summaries, s_dir, get_policy_color, _cr_
         df_sum["Shape"] = "×".join(str(d) for d in _shape)
 
     if "efficiency" in seed_df.columns:
-        _last_eff = seed_df.groupby("Policy")["efficiency"].last()
-        df_sum["Efficiency"] = df_sum["Policy"].map(_last_eff).round(3)
+        _last_eff = seed_df.groupby("Algo")["efficiency"].last()
+        df_sum["Efficiency"] = df_sum["Algo"].map(_last_eff).round(3)
 
     df_sum["Final Loss"] = df_sum["Final Loss"].round(4)
     df_sum["Final CR"] = df_sum["Final CR"].round(3)
@@ -471,7 +471,7 @@ def _render_summary_table(seed_df, seed_summaries, s_dir, get_policy_color, _cr_
     df_sum["Arm Entropy"] = df_sum["Arm Entropy"].round(3)
 
     def _style_row(row):
-        c = get_policy_color(row["Policy"])
+        c = get_policy_color(row["Algo"])
         styles = [f"background-color: {c}15"] * len(row)
         styles[0] = f"background-color: {c}; color: white; font-weight: bold; padding-left: 10px;"
         return styles
@@ -515,61 +515,61 @@ def _render_generating_rse(s_dir: Path, seed: int) -> None:
     st.plotly_chart(fig, use_container_width=True, key=f"gen_rse_{seed}")
 
 
-def _render_topology(s_dir: Path, pol_names: list[str]) -> None:
-    target_img_path = _find_file(s_dir, pol_names, "target_image.png")
-    target_graph_path = _find_file(s_dir, pol_names, "target_graph.png")
+def _render_topology(s_dir: Path, algo_names: list[str]) -> None:
+    target_img_path = _find_file(s_dir, algo_names, "target_image.png")
+    target_graph_path = _find_file(s_dir, algo_names, "target_graph.png")
 
     has_img = target_img_path is not None
     has_graph = target_graph_path is not None
 
-    if has_img and pol_names:
-        n_cols = len(pol_names) + 1
+    if has_img and algo_names:
+        n_cols = len(algo_names) + 1
         row1 = st.columns(n_cols)
         with row1[0]:
             st.image(str(target_img_path), caption="Target", use_container_width=True)
-        for i, pol_name in enumerate(pol_names):
-            p_subdir = _pol_subdir(s_dir, pol_name)
+        for i, algo_name in enumerate(algo_names):
+            p_subdir = _algo_subdir(s_dir, algo_name)
             p_img = p_subdir / "reconstruction.png"
             if not p_img.exists():
-                p_img = s_dir / f"reconstruction_{pol_name.replace('-', '_')}.png"
+                p_img = s_dir / f"reconstruction_{algo_name.replace('-', '_')}.png"
             with row1[i + 1]:
                 if p_img.exists():
-                    st.image(str(p_img), caption=pol_name.upper(), use_container_width=True)
+                    st.image(str(p_img), caption=algo_name.upper(), use_container_width=True)
                 else:
-                    st.info(f"No {pol_name} recon")
+                    st.info(f"No {algo_name} recon")
 
         st.markdown("<br>", unsafe_allow_html=True)
         row2 = st.columns(n_cols)
-        for i, pol_name in enumerate(pol_names):
-            p_sub = _pol_subdir(s_dir, pol_name)
-            p_graph = _pol_graph(p_sub, pol_name)
+        for i, algo_name in enumerate(algo_names):
+            p_sub = _algo_subdir(s_dir, algo_name)
+            p_graph = _algo_graph(p_sub, algo_name)
             with row2[i + 1]:
                 if p_graph:
-                    st.image(str(p_graph), caption=pol_name.upper(), use_container_width=True)
+                    st.image(str(p_graph), caption=algo_name.upper(), use_container_width=True)
     else:
         if has_graph:
             _, t_c2, _ = st.columns([1, 2, 1])
             with t_c2:
                 st.image(str(target_graph_path), caption="Target Ground Truth Structure", use_container_width=True)
-        if pol_names:
+        if algo_names:
             st.markdown("<br>", unsafe_allow_html=True)
-            p_cols = st.columns(len(pol_names))
-            for i, pol_name in enumerate(pol_names):
-                p_sub = _pol_subdir(s_dir, pol_name)
-                p_graph = _pol_graph(p_sub, pol_name, fallback=s_dir)
+            p_cols = st.columns(len(algo_names))
+            for i, algo_name in enumerate(algo_names):
+                p_sub = _algo_subdir(s_dir, algo_name)
+                p_graph = _algo_graph(p_sub, algo_name, fallback=s_dir)
                 with p_cols[i]:
                     if p_graph:
-                        st.image(str(p_graph), caption=f"Found: {pol_name.upper()}", use_container_width=True)
+                        st.image(str(p_graph), caption=f"Found: {algo_name.upper()}", use_container_width=True)
                     else:
-                        st.info(f"No {pol_name} structure")
+                        st.info(f"No {algo_name} structure")
 
 
-def _find_file(s_dir: Path, pol_names: list[str], filename: str) -> Path | None:
+def _find_file(s_dir: Path, algo_names: list[str], filename: str) -> Path | None:
     """Look for filename in s_dir first, then in policy subdirs."""
     direct = s_dir / filename
     if direct.exists():
         return direct
-    for p_name in pol_names:
+    for p_name in algo_names:
         p_base = p_name.replace("-", "_")
         for pfx in ["", "mabss_", "boss_"]:
             cand = s_dir / f"{pfx}{p_base}" / filename
@@ -578,8 +578,8 @@ def _find_file(s_dir: Path, pol_names: list[str], filename: str) -> Path | None:
     return None
 
 
-def _pol_subdir(s_dir: Path, pol_name: str) -> Path:
-    p_base = pol_name.replace("-", "_")
+def _algo_subdir(s_dir: Path, algo_name: str) -> Path:
+    p_base = algo_name.replace("-", "_")
     p_sub = s_dir / p_base
     if not p_sub.exists():
         for pfx in ["mabss_", "boss_"]:
@@ -589,11 +589,11 @@ def _pol_subdir(s_dir: Path, pol_name: str) -> Path:
     return p_sub
 
 
-def _pol_graph(p_sub: Path, pol_name: str, fallback: Path | None = None) -> Path | None:
-    p_base = pol_name.replace("-", "_")
-    short_p = pol_name.split("-")[-1]
+def _algo_graph(p_sub: Path, algo_name: str, fallback: Path | None = None) -> Path | None:
+    p_base = algo_name.replace("-", "_")
+    short_p = algo_name.split("-")[-1]
     candidates = [
-        p_sub / f"tn_graph_{pol_name}.png",
+        p_sub / f"tn_graph_{algo_name}.png",
         p_sub / f"tn_graph_{short_p}.png",
         p_sub / f"tn_graph_{p_base}.png",
     ]

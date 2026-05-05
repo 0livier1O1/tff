@@ -189,7 +189,7 @@ def main():
     # Persist traces
     df = pd.DataFrame(rows)
     df["efficiency"] = df["cr"] / target_cr if target_cr else float("nan")
-    df["Policy"] = f"boss-{args.acqf}"
+    df["Algo"] = f"boss-{args.acqf}"
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
 

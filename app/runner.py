@@ -43,17 +43,17 @@ def parse_seeds(seeds_str: str) -> list[int]:
 # CLI command builders
 # ---------------------------------------------------------------------------
 
-def mabss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> list[str]:
+def mabss_cmd(cfg: SidebarConfig, seed: int, algo_name: str, algo_dir: Path) -> list[str]:
     """Build the CLI argument list for run_mabss_experiment.py."""
-    mabss_pol = pol_name.replace("mabss-", "")
+    mabss_algo = algo_name.replace("mabss-", "")
     cmd = [
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_mabss_experiment.py",
-        "--budget",              str(cfg.budget),
+        "--budget",              str(cfg.mabss_budget),
         "--warm-start-epochs",    str(cfg.mabss_decomp_epochs),
         "--n-cores",             str(cfg.n_cores),
         "--max-rank",            str(cfg.max_rank),
-        "--max-edge-rank",       str(cfg.max_edge_rank),
+        "--max-edge-rank",       str(cfg.mabss_max_rank),
         "--beta",                str(cfg.beta),
         "--kernel-name",         cfg.kernel_name,
         "--fixed-noise",         str(cfg.fixed_noise),
@@ -75,8 +75,8 @@ def mabss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> li
         "--loss-patience",       str(cfg.mabss_decomp_loss_patience),
         "--lr-patience",         str(cfg.mabss_decomp_lr_patience),
         "--seed",                str(seed),
-        "--policies",            mabss_pol,
-        "--out-dir",             str(pol_dir),
+        "--policies",            mabss_algo,
+        "--out-dir",             str(algo_dir),
     ]
     if cfg.mabss_decomp_init_lr is not None:
         cmd.extend(["--init-lr", str(cfg.mabss_decomp_init_lr)])
@@ -92,14 +92,18 @@ def mabss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> li
     return cmd  # --adj-path injected by launch_run after saving per-seed .npy
 
 
-def tnale_cmd(cfg: SidebarConfig, seed: int, pol_dir: Path) -> list[str]:
+
+
+
+def tnale_cmd(cfg: SidebarConfig, seed: int, algo_dir: Path) -> list[str]:
     """Build the CLI argument list for run_tnale_experiment.py."""
     cmd = [
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_tnale_experiment.py",
-        "--budget",          str(cfg.budget),
+        "--budget",          str(cfg.tnale_budget),
         "--n-cores",         str(cfg.n_cores),
         "--max-rank",        str(cfg.max_rank),
+        "--max-search-rank", str(cfg.tnale_max_rank),
         "--maxiter-tn",      str(cfg.tnale_decomp_epochs),
         "--n-runs",          str(cfg.tnale_n_runs),
         "--min-rse",         str(cfg.tnale_min_rse),
@@ -117,7 +121,7 @@ def tnale_cmd(cfg: SidebarConfig, seed: int, pol_dir: Path) -> list[str]:
         "--n-perm-samples",  str(cfg.tnale_n_perm_samples),
         "--perm-radius",     str(cfg.tnale_perm_radius),
         "--seed",            str(seed),
-        "--out-dir",         str(pol_dir),
+        "--out-dir",         str(algo_dir),
     ]
     if cfg.tnale_decomp_init_lr is not None:
         cmd.extend(["--init-lr", str(cfg.tnale_decomp_init_lr)])
@@ -130,16 +134,16 @@ def tnale_cmd(cfg: SidebarConfig, seed: int, pol_dir: Path) -> list[str]:
     return cmd
 
 
-def boss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> list[str]:
+def boss_cmd(cfg: SidebarConfig, seed: int, algo_name: str, algo_dir: Path) -> list[str]:
     """Build the CLI argument list for run_boss_experiment.py."""
-    acqf = pol_name.split("-")[1]  # boss-ei → ei
+    acqf = algo_name.split("-")[1]  # boss-ei → ei
     cmd = [
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_boss_experiment.py",
         "--n-cores",     str(cfg.n_cores),
         "--max-rank",    str(cfg.max_rank),
         "--seed",        str(seed),
-        "--budget",      str(cfg.budget),
+        "--budget",      str(cfg.boss_budget),
         "--n-init",      str(cfg.boss_n_init),
         "--max-bond",    str(cfg.boss_max_bond),
         "--min-rse",     str(cfg.boss_min_rse),
@@ -151,7 +155,7 @@ def boss_cmd(cfg: SidebarConfig, seed: int, pol_name: str, pol_dir: Path) -> lis
         "--momentum",    str(cfg.boss_decomp_momentum),
         "--loss-patience", str(cfg.boss_decomp_loss_patience),
         "--lr-patience",   str(cfg.boss_decomp_lr_patience),
-        "--out-dir",     str(pol_dir),
+        "--out-dir",     str(algo_dir),
     ]
     if cfg.boss_decomp_init_lr is not None:
         cmd.extend(["--init-lr", str(cfg.boss_decomp_init_lr)])
@@ -168,8 +172,12 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
     """Validate config, build all commands, write run.sh, launch it, update session state."""
     from scripts.utils import make_problem, save_tensor, save_image
 
-    if not cfg.policies_to_run:
-        st.sidebar.error("Select at least one policy.")
+    if not cfg.run_name or not cfg.run_name.strip():
+        st.sidebar.error("Run Name is required.")
+        st.stop()
+
+    if not cfg.algos_to_run:
+        st.sidebar.error("Select at least one algorithm.")
         st.stop()
 
     for _er in st.session_state.get("active_runs", []):
@@ -201,8 +209,10 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         "adj_spec": cfg.adj_spec, "adj_r_min": cfg.adj_r_min, "adj_r_max": cfg.adj_r_max,
         "topology": cfg.topology, "fix_adj": cfg.fix_adj,
         # Algorithm
-        "budget": cfg.budget, "max_edge_rank": cfg.max_edge_rank,
-        "seeds": all_seeds, "policies": cfg.policies_to_run,
+        "seeds": all_seeds, "algos": cfg.algos_to_run,
+        "mabss_budget": cfg.mabss_budget, "mabss_max_rank": cfg.mabss_max_rank,
+        "boss_budget": cfg.boss_budget,
+        "tnale_budget": cfg.tnale_budget, "tnale_max_rank": cfg.tnale_max_rank,
         # Decomposition
         "mabss_decomp_epochs": cfg.mabss_decomp_epochs,
         "boss_decomp_epochs": cfg.boss_decomp_epochs,
@@ -218,7 +228,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         "boss_decomp_lr_patience": cfg.boss_decomp_lr_patience,
         "mabss_warm_start_method": cfg.mabss_warm_start_method,
         "mabss_warm_start_epochs": cfg.mabss_warm_start_epochs,
-        # Advanced policy
+        # Advanced
         "beta": cfg.beta, "kernel_name": cfg.kernel_name,
         "learn_noise": cfg.learn_noise, "fixed_noise": cfg.fixed_noise,
         "exp3_gamma": cfg.exp3_gamma, "exp3_decay": cfg.exp3_decay,
@@ -290,25 +300,25 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
             save_image(seed_dir / "target_image.png", target)
         # Lightfield: no per-seed image saved (use preview from problem.py)
 
-        for p in cfg.policies_to_run:
-            pol_dir = seed_dir / p.replace("-", "_")
-            pol_dir.mkdir(exist_ok=True)
+        for p in cfg.algos_to_run:
+            algo_dir = seed_dir / p.replace("-", "_")
+            algo_dir.mkdir(exist_ok=True)
             # Skip combos that already finished successfully
-            if (pol_dir / ".done").exists():
+            if (algo_dir / ".done").exists():
                 continue
-            for stale in [pol_dir / "progress.json"]:
+            for stale in [algo_dir / "progress.json"]:
                 if stale.exists():
                     stale.unlink()
             if p.startswith("boss-"):
-                cmd = boss_cmd(cfg, seed, p, pol_dir)
+                cmd = boss_cmd(cfg, seed, p, algo_dir)
             elif p == "tnale":
-                cmd = tnale_cmd(cfg, seed, pol_dir)
+                cmd = tnale_cmd(cfg, seed, algo_dir)
             else:
-                cmd = mabss_cmd(cfg, seed, p, pol_dir)
+                cmd = mabss_cmd(cfg, seed, p, algo_dir)
             if adj_path_arg:
                 cmd.extend(["--adj-path", adj_path_arg])
             cmds.append(cmd)
-            jobs.append({"seed": seed, "policy": p, "pol_dir": str(pol_dir)})
+            jobs.append({"seed": seed, "algo": p, "algo_dir": str(algo_dir)})
 
     # Persist the concrete per-seed adjacency matrices so config.json fully identifies the problem
     if resolved_adj:
@@ -317,7 +327,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
             json.dump(config_dict, f, indent=4)
 
     if not cmds:
-        st.sidebar.warning("All requested seed/policy combinations are already complete. Nothing to run.")
+        st.sidebar.warning("All requested seed/algo combinations are already complete. Nothing to run.")
         st.stop()
 
     script = out_dir / "run.sh"

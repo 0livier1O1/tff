@@ -51,6 +51,8 @@ def main() -> None:
     # Problem
     parser.add_argument("--n-cores", type=int, default=6)
     parser.add_argument("--max-rank", type=int, default=5)
+    parser.add_argument("--max-search-rank", type=int, default=None,
+                        help="Search space max bond rank. Defaults to --max-rank if not set.")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--budget", type=int, default=200)
     # Decomposition
@@ -113,10 +115,12 @@ def main() -> None:
 
     n_perm_samples = None if args.n_perm_samples == 0 else args.n_perm_samples
 
+    max_rank_search = args.max_search_rank if args.max_search_rank is not None else args.max_rank
+
     algo = TnALE(
         target=target_np,
         phys_dims=phys_dims,
-        max_rank=args.max_rank,
+        max_rank=max_rank_search,
         budget=args.budget,
         topology=args.topology,
         n_perm_samples=n_perm_samples,
@@ -158,7 +162,7 @@ def main() -> None:
         )
 
     df = pd.DataFrame(rows)
-    df["Policy"] = "tnale"
+    df["Algo"] = "tnale"
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
 

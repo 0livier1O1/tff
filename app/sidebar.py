@@ -56,9 +56,12 @@ class SidebarConfig:
     extend_mode: bool = False
     extend_run: str | None = None
     # Algorithm
-    budget: int = 15
-    max_edge_rank: int = 10
-    policies_to_run: list = field(default_factory=list)
+    algos_to_run: list = field(default_factory=list)
+    mabss_budget: int = 15
+    mabss_max_rank: int = 10
+    boss_budget: int = 200
+    tnale_budget: int = 200
+    tnale_max_rank: int = 10
     # Decomposition
     mabss_decomp_epochs: int = 60
     boss_decomp_epochs: int = 1000
@@ -74,12 +77,12 @@ class SidebarConfig:
     boss_decomp_lr_patience: int = 250
     mabss_warm_start_method: str | None = None
     mabss_warm_start_epochs: int = 0
-    # Advanced policy — GP-UCB
+    # Advanced — GP-UCB
     beta: float = 5.0
     kernel_name: str = "matern"
     learn_noise: bool = False
     fixed_noise: float = 1e-6
-    # Advanced policy — EXP3/4
+    # Advanced — EXP3/4
     exp3_gamma: float = 0.2
     exp3_decay: float = 0.95
     exp3_loss_bins: int = 4
@@ -165,8 +168,12 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
 
     _render_tmux(cfg)
 
-    st.sidebar.markdown("---")
-    _render_algorithm_settings(cfg)
+    cfg.algos_to_run = st.sidebar.multiselect(
+        "Selected Algorithms",
+        ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4", "boss-ei", "boss-ucb", "tnale"],
+        default=["mabss-greedy", "mabss-exp4"],
+        help="Search algorithms: `mabss-*` are sequential bandit rank-increment strategies; `boss-*` are global BO structure search; `tnale` is Alternating Local Enumeration with ring/full topology.",
+    )
 
     st.sidebar.markdown("---")
     _render_decomp_settings(cfg)
@@ -175,17 +182,12 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
     _render_advanced_policy(cfg)
 
     st.sidebar.markdown("### Storage Options")
-    _src_map = {"Images": "image", "Lightfield": "lightfield"}
-    exp_src = _src_map.get(cfg.problem_source, "synthetic")
-    _name_parts = [f"exp_{exp_src}_{cfg.budget}s"]
-    if any(p.startswith("mabss-") for p in cfg.policies_to_run):
-        _name_parts.append(f"mabss-{cfg.mabss_decomp_epochs}ep-{cfg.mabss_decomp_method}")
-    if any(p.startswith("boss-") for p in cfg.policies_to_run):
-        _name_parts.append(f"boss-{cfg.boss_decomp_epochs}ep-{cfg.boss_decomp_method}")
-    if "tnale" in cfg.policies_to_run:
-        _name_parts.append(f"tnale-{cfg.tnale_decomp_epochs}ep-{cfg.tnale_topology}")
-    default_name = "_".join(_name_parts)
-    cfg.run_name = st.sidebar.text_input("Run Name", value=default_name)
+    cfg.run_name = st.sidebar.text_input(
+        "Run Name *",
+        value="",
+        placeholder="Required — enter a name for this run",
+        help="Artifacts are saved to artifacts/<run_name>/",
+    )
 
 
 def _render_tmux(cfg: SidebarConfig) -> None:
@@ -204,38 +206,12 @@ def _render_tmux(cfg: SidebarConfig) -> None:
             cfg.use_tmux = False
 
 
-def _render_algorithm_settings(cfg: SidebarConfig) -> None:
-    st.sidebar.markdown("#### Algorithm Settings")
-    with st.sidebar.container():
-        _ac1, _ac2 = st.sidebar.columns(2)
-        cfg.budget = _ac1.number_input(
-            "Steps Budget",
-            min_value=1,
-            max_value=2000,
-            value=15,
-            help="Number of topological search steps (MABSS) or BO evaluations (BOSS).",
-        )
-        cfg.max_edge_rank = _ac2.number_input(
-            "Max Search Rank",
-            min_value=2,
-            max_value=100,
-            value=10,
-            help=r"Global search constraint: The maximal allowed bond dimension $\chi$ for any edge in the network.",
-        )
-        cfg.policies_to_run = st.sidebar.multiselect(
-            "Active Policies",
-            ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4", "boss-ei", "boss-ucb", "tnale"],
-            default=["mabss-greedy", "mabss-exp4"],
-            help="Search algorithms: `mabss-*` are sequential bandit rank-increment policies; `boss-*` are global BO structure search; `tnale` is Alternating Local Enumeration with ring/full topology.",
-        )
-
-
 def _render_decomp_settings(cfg: SidebarConfig) -> None:
     st.sidebar.markdown("#### Decomposition Settings")
     with st.sidebar.container():
-        has_mabss = any(p.startswith("mabss-") for p in cfg.policies_to_run)
-        has_boss = any(p.startswith("boss-") for p in cfg.policies_to_run)
-        has_tnale = "tnale" in cfg.policies_to_run
+        has_mabss = any(p.startswith("mabss-") for p in cfg.algos_to_run)
+        has_boss = any(p.startswith("boss-") for p in cfg.algos_to_run)
+        has_tnale = "tnale" in cfg.algos_to_run
 
         specs = []
         if has_mabss:
@@ -244,7 +220,7 @@ def _render_decomp_settings(cfg: SidebarConfig) -> None:
             specs.append(("boss", "BOSS", ["sgd", "pam", "als", "adam"], 1000))
 
         for prefix, label, engines, default_epochs in specs:
-            with st.sidebar.expander(label, expanded=True):
+            with st.sidebar.expander(label, expanded=False):
                 _render_decomp_family(cfg, prefix, engines, default_epochs, st)
                 if prefix == "mabss":
                     ws_col1, ws_col2 = st.columns(2)
@@ -255,7 +231,7 @@ def _render_decomp_settings(cfg: SidebarConfig) -> None:
                     )
 
         if has_tnale:
-            with st.sidebar.expander("TnALE", expanded=True):
+            with st.sidebar.expander("TnALE", expanded=False):
                 _render_decomp_family(cfg, "tnale", ["adam", "sgd", "pam", "als"], 2000, st, max_epochs=50000)
                 nr_col1, nr_col2 = st.columns(2)
                 cfg.tnale_n_runs = nr_col1.number_input(
@@ -360,23 +336,132 @@ def _render_decomp_family(
 
 
 def _render_advanced_policy(cfg: SidebarConfig) -> None:
-    if not cfg.policies_to_run:
+    if not cfg.algos_to_run:
         return
 
-    has_tnale = "tnale" in cfg.policies_to_run
-    has_ucb = "mabss-ucb" in cfg.policies_to_run or "mabss-exp4" in cfg.policies_to_run
-    has_exp3 = "mabss-exp3" in cfg.policies_to_run
-    has_exp4 = "mabss-exp4" in cfg.policies_to_run
-    has_mabss_adv = has_ucb or has_exp3 or has_exp4
-    has_boss = any(p.startswith("boss-") for p in cfg.policies_to_run)
+    has_tnale = "tnale" in cfg.algos_to_run
+    has_mabss = any(p.startswith("mabss-") for p in cfg.algos_to_run)
+    has_ucb = "mabss-ucb" in cfg.algos_to_run or "mabss-exp4" in cfg.algos_to_run
+    has_exp3 = "mabss-exp3" in cfg.algos_to_run
+    has_exp4 = "mabss-exp4" in cfg.algos_to_run
+    has_boss = any(p.startswith("boss-") for p in cfg.algos_to_run)
 
-    if not (has_tnale or has_mabss_adv or has_boss):
+    if not (has_tnale or has_mabss or has_boss):
         return
 
     st.sidebar.markdown("#### Advanced algorithm settings")
 
+    if has_mabss:
+        with st.sidebar.expander("MABSS"):
+            ma1, ma2 = st.columns(2)
+            cfg.mabss_budget = ma1.number_input(
+                "Budget", min_value=1, max_value=10000, value=cfg.mabss_budget,
+                key="mabss_budget",
+                help="Number of rank-increment search steps.",
+            )
+            cfg.mabss_max_rank = ma2.number_input(
+                "Max Search Rank", min_value=2, max_value=100, value=cfg.mabss_max_rank,
+                key="mabss_max_rank",
+                help=r"Maximum allowed bond dimension $\chi$ for any edge.",
+            )
+
+            if has_ucb or has_exp3 or has_exp4:
+                st.markdown("---")
+
+            if has_ucb:
+                st.markdown("**GP-UCB Surrogate**")
+                u1, u2 = st.columns(2)
+                cfg.kernel_name = u1.selectbox(
+                    "Kernel", ["matern", "rbf"], index=0,
+                    help="Non-linear interpolation projection $k(x, x')$ powering the Gaussian Process backend.",
+                )
+                cfg.beta = u2.slider(
+                    "Exploration Beta", 1.0, 10.0, 5.0, 0.5,
+                    help=r"Upper Confidence Bound tuning scalar: $\mu_{t}(x) + \beta \sigma_{t}(x)$.",
+                )
+                n1, n2 = st.columns(2)
+                cfg.learn_noise = n1.checkbox("Learn Noise", value=False)
+                _fn_str = n2.text_input("Fixed Noise", "1e-6")
+                if not cfg.learn_noise:
+                    try:
+                        cfg.fixed_noise = float(_fn_str)
+                    except ValueError:
+                        pass
+
+            if has_ucb and has_exp3:
+                st.markdown("---")
+
+            if has_exp3:
+                st.markdown("**EXP3 Parameters**")
+                e1, e2 = st.columns(2)
+                cfg.exp3_gamma = e1.slider(
+                    "EXP3 Gamma", 0.0, 1.0, 0.2,
+                    help=r"$\gamma \in (0,1]$ smoothing parameter.",
+                )
+                cfg.exp3_decay = e2.number_input("EXP3 Decay", value=0.95, step=0.01)
+
+            if (has_ucb or has_exp3) and has_exp4:
+                st.markdown("---")
+
+            if has_exp4:
+                st.markdown("**EXP4 Parameters**")
+                e3, e4 = st.columns(2)
+                cfg.exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, 0.1)
+                cfg.exp4_eta = e4.number_input("EXP4 Eta", value=0.5, step=0.1)
+                st.markdown("**EXP4 Context Discretization**")
+                b1, b2 = st.columns(2)
+                cfg.exp3_loss_bins = b1.number_input("Loss Bins", value=4, min_value=1)
+                cfg.exp3_cr_bins = b2.number_input("CR Bins", value=4, min_value=1)
+
+    if has_boss:
+        with st.sidebar.expander("BOSS"):
+            bo1, bo2 = st.columns(2)
+            cfg.boss_budget = bo1.number_input(
+                "Budget", min_value=1, max_value=10000, value=cfg.boss_budget,
+                key="boss_budget",
+                help="Number of BO evaluations.",
+            )
+            cfg.boss_max_bond = bo2.number_input(
+                "Max Bond Rank", min_value=1, max_value=100, value=cfg.boss_max_bond,
+                key="boss_max_bond",
+                help=r"Upper bound on each bond rank in the search space.",
+            )
+            st.markdown("---")
+            st.markdown("**Global Bayesian Optimization**")
+            ba1, ba2 = st.columns(2)
+            cfg.boss_n_init = ba1.number_input(
+                "Init Points ($n_{\\text{init}}$)", value=10, min_value=2,
+                help="Sobol quasi-random evaluations before BO loop starts.",
+            )
+            cfg.boss_min_rse = ba2.number_input(
+                "Min RSE Target", value=0.01, format="%f",
+                help="Early-stop threshold per TN evaluation.",
+            )
+            bc1, bc2 = st.columns(2)
+            cfg.boss_lamda = bc1.number_input(
+                "Lambda ($\\lambda$)", value=1.0, min_value=0.0, format="%f",
+                help=r"Trade-off weight $\lambda$ between RSE and CR in the BOSS objective.",
+            )
+            if "boss-ucb" in cfg.algos_to_run:
+                cfg.boss_ucb_beta = bc2.slider(
+                    "UCB Beta ($\\beta$)", 0.1, 10.0, 2.0, 0.1,
+                    help=r"Exploration weight for UCB acquisition: $\mu(x) - \beta\sigma(x)$.",
+                )
+
     if has_tnale:
         with st.sidebar.expander("TnALE"):
+            ta1, ta2 = st.columns(2)
+            cfg.tnale_budget = ta1.number_input(
+                "Budget", min_value=1, max_value=10000, value=cfg.tnale_budget,
+                key="tnale_budget",
+                help="Number of ALE position evaluations.",
+            )
+            cfg.tnale_max_rank = ta2.number_input(
+                "Max Search Rank", min_value=1, max_value=100, value=cfg.tnale_max_rank,
+                key="tnale_max_rank",
+                help="Maximum bond rank allowed in the search space.",
+            )
+            st.markdown("---")
             t1, t2 = st.columns(2)
             cfg.tnale_topology = t1.selectbox(
                 "Topology", ["ring", "full"], index=0,
@@ -441,80 +526,6 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
                     help="Transpositions per sample (Algorithm 1 radius d). radius=1 = single swap.",
                 )
 
-    if has_mabss_adv:
-        with st.sidebar.expander("MABSS"):
-            if has_ucb:
-                st.markdown("**GP-UCB Surrogate**")
-                u1, u2 = st.columns(2)
-                cfg.kernel_name = u1.selectbox(
-                    "Kernel", ["matern", "rbf"], index=0,
-                    help="Non-linear interpolation projection $k(x, x')$ powering the Gaussian Process backend.",
-                )
-                cfg.beta = u2.slider(
-                    "Exploration Beta", 1.0, 10.0, 5.0, 0.5,
-                    help=r"Upper Confidence Bound tuning scalar: $\mu_{t}(x) + \beta \sigma_{t}(x)$.",
-                )
-                n1, n2 = st.columns(2)
-                cfg.learn_noise = n1.checkbox("Learn Noise", value=False)
-                _fn_str = n2.text_input("Fixed Noise", "1e-6")
-                if not cfg.learn_noise:
-                    try:
-                        cfg.fixed_noise = float(_fn_str)
-                    except ValueError:
-                        pass
-
-            if has_ucb and has_exp3:
-                st.markdown("---")
-
-            if has_exp3:
-                st.markdown("**EXP3 Parameters**")
-                e1, e2 = st.columns(2)
-                cfg.exp3_gamma = e1.slider(
-                    "EXP3 Gamma", 0.0, 1.0, 0.2,
-                    help=r"$\gamma \in (0,1]$ smoothing parameter.",
-                )
-                cfg.exp3_decay = e2.number_input("EXP3 Decay", value=0.95, step=0.01)
-
-            if (has_ucb or has_exp3) and has_exp4:
-                st.markdown("---")
-
-            if has_exp4:
-                st.markdown("**EXP4 Parameters**")
-                e3, e4 = st.columns(2)
-                cfg.exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, 0.1)
-                cfg.exp4_eta = e4.number_input("EXP4 Eta", value=0.5, step=0.1)
-                st.markdown("**EXP4 Context Discretization**")
-                b1, b2 = st.columns(2)
-                cfg.exp3_loss_bins = b1.number_input("Loss Bins", value=4, min_value=1)
-                cfg.exp3_cr_bins = b2.number_input("CR Bins", value=4, min_value=1)
-
-    if has_boss:
-        with st.sidebar.expander("BOSS"):
-            st.markdown("**Global Bayesian Optimization**")
-            ba1, ba2 = st.columns(2)
-            cfg.boss_n_init = ba1.number_input(
-                "Init Points ($n_{\\text{init}}$)", value=10, min_value=2,
-                help="Sobol quasi-random evaluations before BO loop starts.",
-            )
-            cfg.boss_max_bond = ba2.number_input(
-                "Max Bond Rank", value=10, min_value=1,
-                help=r"Upper bound on each bond rank in the search space.",
-            )
-            cfg.boss_min_rse = st.number_input(
-                "Min RSE Target", value=0.01, format="%f",
-                help="Early-stop threshold per TN evaluation.",
-            )
-            bc1, bc2 = st.columns(2)
-            cfg.boss_lamda = bc1.number_input(
-                "Lambda ($\\lambda$)", value=1.0, min_value=0.0, format="%f",
-                help=r"Trade-off weight $\lambda$ between RSE and CR in the BOSS objective.",
-            )
-            if "boss-ucb" in cfg.policies_to_run:
-                cfg.boss_ucb_beta = bc2.slider(
-                    "UCB Beta ($\\beta$)", 0.1, 10.0, 2.0, 0.1,
-                    help=r"Exploration weight for UCB acquisition: $\mu(x) - \beta\sigma(x)$.",
-                )
-
 
 def _render_extend_mode(cfg: SidebarConfig) -> None:
     """Extend mode: pick an existing run, enter only the new seeds to add."""
@@ -555,7 +566,7 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.seeds_str = _sc1.text_input(
         "New Seeds (csv)",
         "",
-        help="Seeds to add. Already-completed seed/policy combos are automatically skipped.",
+        help="Seeds to add. Already-completed seed/algo combos are automatically skipped.",
     )
     cfg.cuda_device = _sc2.selectbox("CUDA Device", [0, 1], index=0)
 
@@ -569,9 +580,12 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.max_rank              = _get("max_rank", 6)
     cfg.problem_source        = _get("problem_source", "Synthetic")
     cfg.target_path           = _get("target_path", None)
-    cfg.budget                = _get("budget", 15)
-    cfg.max_edge_rank         = _get("max_edge_rank", 10)
-    cfg.policies_to_run       = _get("policies", [])
+    cfg.algos_to_run       = _get("algos", _get("policies", []))
+    cfg.mabss_budget          = _get("mabss_budget", 15)
+    cfg.mabss_max_rank        = _get("mabss_max_rank", 10)
+    cfg.boss_budget           = _get("boss_budget", 200)
+    cfg.tnale_budget          = _get("tnale_budget", 200)
+    cfg.tnale_max_rank        = _get("tnale_max_rank", 10)
     cfg.mabss_decomp_epochs   = _get("mabss_decomp_epochs", 60)
     cfg.boss_decomp_epochs    = _get("boss_decomp_epochs", 1000)
     cfg.mabss_decomp_method   = _get("mabss_decomp_method", "sgd")
