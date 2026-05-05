@@ -133,7 +133,9 @@ def render_load_mode(ROOT: Path):
     Returns (data_ready, df_mabss, df_boss, df_tnale, summaries, decomp_dict, df_summary, out_dir).
     When data_ready is False all other values are None / empty.
     """
-    from app.sidebar import DEFAULT_PARAMS
+    from dataclasses import asdict
+    from app.config import SidebarConfig
+    DEFAULT_PARAMS = asdict(SidebarConfig())
     from app.utils import _load_artifact, _artifact_fully_done
 
     _empty = (False, None, None, None, None, {}, {}, None, None)

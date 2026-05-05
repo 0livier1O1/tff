@@ -191,6 +191,35 @@ MABSS_CR_BINS = (
     "context-dependent expert weighting."
 )
 
+MABSS_STOPPING_THRESHOLD = (
+    "Early-stop threshold for oracle arm evaluation: if the RSE of any arm drops below "
+    "this value during the oracle sweep, evaluation halts immediately. "
+    "Prevents wasting compute when a near-perfect decomposition is already found."
+)
+
+MABSS_EXP3_REWARD_SCALE = (
+    "Normalisation constant applied to RSE before computing EXP3/EXP4 rewards. "
+    "Reward = exp(−RSE / scale). Smaller scale → sharper reward differences between arms; "
+    "larger scale → flatter, more exploratory weighting."
+)
+
+MABSS_EXP3_LOSS_CAP = (
+    "Upper clamp on RSE used to bin the loss context axis in EXP4. "
+    "RSE values above this cap are folded into the top bin, preventing outlier evaluations "
+    "from distorting the context discretisation."
+)
+
+MABSS_EXP3_LOG_CR_CAP = (
+    "Upper clamp on log(CR) used to bin the compression-ratio context axis in EXP4. "
+    "Log-CR values above this cap are folded into the top bin."
+)
+
+MABSS_DTYPE = (
+    "Floating-point precision for all tensor operations:\n"
+    "- **float32**: standard — fast, GPU-friendly, sufficient for most cases.\n"
+    "- **float64**: double precision — slower, more memory, useful for high-accuracy baselines."
+)
+
 # ---------------------------------------------------------------------------
 # BOSS Advanced
 # ---------------------------------------------------------------------------

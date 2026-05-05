@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,6 +8,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import streamlit as st
+from app.config import SidebarConfig
 from app.tooltips import (
     EXTEND_RUN, EXTEND_SEEDS,
     SEEDS, CUDA_DEVICE, TMUX_SESSION, RUN_NAME, SELECTED_ALGORITHMS,
@@ -21,120 +21,14 @@ from app.tooltips import (
     MABSS_GP_KERNEL, MABSS_GP_BETA, MABSS_LEARN_NOISE, MABSS_FIXED_NOISE,
     MABSS_EXP3_GAMMA, MABSS_EXP3_DECAY,
     MABSS_EXP4_GAMMA, MABSS_EXP4_ETA, MABSS_LOSS_BINS, MABSS_CR_BINS,
+    MABSS_STOPPING_THRESHOLD, MABSS_EXP3_REWARD_SCALE,
+    MABSS_EXP3_LOSS_CAP, MABSS_EXP3_LOG_CR_CAP, MABSS_DTYPE,
     BOSS_BUDGET, BOSS_MAX_BOND, BOSS_N_INIT, BOSS_LAMBDA_FITNESS, BOSS_UCB_BETA,
     TNALE_BUDGET, TNALE_MAX_RANK, TNALE_TOPOLOGY, TNALE_LAMBDA_FITNESS,
     TNALE_LOCAL_STEP_INIT, TNALE_LOCAL_STEP_MAIN, TNALE_INTERP_ON, TNALE_INTERP_ITERS,
     TNALE_LOCAL_OPT_ITER, TNALE_INIT_SPARSITY, TNALE_PHASE_CHANGE_RESET,
     TNALE_PERM_SAMPLES, TNALE_PERM_RADIUS,
 )
-
-DEFAULT_PARAMS: dict = {
-    "n_cores": 5,
-    "max_rank": 6,
-    "budget": 15,
-    "mabss_decomp_epochs": 60,
-    "boss_decomp_epochs": 1000,
-    "tnale_decomp_epochs": 2000,
-    "max_edge_rank": 10,
-    "beta": 5.0,
-    "kernel_name": "matern",
-    "learn_noise": False,
-    "fixed_noise": 1e-6,
-    "exp3_gamma": 0.2,
-    "exp3_decay": 0.95,
-    "exp3_loss_bins": 4,
-    "exp3_cr_bins": 4,
-    "exp4_gamma": 0.1,
-    "exp4_eta": 0.5,
-}
-
-
-@dataclass
-class SidebarConfig:
-    app_mode: str
-    # Problem
-    problem_source: str = "Synthetic"
-    n_cores: int = 5
-    max_rank: int = 6          # kept for Images mode and backward-compat
-    target_path: str | None = None
-    lightfield_dataset: str | None = None
-    # Adjacency matrix editor (Synthetic mode)
-    adj_spec: list | None = None  # N×N list of lists of str; None = use old random path
-    adj_r_min: int = 2
-    adj_r_max: int = 8
-    topology: str = "FCTN"
-    fix_adj: bool = True
-    # Run control
-    seeds_str: str = "1"
-    cuda_device: int = 0
-    use_tmux: bool = False
-    tmux_session: str | None = None
-    run_name: str = "historical_load"
-    # Extend mode
-    extend_mode: bool = False
-    extend_run: str | None = None
-    # Algorithm
-    algos_to_run: list = field(default_factory=list)
-    mabss_budget: int = 15
-    mabss_max_rank: int = 10
-    boss_budget: int = 200
-    tnale_budget: int = 200
-    tnale_max_rank: int = 10
-    # Decomposition
-    mabss_decomp_epochs: int = 60
-    boss_decomp_epochs: int = 1000
-    mabss_decomp_method: str = "sgd"
-    boss_decomp_method: str = "sgd"
-    mabss_decomp_init_lr: float | None = 0.1
-    boss_decomp_init_lr: float | None = 0.1
-    mabss_decomp_momentum: float = 0.5
-    boss_decomp_momentum: float = 0.5
-    mabss_decomp_loss_patience: int = 2500
-    boss_decomp_loss_patience: int = 2500
-    mabss_decomp_lr_patience: int = 250
-    boss_decomp_lr_patience: int = 250
-    mabss_warm_start_method: str | None = None
-    mabss_warm_start_epochs: int = 0
-    # Advanced — GP-UCB
-    beta: float = 5.0
-    kernel_name: str = "matern"
-    learn_noise: bool = False
-    fixed_noise: float = 1e-6
-    # Advanced — EXP3/4
-    exp3_gamma: float = 0.2
-    exp3_decay: float = 0.95
-    exp3_loss_bins: int = 4
-    exp3_cr_bins: int = 4
-    exp4_gamma: float = 0.1
-    exp4_eta: float = 0.5
-    # BOSS
-    boss_n_init: int = 10
-    boss_max_bond: int = 10
-    boss_n_runs: int = 1
-    boss_min_rse: float = 0.01
-    boss_ucb_beta: float = 2.0
-    boss_lambda_fitness: float = 1.0
-    # TnALE — decomposition
-    tnale_decomp_epochs: int = 2000
-    tnale_decomp_method: str = "adam"
-    tnale_decomp_init_lr: float | None = 0.1
-    tnale_decomp_momentum: float = 0.9
-    tnale_decomp_loss_patience: int = 2500
-    tnale_decomp_lr_patience: int = 250
-    tnale_n_runs: int = 2
-    # TnALE — advanced
-    tnale_topology: str = "ring"
-    tnale_local_step_init: int = 2
-    tnale_local_step_main: int = 1
-    tnale_interp_on: bool = True
-    tnale_interp_iters: int = 2
-    tnale_local_opt_iter: int = 1
-    tnale_init_sparsity: float = 0.6
-    tnale_lambda_fitness: float = 5.0
-    tnale_n_perm_samples: int = 10   # 0 = exhaustive N*(N-1)/2
-    tnale_perm_radius: int = 1
-    tnale_phase_change_reset: bool = True
-    tnale_min_rse: float = 1e-8
 
 
 def render_sidebar() -> SidebarConfig:
@@ -405,11 +299,11 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
                     "Kernel", ["matern", "rbf"], index=0, help=MABSS_GP_KERNEL,
                 )
                 cfg.beta = u2.slider(
-                    "Exploration Beta", 1.0, 10.0, 5.0, 0.5, help=MABSS_GP_BETA,
+                    "Exploration Beta", 1.0, 10.0, cfg.beta, 0.5, help=MABSS_GP_BETA,
                 )
                 n1, n2 = st.columns(2)
-                cfg.learn_noise = n1.checkbox("Learn Noise", value=False, help=MABSS_LEARN_NOISE)
-                _fn_str = n2.text_input("Fixed Noise", "1e-6", help=MABSS_FIXED_NOISE)
+                cfg.learn_noise = n1.checkbox("Learn Noise", value=cfg.learn_noise, help=MABSS_LEARN_NOISE)
+                _fn_str = n2.text_input("Fixed Noise", str(cfg.fixed_noise), help=MABSS_FIXED_NOISE)
                 if not cfg.learn_noise:
                     try:
                         cfg.fixed_noise = float(_fn_str)
@@ -422,8 +316,8 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
             if has_exp3:
                 st.markdown("**EXP3 Parameters**")
                 e1, e2 = st.columns(2)
-                cfg.exp3_gamma = e1.slider("EXP3 Gamma", 0.0, 1.0, 0.2, help=MABSS_EXP3_GAMMA)
-                cfg.exp3_decay = e2.number_input("EXP3 Decay", value=0.95, step=0.01,
+                cfg.exp3_gamma = e1.slider("EXP3 Gamma", 0.0, 1.0, cfg.exp3_gamma, help=MABSS_EXP3_GAMMA)
+                cfg.exp3_decay = e2.number_input("EXP3 Decay", value=cfg.exp3_decay, step=0.01,
                     help=MABSS_EXP3_DECAY)
 
             if (has_ucb or has_exp3) and has_exp4:
@@ -432,14 +326,39 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
             if has_exp4:
                 st.markdown("**EXP4 Parameters**")
                 e3, e4 = st.columns(2)
-                cfg.exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, 0.1, help=MABSS_EXP4_GAMMA)
-                cfg.exp4_eta = e4.number_input("EXP4 Eta", value=0.5, step=0.1, help=MABSS_EXP4_ETA)
+                cfg.exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, cfg.exp4_gamma, help=MABSS_EXP4_GAMMA)
+                cfg.exp4_eta = e4.number_input("EXP4 Eta", value=cfg.exp4_eta, step=0.1, help=MABSS_EXP4_ETA)
                 st.markdown("**EXP4 Context Discretization**")
                 b1, b2 = st.columns(2)
-                cfg.exp3_loss_bins = b1.number_input("Loss Bins", value=4, min_value=1,
+                cfg.exp3_loss_bins = b1.number_input("Loss Bins", value=cfg.exp3_loss_bins, min_value=1,
                     help=MABSS_LOSS_BINS)
-                cfg.exp3_cr_bins = b2.number_input("CR Bins", value=4, min_value=1,
+                cfg.exp3_cr_bins = b2.number_input("CR Bins", value=cfg.exp3_cr_bins, min_value=1,
                     help=MABSS_CR_BINS)
+
+            st.markdown("---")
+            st.markdown("**Runtime Constants**")
+            r1, r2 = st.columns(2)
+            cfg.mabss_stopping_threshold = r1.number_input(
+                "Stopping Threshold", value=cfg.mabss_stopping_threshold,
+                format="%e", key="mabss_stopping_threshold", help=MABSS_STOPPING_THRESHOLD,
+            )
+            cfg.mabss_exp3_reward_scale = r2.number_input(
+                "Reward Scale", value=cfg.mabss_exp3_reward_scale,
+                format="%f", step=0.01, key="mabss_exp3_reward_scale", help=MABSS_EXP3_REWARD_SCALE,
+            )
+            r3, r4 = st.columns(2)
+            cfg.mabss_exp3_loss_cap = r3.number_input(
+                "Loss Cap", value=cfg.mabss_exp3_loss_cap,
+                format="%f", step=0.1, key="mabss_exp3_loss_cap", help=MABSS_EXP3_LOSS_CAP,
+            )
+            cfg.mabss_exp3_log_cr_cap = r4.number_input(
+                "Log-CR Cap", value=cfg.mabss_exp3_log_cr_cap,
+                format="%f", step=0.5, key="mabss_exp3_log_cr_cap", help=MABSS_EXP3_LOG_CR_CAP,
+            )
+            cfg.dtype = st.selectbox(
+                "Dtype", ["float32", "float64"], index=["float32", "float64"].index(cfg.dtype),
+                key="dtype", help=MABSS_DTYPE,
+            )
 
     if has_boss:
         with st.sidebar.expander("BOSS"):
@@ -455,7 +374,7 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
             st.markdown("---")
             st.markdown("**Global Bayesian Optimization**")
             cfg.boss_n_init = st.number_input(
-                "Init Points ($n_{\\text{init}}$)", value=10, min_value=2, help=BOSS_N_INIT,
+                "Init Points ($n_{\\text{init}}$)", value=cfg.boss_n_init, min_value=2, help=BOSS_N_INIT,
             )
             bc1, bc2 = st.columns(2)
             cfg.boss_lambda_fitness = bc1.number_input(
@@ -464,7 +383,7 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
             )
             if "boss-ucb" in cfg.algos_to_run:
                 cfg.boss_ucb_beta = bc2.slider(
-                    "UCB Beta ($\\beta$)", 0.1, 10.0, 2.0, 0.1, help=BOSS_UCB_BETA,
+                    "UCB Beta ($\\beta$)", 0.1, 10.0, cfg.boss_ucb_beta, 0.1, help=BOSS_UCB_BETA,
                 )
 
     if has_tnale:
@@ -578,75 +497,83 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
 
     _render_tmux(cfg)
 
-    # Restore all settings from the existing run's config
+    # Restore all settings from the existing run's config.
+    # Fallback values come from SidebarConfig — single source of truth for defaults.
+    _D = SidebarConfig()
+
     def _get(key, default):
         return existing_cfg.get(key, default)
 
-    cfg.n_cores               = _get("n_cores", 5)
-    cfg.max_rank              = _get("max_rank", 6)
-    cfg.problem_source        = _get("problem_source", "Synthetic")
-    cfg.target_path           = _get("target_path", None)
-    cfg.algos_to_run       = _get("algos", _get("policies", []))
-    cfg.mabss_budget          = _get("mabss_budget", 15)
-    cfg.mabss_max_rank        = _get("mabss_max_rank", 10)
-    cfg.boss_budget           = _get("boss_budget", 200)
-    cfg.tnale_budget          = _get("tnale_budget", 200)
-    cfg.tnale_max_rank        = _get("tnale_max_rank", 10)
-    cfg.mabss_decomp_epochs   = _get("mabss_decomp_epochs", 60)
-    cfg.boss_decomp_epochs    = _get("boss_decomp_epochs", 1000)
-    cfg.mabss_decomp_method   = _get("mabss_decomp_method", "sgd")
-    cfg.boss_decomp_method    = _get("boss_decomp_method", "sgd")
-    cfg.mabss_decomp_init_lr  = _get("mabss_decomp_init_lr", 0.1)
-    cfg.boss_decomp_init_lr   = _get("boss_decomp_init_lr", 0.1)
-    cfg.mabss_decomp_momentum = _get("mabss_decomp_momentum", 0.5)
-    cfg.boss_decomp_momentum  = _get("boss_decomp_momentum", 0.5)
-    cfg.mabss_decomp_loss_patience = _get("mabss_decomp_loss_patience", 2500)
-    cfg.boss_decomp_loss_patience  = _get("boss_decomp_loss_patience", 2500)
-    cfg.mabss_decomp_lr_patience = _get("mabss_decomp_lr_patience", 250)
-    cfg.boss_decomp_lr_patience  = _get("boss_decomp_lr_patience", 250)
-    cfg.mabss_warm_start_method  = _get("mabss_warm_start_method", None)
-    cfg.mabss_warm_start_epochs  = _get("mabss_warm_start_epochs", 0)
-    cfg.beta                  = _get("beta", 5.0)
-    cfg.kernel_name           = _get("kernel_name", "matern")
-    cfg.learn_noise           = _get("learn_noise", False)
-    cfg.fixed_noise           = _get("fixed_noise", 1e-6)
-    cfg.exp3_gamma            = _get("exp3_gamma", 0.2)
-    cfg.exp3_decay            = _get("exp3_decay", 0.95)
-    cfg.exp3_loss_bins        = _get("exp3_loss_bins", 4)
-    cfg.exp3_cr_bins          = _get("exp3_cr_bins", 4)
-    cfg.exp4_gamma            = _get("exp4_gamma", 0.1)
-    cfg.exp4_eta              = _get("exp4_eta", 0.5)
-    cfg.boss_n_init           = _get("boss_n_init", 10)
-    cfg.boss_max_bond         = _get("boss_max_bond", 10)
-    cfg.boss_n_runs           = _get("boss_n_runs", 1)
-    cfg.boss_min_rse          = _get("boss_min_rse", 0.01)
-    cfg.boss_ucb_beta         = _get("boss_ucb_beta", 2.0)
-    cfg.boss_lambda_fitness            = _get("boss_lambda_fitness", 1.0)
-    cfg.tnale_decomp_epochs      = _get("tnale_decomp_epochs", 2000)
-    cfg.tnale_decomp_method      = _get("tnale_decomp_method", "adam")
-    cfg.tnale_decomp_init_lr     = _get("tnale_decomp_init_lr", None)
-    cfg.tnale_decomp_momentum    = _get("tnale_decomp_momentum", 0.9)
-    cfg.tnale_decomp_loss_patience = _get("tnale_decomp_loss_patience", 2500)
-    cfg.tnale_decomp_lr_patience   = _get("tnale_decomp_lr_patience", 250)
-    cfg.tnale_n_runs             = _get("tnale_n_runs", 2)
-    cfg.tnale_topology           = _get("tnale_topology", "ring")
-    cfg.tnale_local_step_init    = _get("tnale_local_step_init", 2)
-    cfg.tnale_local_step_main    = _get("tnale_local_step_main", 1)
-    cfg.tnale_interp_on          = _get("tnale_interp_on", True)
-    cfg.tnale_interp_iters       = _get("tnale_interp_iters", 2)
-    cfg.tnale_local_opt_iter     = _get("tnale_local_opt_iter", 1)
-    cfg.tnale_init_sparsity      = _get("tnale_init_sparsity", 0.6)
-    cfg.tnale_lambda_fitness     = _get("tnale_lambda_fitness", 5.0)
-    cfg.tnale_n_perm_samples     = _get("tnale_n_perm_samples", 10)
-    cfg.tnale_perm_radius        = _get("tnale_perm_radius", 1)
-    cfg.tnale_phase_change_reset = _get("tnale_phase_change_reset", True)
-    cfg.tnale_min_rse            = _get("tnale_min_rse", 1e-8)
-    cfg.adj_spec              = _get("adj_spec", None)
-    cfg.adj_r_min             = _get("adj_r_min", 2)
-    cfg.adj_r_max             = _get("adj_r_max", 8)
-    cfg.topology              = _get("topology", "FCTN")
-    cfg.fix_adj               = _get("fix_adj", True)
-    cfg.lightfield_dataset    = _get("lightfield_dataset", None)
+    cfg.n_cores               = _get("n_cores", _D.n_cores)
+    cfg.max_rank              = _get("max_rank", _D.max_rank)
+    cfg.problem_source        = _get("problem_source", _D.problem_source)
+    cfg.target_path           = _get("target_path", _D.target_path)
+    cfg.algos_to_run          = _get("algos", _get("policies", _D.algos_to_run))
+    cfg.mabss_budget          = _get("mabss_budget", _D.mabss_budget)
+    cfg.mabss_max_rank        = _get("mabss_max_rank", _D.mabss_max_rank)
+    cfg.boss_budget           = _get("boss_budget", _D.boss_budget)
+    cfg.tnale_budget          = _get("tnale_budget", _D.tnale_budget)
+    cfg.tnale_max_rank        = _get("tnale_max_rank", _D.tnale_max_rank)
+    cfg.mabss_decomp_epochs   = _get("mabss_decomp_epochs", _D.mabss_decomp_epochs)
+    cfg.boss_decomp_epochs    = _get("boss_decomp_epochs", _D.boss_decomp_epochs)
+    cfg.mabss_decomp_method   = _get("mabss_decomp_method", _D.mabss_decomp_method)
+    cfg.boss_decomp_method    = _get("boss_decomp_method", _D.boss_decomp_method)
+    cfg.mabss_decomp_init_lr  = _get("mabss_decomp_init_lr", _D.mabss_decomp_init_lr)
+    cfg.boss_decomp_init_lr   = _get("boss_decomp_init_lr", _D.boss_decomp_init_lr)
+    cfg.mabss_decomp_momentum = _get("mabss_decomp_momentum", _D.mabss_decomp_momentum)
+    cfg.boss_decomp_momentum  = _get("boss_decomp_momentum", _D.boss_decomp_momentum)
+    cfg.mabss_decomp_loss_patience = _get("mabss_decomp_loss_patience", _D.mabss_decomp_loss_patience)
+    cfg.boss_decomp_loss_patience  = _get("boss_decomp_loss_patience", _D.boss_decomp_loss_patience)
+    cfg.mabss_decomp_lr_patience   = _get("mabss_decomp_lr_patience", _D.mabss_decomp_lr_patience)
+    cfg.boss_decomp_lr_patience    = _get("boss_decomp_lr_patience", _D.boss_decomp_lr_patience)
+    cfg.mabss_warm_start_method    = _get("mabss_warm_start_method", _D.mabss_warm_start_method)
+    cfg.mabss_warm_start_epochs    = _get("mabss_warm_start_epochs", _D.mabss_warm_start_epochs)
+    cfg.beta                  = _get("beta", _D.beta)
+    cfg.kernel_name           = _get("kernel_name", _D.kernel_name)
+    cfg.learn_noise           = _get("learn_noise", _D.learn_noise)
+    cfg.fixed_noise           = _get("fixed_noise", _D.fixed_noise)
+    cfg.exp3_gamma            = _get("exp3_gamma", _D.exp3_gamma)
+    cfg.exp3_decay            = _get("exp3_decay", _D.exp3_decay)
+    cfg.exp3_loss_bins        = _get("exp3_loss_bins", _D.exp3_loss_bins)
+    cfg.exp3_cr_bins          = _get("exp3_cr_bins", _D.exp3_cr_bins)
+    cfg.exp4_gamma            = _get("exp4_gamma", _D.exp4_gamma)
+    cfg.exp4_eta              = _get("exp4_eta", _D.exp4_eta)
+    cfg.boss_n_init           = _get("boss_n_init", _D.boss_n_init)
+    cfg.boss_max_bond         = _get("boss_max_bond", _D.boss_max_bond)
+    cfg.boss_n_runs           = _get("boss_n_runs", _D.boss_n_runs)
+    cfg.boss_min_rse          = _get("boss_min_rse", _D.boss_min_rse)
+    cfg.boss_ucb_beta         = _get("boss_ucb_beta", _D.boss_ucb_beta)
+    cfg.boss_lambda_fitness   = _get("boss_lambda_fitness", _D.boss_lambda_fitness)
+    cfg.tnale_decomp_epochs      = _get("tnale_decomp_epochs", _D.tnale_decomp_epochs)
+    cfg.tnale_decomp_method      = _get("tnale_decomp_method", _D.tnale_decomp_method)
+    cfg.tnale_decomp_init_lr     = _get("tnale_decomp_init_lr", _D.tnale_decomp_init_lr)
+    cfg.tnale_decomp_momentum    = _get("tnale_decomp_momentum", _D.tnale_decomp_momentum)
+    cfg.tnale_decomp_loss_patience = _get("tnale_decomp_loss_patience", _D.tnale_decomp_loss_patience)
+    cfg.tnale_decomp_lr_patience   = _get("tnale_decomp_lr_patience", _D.tnale_decomp_lr_patience)
+    cfg.tnale_n_runs             = _get("tnale_n_runs", _D.tnale_n_runs)
+    cfg.tnale_topology           = _get("tnale_topology", _D.tnale_topology)
+    cfg.tnale_local_step_init    = _get("tnale_local_step_init", _D.tnale_local_step_init)
+    cfg.tnale_local_step_main    = _get("tnale_local_step_main", _D.tnale_local_step_main)
+    cfg.tnale_interp_on          = _get("tnale_interp_on", _D.tnale_interp_on)
+    cfg.tnale_interp_iters       = _get("tnale_interp_iters", _D.tnale_interp_iters)
+    cfg.tnale_local_opt_iter     = _get("tnale_local_opt_iter", _D.tnale_local_opt_iter)
+    cfg.tnale_init_sparsity      = _get("tnale_init_sparsity", _D.tnale_init_sparsity)
+    cfg.tnale_lambda_fitness     = _get("tnale_lambda_fitness", _D.tnale_lambda_fitness)
+    cfg.tnale_n_perm_samples     = _get("tnale_n_perm_samples", _D.tnale_n_perm_samples)
+    cfg.tnale_perm_radius        = _get("tnale_perm_radius", _D.tnale_perm_radius)
+    cfg.tnale_phase_change_reset = _get("tnale_phase_change_reset", _D.tnale_phase_change_reset)
+    cfg.tnale_min_rse            = _get("tnale_min_rse", _D.tnale_min_rse)
+    cfg.adj_spec                     = _get("adj_spec", _D.adj_spec)
+    cfg.adj_r_min                    = _get("adj_r_min", _D.adj_r_min)
+    cfg.adj_r_max                    = _get("adj_r_max", _D.adj_r_max)
+    cfg.topology                     = _get("topology", _D.topology)
+    cfg.fix_adj                      = _get("fix_adj", _D.fix_adj)
+    cfg.lightfield_dataset           = _get("lightfield_dataset", _D.lightfield_dataset)
+    cfg.mabss_stopping_threshold     = _get("mabss_stopping_threshold", _D.mabss_stopping_threshold)
+    cfg.mabss_exp3_reward_scale      = _get("mabss_exp3_reward_scale", _D.mabss_exp3_reward_scale)
+    cfg.mabss_exp3_loss_cap          = _get("mabss_exp3_loss_cap", _D.mabss_exp3_loss_cap)
+    cfg.mabss_exp3_log_cr_cap        = _get("mabss_exp3_log_cr_cap", _D.mabss_exp3_log_cr_cap)
+    cfg.dtype                        = _get("dtype", _D.dtype)
 
     st.sidebar.markdown("### Locked Settings (from existing run)")
     st.sidebar.json(existing_cfg)

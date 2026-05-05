@@ -56,7 +56,7 @@ class SidebarConfig:
     fixed_noise: float = 1e-6
     # Advanced — EXP3/4
     exp3_gamma: float = 0.2
-    exp3_decay: float = 0.95
+    exp3_decay: float = 0.95  # also used as exp4_decay
     exp3_loss_bins: int = 4
     exp3_cr_bins: int = 4
     exp4_gamma: float = 0.1
@@ -89,3 +89,9 @@ class SidebarConfig:
     tnale_perm_radius: int = 1
     tnale_phase_change_reset: bool = True
     tnale_min_rse: float = 1e-2
+    # MABSS runtime constants (not exposed in UI; centralised here for reproducibility)
+    mabss_stopping_threshold: float = 1e-5
+    mabss_exp3_reward_scale: float = 0.05
+    mabss_exp3_loss_cap: float = 1.5
+    mabss_exp3_log_cr_cap: float = 8.0
+    dtype: str = "float32"

@@ -12,11 +12,12 @@ import json
 import os
 import subprocess
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import streamlit as st
 
-from app.sidebar import SidebarConfig
+from app.config import SidebarConfig
 from app.utils import _write_run_script, _script_alive
 
 
@@ -57,19 +58,19 @@ def mabss_cmd(cfg: SidebarConfig, seed: int, algo_name: str, algo_dir: Path) -> 
         "--beta",                str(cfg.beta),
         "--kernel-name",         cfg.kernel_name,
         "--fixed-noise",         str(cfg.fixed_noise),
-        "--stopping-threshold",  "1e-5",
+        "--stopping-threshold",  str(cfg.mabss_stopping_threshold),
         "--deterministic-eval",
         "--exp3-gamma",          str(cfg.exp3_gamma),
         "--exp3-decay",          str(cfg.exp3_decay),
-        "--exp3-reward-scale",   "0.05",
+        "--exp3-reward-scale",   str(cfg.mabss_exp3_reward_scale),
         "--exp3-loss-bins",      str(cfg.exp3_loss_bins),
         "--exp3-cr-bins",        str(cfg.exp3_cr_bins),
-        "--exp3-loss-cap",       "1.5",
-        "--exp3-log-cr-cap",     "8.0",
+        "--exp3-loss-cap",       str(cfg.mabss_exp3_loss_cap),
+        "--exp3-log-cr-cap",     str(cfg.mabss_exp3_log_cr_cap),
         "--exp4-gamma",          str(cfg.exp4_gamma),
         "--exp4-decay",          str(cfg.exp3_decay),
         "--exp4-eta",            str(cfg.exp4_eta),
-        "--dtype",               "float32",
+        "--dtype",               cfg.dtype,
         "--decomp-method",       cfg.mabss_decomp_method,
         "--momentum",            str(cfg.mabss_decomp_momentum),
         "--loss-patience",       str(cfg.mabss_decomp_loss_patience),
@@ -202,65 +203,15 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
             existing_config = json.load(f)
     all_seeds = sorted(set(existing_config.get("seeds", [])) | set(seeds))
 
-    config_dict = {
-        # Problem
-        "n_cores": cfg.n_cores, "max_rank": cfg.max_rank,
-        "problem_source": cfg.problem_source, "target_path": cfg.target_path,
-        "lightfield_dataset": cfg.lightfield_dataset,
-        "adj_spec": cfg.adj_spec, "adj_r_min": cfg.adj_r_min, "adj_r_max": cfg.adj_r_max,
-        "topology": cfg.topology, "fix_adj": cfg.fix_adj,
-        # Algorithm
-        "seeds": all_seeds, "algos": cfg.algos_to_run,
-        "mabss_budget": cfg.mabss_budget, "mabss_max_rank": cfg.mabss_max_rank,
-        "boss_budget": cfg.boss_budget,
-        "tnale_budget": cfg.tnale_budget, "tnale_max_rank": cfg.tnale_max_rank,
-        # Decomposition
-        "mabss_decomp_epochs": cfg.mabss_decomp_epochs,
-        "boss_decomp_epochs": cfg.boss_decomp_epochs,
-        "mabss_decomp_method": cfg.mabss_decomp_method,
-        "boss_decomp_method": cfg.boss_decomp_method,
-        "mabss_decomp_init_lr": cfg.mabss_decomp_init_lr,
-        "boss_decomp_init_lr": cfg.boss_decomp_init_lr,
-        "mabss_decomp_momentum": cfg.mabss_decomp_momentum,
-        "boss_decomp_momentum": cfg.boss_decomp_momentum,
-        "mabss_decomp_loss_patience": cfg.mabss_decomp_loss_patience,
-        "boss_decomp_loss_patience": cfg.boss_decomp_loss_patience,
-        "mabss_decomp_lr_patience": cfg.mabss_decomp_lr_patience,
-        "boss_decomp_lr_patience": cfg.boss_decomp_lr_patience,
-        "mabss_warm_start_method": cfg.mabss_warm_start_method,
-        "mabss_warm_start_epochs": cfg.mabss_warm_start_epochs,
-        # Advanced
-        "beta": cfg.beta, "kernel_name": cfg.kernel_name,
-        "learn_noise": cfg.learn_noise, "fixed_noise": cfg.fixed_noise,
-        "exp3_gamma": cfg.exp3_gamma, "exp3_decay": cfg.exp3_decay,
-        "exp3_loss_bins": cfg.exp3_loss_bins, "exp3_cr_bins": cfg.exp3_cr_bins,
-        "exp4_gamma": cfg.exp4_gamma, "exp4_eta": cfg.exp4_eta,
-        # BOSS
-        "boss_n_init": cfg.boss_n_init, "boss_max_bond": cfg.boss_max_bond,
-        "boss_n_runs": cfg.boss_n_runs, "boss_min_rse": cfg.boss_min_rse,
-        "boss_ucb_beta": cfg.boss_ucb_beta, "boss_lambda_fitness": cfg.boss_lambda_fitness,
-        # TnALE — decomposition
-        "tnale_decomp_epochs": cfg.tnale_decomp_epochs,
-        "tnale_decomp_method": cfg.tnale_decomp_method,
-        "tnale_decomp_init_lr": cfg.tnale_decomp_init_lr,
-        "tnale_decomp_momentum": cfg.tnale_decomp_momentum,
-        "tnale_decomp_loss_patience": cfg.tnale_decomp_loss_patience,
-        "tnale_decomp_lr_patience": cfg.tnale_decomp_lr_patience,
-        "tnale_n_runs": cfg.tnale_n_runs,
-        # TnALE — advanced
-        "tnale_topology": cfg.tnale_topology,
-        "tnale_local_step_init": cfg.tnale_local_step_init,
-        "tnale_local_step_main": cfg.tnale_local_step_main,
-        "tnale_interp_on": cfg.tnale_interp_on,
-        "tnale_interp_iters": cfg.tnale_interp_iters,
-        "tnale_local_opt_iter": cfg.tnale_local_opt_iter,
-        "tnale_init_sparsity": cfg.tnale_init_sparsity,
-        "tnale_lambda_fitness": cfg.tnale_lambda_fitness,
-        "tnale_n_perm_samples": cfg.tnale_n_perm_samples,
-        "tnale_perm_radius": cfg.tnale_perm_radius,
-        "tnale_phase_change_reset": cfg.tnale_phase_change_reset,
-        "tnale_min_rse": cfg.tnale_min_rse,
+    # UI-only fields that don't belong in the reproducibility record
+    _UI_FIELDS = {
+        "app_mode", "seeds_str", "extend_mode", "extend_run",
+        "cuda_device", "use_tmux", "tmux_session", "run_name",
     }
+    config_dict = {k: v for k, v in asdict(cfg).items() if k not in _UI_FIELDS}
+    config_dict["seeds"] = all_seeds          # computed list, not raw seeds_str
+    config_dict["algos"] = config_dict.pop("algos_to_run")  # stable JSON key
+    config_dict["mabss_exp4_decay"] = cfg.exp3_decay        # explicit alias
     with open(cfg_path, "w") as f:
         json.dump(config_dict, f, indent=4)
 
