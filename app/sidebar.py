@@ -9,6 +9,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import streamlit as st
+from app.tooltips import (
+    EXTEND_RUN, EXTEND_SEEDS,
+    SEEDS, CUDA_DEVICE, TMUX_SESSION, RUN_NAME, SELECTED_ALGORITHMS,
+    DECOMP_EPOCHS, DECOMP_ENGINE, DECOMP_INIT_LR, DECOMP_MOMENTUM,
+    DECOMP_LOSS_PATIENCE, DECOMP_LR_PATIENCE,
+    MABSS_WARM_START, MABSS_WARM_ITERS,
+    BOSS_N_RUNS, BOSS_MIN_RSE_DECOMP,
+    TNALE_N_RUNS, TNALE_MIN_RSE_DECOMP,
+    MABSS_BUDGET, MABSS_MAX_RANK,
+    MABSS_GP_KERNEL, MABSS_GP_BETA, MABSS_LEARN_NOISE, MABSS_FIXED_NOISE,
+    MABSS_EXP3_GAMMA, MABSS_EXP3_DECAY,
+    MABSS_EXP4_GAMMA, MABSS_EXP4_ETA, MABSS_LOSS_BINS, MABSS_CR_BINS,
+    BOSS_BUDGET, BOSS_MAX_BOND, BOSS_N_INIT, BOSS_LAMBDA_FITNESS, BOSS_UCB_BETA,
+    TNALE_BUDGET, TNALE_MAX_RANK, TNALE_TOPOLOGY, TNALE_LAMBDA_FITNESS,
+    TNALE_LOCAL_STEP_INIT, TNALE_LOCAL_STEP_MAIN, TNALE_INTERP_ON, TNALE_INTERP_ITERS,
+    TNALE_LOCAL_OPT_ITER, TNALE_INIT_SPARSITY, TNALE_PHASE_CHANGE_RESET,
+    TNALE_PERM_SAMPLES, TNALE_PERM_RADIUS,
+)
 
 DEFAULT_PARAMS: dict = {
     "n_cores": 5,
@@ -67,8 +85,8 @@ class SidebarConfig:
     boss_decomp_epochs: int = 1000
     mabss_decomp_method: str = "sgd"
     boss_decomp_method: str = "sgd"
-    mabss_decomp_init_lr: float | None = None
-    boss_decomp_init_lr: float | None = None
+    mabss_decomp_init_lr: float | None = 0.1
+    boss_decomp_init_lr: float | None = 0.1
     mabss_decomp_momentum: float = 0.5
     boss_decomp_momentum: float = 0.5
     mabss_decomp_loss_patience: int = 2500
@@ -92,13 +110,14 @@ class SidebarConfig:
     # BOSS
     boss_n_init: int = 10
     boss_max_bond: int = 10
+    boss_n_runs: int = 1
     boss_min_rse: float = 0.01
     boss_ucb_beta: float = 2.0
-    boss_lamda: float = 1.0
+    boss_lambda_fitness: float = 1.0
     # TnALE — decomposition
     tnale_decomp_epochs: int = 2000
-    tnale_decomp_method: str = "sgd"
-    tnale_decomp_init_lr: float | None = None
+    tnale_decomp_method: str = "adam"
+    tnale_decomp_init_lr: float | None = 0.1
     tnale_decomp_momentum: float = 0.9
     tnale_decomp_loss_patience: int = 2500
     tnale_decomp_lr_patience: int = 250
@@ -144,7 +163,7 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
     cfg.extend_mode = st.sidebar.toggle(
         "Extend existing run",
         value=False,
-        help="Add new seeds to an existing artifact directory without re-running completed seeds.",
+        help=EXTEND_RUN,
     )
     if cfg.extend_mode:
         _render_extend_mode(cfg)
@@ -157,13 +176,13 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
     cfg.seeds_str = _sc1.text_input(
         "Random Seeds (csv)",
         "1",
-        help="Comma-separated string defining execution iteration arrays.",
+        help=SEEDS,
     )
     cfg.cuda_device = _sc2.selectbox(
         "CUDA Device",
         [0, 1],
         index=0,
-        help="GPU device index passed as CUDA_VISIBLE_DEVICES to all subprocesses.",
+        help=CUDA_DEVICE,
     )
 
     _render_tmux(cfg)
@@ -172,7 +191,7 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
         "Selected Algorithms",
         ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4", "boss-ei", "boss-ucb", "tnale"],
         default=["mabss-greedy", "mabss-exp4"],
-        help="Search algorithms: `mabss-*` are sequential bandit rank-increment strategies; `boss-*` are global BO structure search; `tnale` is Alternating Local Enumeration with ring/full topology.",
+        help=SELECTED_ALGORITHMS,
     )
 
     st.sidebar.markdown("---")
@@ -186,7 +205,7 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
         "Run Name *",
         value="",
         placeholder="Required — enter a name for this run",
-        help="Artifacts are saved to artifacts/<run_name>/",
+        help=RUN_NAME,
     )
 
 
@@ -196,7 +215,7 @@ def _render_tmux(cfg: SidebarConfig) -> None:
     cfg.use_tmux = st.sidebar.toggle(
         "Launch in tmux session",
         value=bool(tmux_sessions),
-        help="Send the run script to an existing tmux session — survives dashboard disconnects.",
+        help=TMUX_SESSION,
     )
     if cfg.use_tmux:
         if tmux_sessions:
@@ -213,36 +232,47 @@ def _render_decomp_settings(cfg: SidebarConfig) -> None:
         has_boss = any(p.startswith("boss-") for p in cfg.algos_to_run)
         has_tnale = "tnale" in cfg.algos_to_run
 
-        specs = []
-        if has_mabss:
-            specs.append(("mabss", "MABSS", ["sgd", "pam", "als", "adam"], 60))
-        if has_boss:
-            specs.append(("boss", "BOSS", ["sgd", "pam", "als", "adam"], 1000))
+        _engines = ["sgd", "adam", "pam", "als"]
 
-        for prefix, label, engines, default_epochs in specs:
-            with st.sidebar.expander(label, expanded=False):
-                _render_decomp_family(cfg, prefix, engines, default_epochs, st)
-                if prefix == "mabss":
-                    ws_col1, ws_col2 = st.columns(2)
-                    _ws = ws_col1.selectbox("Warm Start", ["None", "pam", "als"], index=0)
-                    cfg.mabss_warm_start_method = None if _ws == "None" else _ws
-                    cfg.mabss_warm_start_epochs = ws_col2.number_input(
-                        "Warm Iters", value=0, min_value=0, step=10
-                    )
+        if has_mabss:
+            with st.sidebar.expander("MABSS", expanded=False):
+                _render_decomp_family(cfg, "mabss", _engines, 60, st)
+                ws_col1, ws_col2 = st.columns(2)
+                _ws = ws_col1.selectbox("Warm Start", ["None", "pam", "als"], index=0,
+                    help=MABSS_WARM_START)
+                cfg.mabss_warm_start_method = None if _ws == "None" else _ws
+                cfg.mabss_warm_start_epochs = ws_col2.number_input(
+                    "Warm Iters", value=0, min_value=0, step=10, help=MABSS_WARM_ITERS
+                )
+
+        if has_boss:
+            with st.sidebar.expander("BOSS", expanded=False):
+                _render_decomp_family(cfg, "boss", _engines, 1000, st)
+                br1, br2 = st.columns(2)
+                cfg.boss_n_runs = br1.number_input(
+                    "N Runs", min_value=1, max_value=10, value=cfg.boss_n_runs,
+                    key="boss_n_runs",
+                    help=BOSS_N_RUNS,
+                )
+                cfg.boss_min_rse = br2.number_input(
+                    "Min RSE", value=cfg.boss_min_rse, format="%e",
+                    key="boss_min_rse_decomp",
+                    help=BOSS_MIN_RSE_DECOMP,
+                )
 
         if has_tnale:
             with st.sidebar.expander("TnALE", expanded=False):
-                _render_decomp_family(cfg, "tnale", ["adam", "sgd", "pam", "als"], 2000, st, max_epochs=50000)
+                _render_decomp_family(cfg, "tnale", _engines, 2000, st, max_epochs=50000)
                 nr_col1, nr_col2 = st.columns(2)
                 cfg.tnale_n_runs = nr_col1.number_input(
                     "N Runs", min_value=1, max_value=10, value=cfg.tnale_n_runs,
                     key="tnale_n_runs",
-                    help="TN decomposition restarts per evaluation; best result is kept.",
+                    help=TNALE_N_RUNS,
                 )
                 cfg.tnale_min_rse = nr_col2.number_input(
                     "Min RSE", value=cfg.tnale_min_rse, format="%e",
                     key="tnale_min_rse",
-                    help="Early-stop threshold: stop restarts once RSE falls below this.",
+                    help=TNALE_MIN_RSE_DECOMP,
                 )
 
 
@@ -265,7 +295,7 @@ def _render_decomp_family(
             value=getattr(cfg, f"{prefix}_decomp_epochs", default_epochs),
             step=10,
             key=f"{prefix}_decomp_epochs",
-            help="Epochs for tensor decomposition evaluations.",
+            help=DECOMP_EPOCHS,
         ),
     )
     current_engine = getattr(cfg, f"{prefix}_decomp_method")
@@ -277,7 +307,7 @@ def _render_decomp_family(
             engines,
             index=engines.index(current_engine) if current_engine in engines else 0,
             key=f"{prefix}_decomp_method",
-            help="Decomposition backend for this policy family.",
+            help=DECOMP_ENGINE,
         ),
     )
 
@@ -290,7 +320,7 @@ def _render_decomp_family(
         step=0.001,
         format="%.4f",
         key=f"{prefix}_decomp_init_lr",
-        help="0 = auto (0.01 SGD / 0.002 Adam).",
+        help=DECOMP_INIT_LR,
     )
     setattr(cfg, f"{prefix}_decomp_init_lr", init_lr if init_lr > 0 else None)
     setattr(
@@ -304,7 +334,7 @@ def _render_decomp_family(
             step=0.05,
             format="%.2f",
             key=f"{prefix}_decomp_momentum",
-            help="SGD momentum coefficient.",
+            help=DECOMP_MOMENTUM,
         ),
     )
 
@@ -319,6 +349,7 @@ def _render_decomp_family(
             value=getattr(cfg, f"{prefix}_decomp_loss_patience"),
             step=100,
             key=f"{prefix}_decomp_loss_patience",
+            help=DECOMP_LOSS_PATIENCE,
         ),
     )
     setattr(
@@ -331,6 +362,7 @@ def _render_decomp_family(
             value=getattr(cfg, f"{prefix}_decomp_lr_patience"),
             step=50,
             key=f"{prefix}_decomp_lr_patience",
+            help=DECOMP_LR_PATIENCE,
         ),
     )
 
@@ -356,13 +388,11 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
             ma1, ma2 = st.columns(2)
             cfg.mabss_budget = ma1.number_input(
                 "Budget", min_value=1, max_value=10000, value=cfg.mabss_budget,
-                key="mabss_budget",
-                help="Number of rank-increment search steps.",
+                key="mabss_budget", help=MABSS_BUDGET,
             )
             cfg.mabss_max_rank = ma2.number_input(
                 "Max Search Rank", min_value=2, max_value=100, value=cfg.mabss_max_rank,
-                key="mabss_max_rank",
-                help=r"Maximum allowed bond dimension $\chi$ for any edge.",
+                key="mabss_max_rank", help=MABSS_MAX_RANK,
             )
 
             if has_ucb or has_exp3 or has_exp4:
@@ -372,16 +402,14 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
                 st.markdown("**GP-UCB Surrogate**")
                 u1, u2 = st.columns(2)
                 cfg.kernel_name = u1.selectbox(
-                    "Kernel", ["matern", "rbf"], index=0,
-                    help="Non-linear interpolation projection $k(x, x')$ powering the Gaussian Process backend.",
+                    "Kernel", ["matern", "rbf"], index=0, help=MABSS_GP_KERNEL,
                 )
                 cfg.beta = u2.slider(
-                    "Exploration Beta", 1.0, 10.0, 5.0, 0.5,
-                    help=r"Upper Confidence Bound tuning scalar: $\mu_{t}(x) + \beta \sigma_{t}(x)$.",
+                    "Exploration Beta", 1.0, 10.0, 5.0, 0.5, help=MABSS_GP_BETA,
                 )
                 n1, n2 = st.columns(2)
-                cfg.learn_noise = n1.checkbox("Learn Noise", value=False)
-                _fn_str = n2.text_input("Fixed Noise", "1e-6")
+                cfg.learn_noise = n1.checkbox("Learn Noise", value=False, help=MABSS_LEARN_NOISE)
+                _fn_str = n2.text_input("Fixed Noise", "1e-6", help=MABSS_FIXED_NOISE)
                 if not cfg.learn_noise:
                     try:
                         cfg.fixed_noise = float(_fn_str)
@@ -394,11 +422,9 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
             if has_exp3:
                 st.markdown("**EXP3 Parameters**")
                 e1, e2 = st.columns(2)
-                cfg.exp3_gamma = e1.slider(
-                    "EXP3 Gamma", 0.0, 1.0, 0.2,
-                    help=r"$\gamma \in (0,1]$ smoothing parameter.",
-                )
-                cfg.exp3_decay = e2.number_input("EXP3 Decay", value=0.95, step=0.01)
+                cfg.exp3_gamma = e1.slider("EXP3 Gamma", 0.0, 1.0, 0.2, help=MABSS_EXP3_GAMMA)
+                cfg.exp3_decay = e2.number_input("EXP3 Decay", value=0.95, step=0.01,
+                    help=MABSS_EXP3_DECAY)
 
             if (has_ucb or has_exp3) and has_exp4:
                 st.markdown("---")
@@ -406,46 +432,39 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
             if has_exp4:
                 st.markdown("**EXP4 Parameters**")
                 e3, e4 = st.columns(2)
-                cfg.exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, 0.1)
-                cfg.exp4_eta = e4.number_input("EXP4 Eta", value=0.5, step=0.1)
+                cfg.exp4_gamma = e3.slider("EXP4 Gamma", 0.0, 1.0, 0.1, help=MABSS_EXP4_GAMMA)
+                cfg.exp4_eta = e4.number_input("EXP4 Eta", value=0.5, step=0.1, help=MABSS_EXP4_ETA)
                 st.markdown("**EXP4 Context Discretization**")
                 b1, b2 = st.columns(2)
-                cfg.exp3_loss_bins = b1.number_input("Loss Bins", value=4, min_value=1)
-                cfg.exp3_cr_bins = b2.number_input("CR Bins", value=4, min_value=1)
+                cfg.exp3_loss_bins = b1.number_input("Loss Bins", value=4, min_value=1,
+                    help=MABSS_LOSS_BINS)
+                cfg.exp3_cr_bins = b2.number_input("CR Bins", value=4, min_value=1,
+                    help=MABSS_CR_BINS)
 
     if has_boss:
         with st.sidebar.expander("BOSS"):
             bo1, bo2 = st.columns(2)
             cfg.boss_budget = bo1.number_input(
                 "Budget", min_value=1, max_value=10000, value=cfg.boss_budget,
-                key="boss_budget",
-                help="Number of BO evaluations.",
+                key="boss_budget", help=BOSS_BUDGET,
             )
             cfg.boss_max_bond = bo2.number_input(
                 "Max Bond Rank", min_value=1, max_value=100, value=cfg.boss_max_bond,
-                key="boss_max_bond",
-                help=r"Upper bound on each bond rank in the search space.",
+                key="boss_max_bond", help=BOSS_MAX_BOND,
             )
             st.markdown("---")
             st.markdown("**Global Bayesian Optimization**")
-            ba1, ba2 = st.columns(2)
-            cfg.boss_n_init = ba1.number_input(
-                "Init Points ($n_{\\text{init}}$)", value=10, min_value=2,
-                help="Sobol quasi-random evaluations before BO loop starts.",
-            )
-            cfg.boss_min_rse = ba2.number_input(
-                "Min RSE Target", value=0.01, format="%f",
-                help="Early-stop threshold per TN evaluation.",
+            cfg.boss_n_init = st.number_input(
+                "Init Points ($n_{\\text{init}}$)", value=10, min_value=2, help=BOSS_N_INIT,
             )
             bc1, bc2 = st.columns(2)
-            cfg.boss_lamda = bc1.number_input(
-                "Lambda ($\\lambda$)", value=1.0, min_value=0.0, format="%f",
-                help=r"Trade-off weight $\lambda$ between RSE and CR in the BOSS objective.",
+            cfg.boss_lambda_fitness = bc1.number_input(
+                "λ Fitness", value=cfg.boss_lambda_fitness, min_value=0.0, format="%f",
+                help=BOSS_LAMBDA_FITNESS,
             )
             if "boss-ucb" in cfg.algos_to_run:
                 cfg.boss_ucb_beta = bc2.slider(
-                    "UCB Beta ($\\beta$)", 0.1, 10.0, 2.0, 0.1,
-                    help=r"Exploration weight for UCB acquisition: $\mu(x) - \beta\sigma(x)$.",
+                    "UCB Beta ($\\beta$)", 0.1, 10.0, 2.0, 0.1, help=BOSS_UCB_BETA,
                 )
 
     if has_tnale:
@@ -453,77 +472,64 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
             ta1, ta2 = st.columns(2)
             cfg.tnale_budget = ta1.number_input(
                 "Budget", min_value=1, max_value=10000, value=cfg.tnale_budget,
-                key="tnale_budget",
-                help="Number of ALE position evaluations.",
+                key="tnale_budget", help=TNALE_BUDGET,
             )
             cfg.tnale_max_rank = ta2.number_input(
                 "Max Search Rank", min_value=1, max_value=100, value=cfg.tnale_max_rank,
-                key="tnale_max_rank",
-                help="Maximum bond rank allowed in the search space.",
+                key="tnale_max_rank", help=TNALE_MAX_RANK,
             )
             st.markdown("---")
             t1, t2 = st.columns(2)
             cfg.tnale_topology = t1.selectbox(
                 "Topology", ["ring", "full"], index=0,
-                key="tnale_topology",
-                help="ring (TR): N ring bonds + permutation search. full (FCTN): all N*(N-1)/2 bonds.",
+                key="tnale_topology", help=TNALE_TOPOLOGY,
             )
             cfg.tnale_lambda_fitness = t2.number_input(
                 "λ Fitness", value=cfg.tnale_lambda_fitness, min_value=0.0, step=1.0,
-                key="tnale_lambda_fitness",
-                help="Fitness = CR + λ · RSE.",
+                key="tnale_lambda_fitness", help=TNALE_LAMBDA_FITNESS,
             )
             t3, t4 = st.columns(2)
             cfg.tnale_local_step_init = t3.number_input(
                 "Step Init", value=cfg.tnale_local_step_init, min_value=1, step=1,
-                key="tnale_local_step_init",
-                help="Neighbourhood radius during interpolation phase.",
+                key="tnale_local_step_init", help=TNALE_LOCAL_STEP_INIT,
             )
             cfg.tnale_local_step_main = t4.number_input(
                 "Step Main", value=cfg.tnale_local_step_main, min_value=1, step=1,
-                key="tnale_local_step_main",
-                help="Neighbourhood radius during main phase.",
+                key="tnale_local_step_main", help=TNALE_LOCAL_STEP_MAIN,
             )
             t5, t6 = st.columns(2)
             cfg.tnale_interp_on = t5.checkbox(
                 "Interpolation", value=cfg.tnale_interp_on, key="tnale_interp_on",
-                help="Evaluate only 3 sample points per position and interpolate RSE for the rest.",
+                help=TNALE_INTERP_ON,
             )
             cfg.tnale_interp_iters = t6.number_input(
                 "Interp Iters", value=cfg.tnale_interp_iters, min_value=1, step=1,
-                key="tnale_interp_iters",
-                help="Round-trips to run in the interpolation (init) phase.",
+                key="tnale_interp_iters", help=TNALE_INTERP_ITERS,
             )
             t7, t8 = st.columns(2)
             cfg.tnale_local_opt_iter = t7.number_input(
                 "Local Opt Iter", value=cfg.tnale_local_opt_iter, min_value=1, step=1,
-                key="tnale_local_opt_iter",
-                help="Forward-backward repetitions per round-trip.",
+                key="tnale_local_opt_iter", help=TNALE_LOCAL_OPT_ITER,
             )
             cfg.tnale_init_sparsity = t8.number_input(
                 "Init Sparsity", value=cfg.tnale_init_sparsity, min_value=0.0,
                 max_value=1.0, step=0.05, format="%.2f",
-                key="tnale_init_sparsity",
-                help="Probability of rank=1 (absent bond) in the initial random structure.",
+                key="tnale_init_sparsity", help=TNALE_INIT_SPARSITY,
             )
             cfg.tnale_phase_change_reset = st.checkbox(
                 "Phase Change Reset", value=cfg.tnale_phase_change_reset,
-                key="tnale_phase_change_reset",
-                help="Force-accept init-phase best as main-phase warm-start.",
+                key="tnale_phase_change_reset", help=TNALE_PHASE_CHANGE_RESET,
             )
             if cfg.tnale_topology == "ring":
                 st.markdown("**Permutation Search**")
                 p1, p2 = st.columns(2)
                 cfg.tnale_n_perm_samples = p1.number_input(
                     "Perm Samples", value=cfg.tnale_n_perm_samples, min_value=0, step=1,
-                    key="tnale_n_perm_samples",
-                    help="Candidates per permutation step. 0 = exhaustive N*(N-1)/2 transpositions; "
-                         "N = sample N via Algorithm 1 (Li et al. 2022).",
+                    key="tnale_n_perm_samples", help=TNALE_PERM_SAMPLES,
                 )
                 cfg.tnale_perm_radius = p2.number_input(
                     "Perm Radius", value=cfg.tnale_perm_radius, min_value=1, step=1,
-                    key="tnale_perm_radius",
-                    help="Transpositions per sample (Algorithm 1 radius d). radius=1 = single swap.",
+                    key="tnale_perm_radius", help=TNALE_PERM_RADIUS,
                 )
 
 
@@ -566,7 +572,7 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.seeds_str = _sc1.text_input(
         "New Seeds (csv)",
         "",
-        help="Seeds to add. Already-completed seed/algo combos are automatically skipped.",
+        help=EXTEND_SEEDS,
     )
     cfg.cuda_device = _sc2.selectbox("CUDA Device", [0, 1], index=0)
 
@@ -590,8 +596,8 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.boss_decomp_epochs    = _get("boss_decomp_epochs", 1000)
     cfg.mabss_decomp_method   = _get("mabss_decomp_method", "sgd")
     cfg.boss_decomp_method    = _get("boss_decomp_method", "sgd")
-    cfg.mabss_decomp_init_lr  = _get("mabss_decomp_init_lr", None)
-    cfg.boss_decomp_init_lr   = _get("boss_decomp_init_lr", None)
+    cfg.mabss_decomp_init_lr  = _get("mabss_decomp_init_lr", 0.1)
+    cfg.boss_decomp_init_lr   = _get("boss_decomp_init_lr", 0.1)
     cfg.mabss_decomp_momentum = _get("mabss_decomp_momentum", 0.5)
     cfg.boss_decomp_momentum  = _get("boss_decomp_momentum", 0.5)
     cfg.mabss_decomp_loss_patience = _get("mabss_decomp_loss_patience", 2500)
@@ -612,9 +618,10 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.exp4_eta              = _get("exp4_eta", 0.5)
     cfg.boss_n_init           = _get("boss_n_init", 10)
     cfg.boss_max_bond         = _get("boss_max_bond", 10)
+    cfg.boss_n_runs           = _get("boss_n_runs", 1)
     cfg.boss_min_rse          = _get("boss_min_rse", 0.01)
     cfg.boss_ucb_beta         = _get("boss_ucb_beta", 2.0)
-    cfg.boss_lamda            = _get("boss_lamda", 1.0)
+    cfg.boss_lambda_fitness            = _get("boss_lambda_fitness", 1.0)
     cfg.tnale_decomp_epochs      = _get("tnale_decomp_epochs", 2000)
     cfg.tnale_decomp_method      = _get("tnale_decomp_method", "adam")
     cfg.tnale_decomp_init_lr     = _get("tnale_decomp_init_lr", None)
