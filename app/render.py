@@ -251,7 +251,7 @@ def render_results(
 ) -> None:
     """Render the full results view: macro plots, per-seed drill-downs, export."""
     from app.plots import (
-        plot_boss_objective,
+        plot_objective,
         plot_loss_and_regret,
         plot_arm_trace,
         plot_loss_vs_runtime_seed,
@@ -262,13 +262,11 @@ def render_results(
     )
     from app.utils import get_policy_color, _cr_from_adj
 
-    frames = [df for df in (df_mabss, df_boss, df_tnale) if df is not None and not df.empty]
-    df_rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    df_rows = pd.concat([df_mabss, df_boss, df_tnale], ignore_index=True)
 
     st.markdown("## Global Performance Overview")
 
     _has_mabss = df_mabss is not None and not df_mabss.empty
-    _has_boss = df_boss is not None and not df_boss.empty
 
     if _has_mabss:
         st.markdown("#### MABSS — Loss & Regret")
@@ -287,66 +285,71 @@ def render_results(
             key="loss_and_regret_mabss",
         )
 
-    if _has_boss:
-        st.markdown("#### BOSS — Objective Convergence")
-        _boss_steps = sorted(df_boss["step"].dropna().unique().astype(int))
-        _boss_slider_col, _ = st.columns([1, 3])
-        with _boss_slider_col:
-            _boss_max_step = st.select_slider(
-                "Max step shown (BOSS)",
-                options=_boss_steps,
-                value=_boss_steps[-1],
-                key="boss_step_crop",
+    # Combined Objective (CR + λ·RSE) view across BOSS + TnALE.
+    # plot_objective handles concat, legacy filtering, and max-evals cropping.
+    _max_evals = max(
+        (int(d.groupby("Seed", sort=False).size().max())
+         for d in (df_boss, df_tnale)
+         if d is not None and not d.empty),
+        default=0,
+    )
+    if _max_evals > 0:
+        st.markdown("#### Objective Convergence")
+        _obj_slider_col, _ = st.columns([1, 3])
+        with _obj_slider_col:
+            _obj_max_evals = st.slider(
+                "Max function evaluations shown",
+                min_value=1, max_value=_max_evals, value=_max_evals,
+                key="obj_evals_crop",
             )
         st.plotly_chart(
-            plot_boss_objective(df_boss[df_boss["step"] <= _boss_max_step]),
+            plot_objective(df_boss, df_tnale, max_evals=_obj_max_evals),
             use_container_width=True,
-            key="boss_objective_global",
+            key="objective_global",
         )
 
-    if not df_rows.empty:
-        st.markdown("#### Performance vs Runtime")
-        _ctrl_col, _chart_col = st.columns([1, 5])
-        with _ctrl_col:
-            _threshold = st.number_input(
-                "Loss threshold",
-                min_value=0.0, max_value=1.0, value=0.05, step=0.01, format="%.3f",
-                key="ttt_threshold",
-            )
-            _has_eff = "efficiency" in df_rows.columns
-            _y_metric = st.selectbox(
-                "Y-axis",
-                options=["CR", "Efficiency"] if _has_eff else ["CR"],
-                key="ttt_y_metric",
-            )
-        with _chart_col:
-            st.plotly_chart(
-                plot_time_to_threshold(df_rows, threshold=_threshold, y_metric=_y_metric),
-                use_container_width=True,
-                key="time_to_threshold_global",
-            )
+    st.markdown("#### Performance vs Runtime")
+    _ctrl_col, _chart_col = st.columns([1, 5])
+    with _ctrl_col:
+        _threshold = st.number_input(
+            "Loss threshold",
+            min_value=0.0, max_value=1.0, value=0.05, step=0.01, format="%.3f",
+            key="ttt_threshold",
+        )
+        _has_eff = "efficiency" in df_rows.columns
+        _y_metric = st.selectbox(
+            "Y-axis",
+            options=["CR", "Efficiency"] if _has_eff else ["CR"],
+            key="ttt_y_metric",
+        )
+    with _chart_col:
+        st.plotly_chart(
+            plot_time_to_threshold(df_rows, threshold=_threshold, y_metric=_y_metric),
+            use_container_width=True,
+            key="time_to_threshold_global",
+        )
 
-        st.markdown("#### Pareto Curves")
-        _pareto_ctrl, _pareto_chart = st.columns([1, 5])
-        with _pareto_ctrl:
-            _available_steps = sorted(df_rows["step"].dropna().unique().astype(int))
-            _pareto_step = st.select_slider(
-                "Step",
-                options=_available_steps,
-                value=_available_steps[-1],
-                key="pareto_step",
-            )
-            _pareto_y_metric = st.selectbox(
-                "Y-axis",
-                options=["CR", "Efficiency"] if _has_eff else ["CR"],
-                key="pareto_y_metric",
-            )
-        with _pareto_chart:
-            st.plotly_chart(
-                plot_pareto_at_step(df_rows, step=_pareto_step, y_metric=_pareto_y_metric),
-                use_container_width=True,
-                key="pareto_global",
-            )
+    st.markdown("#### Pareto Curves")
+    _pareto_ctrl, _pareto_chart = st.columns([1, 5])
+    with _pareto_ctrl:
+        _available_steps = sorted(df_rows["step"].dropna().unique().astype(int))
+        _pareto_step = st.select_slider(
+            "Step",
+            options=_available_steps,
+            value=_available_steps[-1],
+            key="pareto_step",
+        )
+        _pareto_y_metric = st.selectbox(
+            "Y-axis",
+            options=["CR", "Efficiency"] if _has_eff else ["CR"],
+            key="pareto_y_metric",
+        )
+    with _pareto_chart:
+        st.plotly_chart(
+            plot_pareto_at_step(df_rows, step=_pareto_step, y_metric=_pareto_y_metric),
+            use_container_width=True,
+            key="pareto_global",
+        )
 
     st.divider()
     st.markdown("## Seed-Specific Analysis Maps")
@@ -354,9 +357,6 @@ def render_results(
     for seed in sorted(df_rows["Seed"].unique()):
         with st.expander(f"Seed {seed} — Execution Trace", expanded=False):
             seed_df = df_rows[df_rows["Seed"] == seed]
-            if seed_df.empty:
-                continue
-
             seed_summaries = [s for s in summaries if s.get("Seed") == seed]
             algo_names = [s["algo"] for s in seed_summaries]
             s_dir = out_dir / f"seed_{seed}" if (out_dir / f"seed_{seed}").exists() else out_dir
@@ -395,8 +395,6 @@ def render_results(
                 algo_name = s["algo"]
                 c = get_policy_color(algo_name)
                 sub = seed_df[seed_df["Algo"] == algo_name]
-                if sub.empty:
-                    continue
                 _decomp_data = decomp_dict.get((seed, algo_name), [])
                 if _decomp_data:
                     _col_arm, _col_decomp = st.columns(2)

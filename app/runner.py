@@ -121,6 +121,8 @@ def tnale_cmd(cfg: SidebarConfig, seed: int, algo_dir: Path) -> list[str]:
         "--lambda-fitness",  str(cfg.tnale_lambda_fitness),
         "--n-perm-samples",  str(cfg.tnale_n_perm_samples),
         "--perm-radius",     str(cfg.tnale_perm_radius),
+        "--init-method",     cfg.tnale_init_method,
+        "--n-sobol-init",    str(cfg.tnale_n_sobol_init),
         "--seed",            str(seed),
         "--out-dir",         str(algo_dir),
     ]

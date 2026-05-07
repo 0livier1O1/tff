@@ -439,6 +439,22 @@ def _render_advanced_policy(cfg: SidebarConfig) -> None:
                 "Phase Change Reset", value=cfg.tnale_phase_change_reset,
                 key="tnale_phase_change_reset", help=TNALE_PHASE_CHANGE_RESET,
             )
+            i1, i2 = st.columns(2)
+            cfg.tnale_init_method = i1.selectbox(
+                "Init Method",
+                options=["sparse", "sobol"],
+                index=["sparse", "sobol"].index(cfg.tnale_init_method),
+                key="tnale_init_method",
+                help=("'sparse' = single random sparse start (paper default). "
+                      "'sobol' = BOSS-style Sobol init: evaluate N samples and start "
+                      "from the best. With topology='full', same seed, and matching "
+                      "(n_sobol_init, max_rank-1) the samples are identical to BOSS's."),
+            )
+            cfg.tnale_n_sobol_init = i2.number_input(
+                "Sobol Init Samples", value=cfg.tnale_n_sobol_init,
+                min_value=1, step=1, key="tnale_n_sobol_init",
+                help="Number of Sobol candidates evaluated when Init Method = sobol.",
+            )
             if cfg.tnale_topology == "ring":
                 st.markdown("**Permutation Search**")
                 p1, p2 = st.columns(2)
@@ -563,6 +579,8 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.tnale_perm_radius        = _get("tnale_perm_radius", _D.tnale_perm_radius)
     cfg.tnale_phase_change_reset = _get("tnale_phase_change_reset", _D.tnale_phase_change_reset)
     cfg.tnale_min_rse            = _get("tnale_min_rse", _D.tnale_min_rse)
+    cfg.tnale_init_method        = _get("tnale_init_method", _D.tnale_init_method)
+    cfg.tnale_n_sobol_init       = _get("tnale_n_sobol_init", _D.tnale_n_sobol_init)
     cfg.adj_spec                     = _get("adj_spec", _D.adj_spec)
     cfg.adj_r_min                    = _get("adj_r_min", _D.adj_r_min)
     cfg.adj_r_max                    = _get("adj_r_max", _D.adj_r_max)

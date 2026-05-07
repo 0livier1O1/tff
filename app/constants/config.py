@@ -89,6 +89,8 @@ class SidebarConfig:
     tnale_perm_radius: int = 1
     tnale_phase_change_reset: bool = True
     tnale_min_rse: float = 1e-2
+    tnale_init_method: str = "sobol"     # "sparse" (paper default) or "sobol" (BOSS-style)
+    tnale_n_sobol_init: int = 10
     # MABSS runtime constants (not exposed in UI; centralised here for reproducibility)
     mabss_stopping_threshold: float = 1e-5
     mabss_exp3_reward_scale: float = 0.05

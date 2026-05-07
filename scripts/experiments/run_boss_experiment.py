@@ -165,6 +165,7 @@ def main():
         momentum=args.momentum,
         loss_patience=args.loss_patience,
         lr_patience=args.lr_patience,
+        seed=args.seed,
         verbose=True,
     )
 

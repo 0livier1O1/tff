@@ -10,16 +10,24 @@ Expected columns: step, par_loss, step_loss, current_cr, selected_arm,
 
 import pandas as pd
 import numpy as np
+import plotly.colors as pc
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-POLICY_COLORS = {
-    "mabss-greedy": "#4E79A7",
-    "mabss-ucb": "#E15759",
-    "mabss-exp3": "#59A14F",
-    "mabss-exp4": "#F28E2B",
-    "boss-ei": "#9467BD",
-    "boss-ucb": "#8C564B",
+
+# (colorscale, sample position) per policy — variants of one algorithm share a hue family.
+_POLICY_FAMILY = {
+    "mabss-greedy": ("Blues",   0.45),
+    "mabss-ucb":    ("Blues",   0.60),
+    "mabss-exp3":   ("Blues",   0.75),
+    "mabss-exp4":   ("Blues",   0.90),
+    "boss-ei":      ("Oranges", 0.55),
+    "boss-ucb":     ("Oranges", 0.85),
+    "tnale":        ("Greys",   0.85),
+}
+POLICY_COLORS: dict[str, str] = {
+    name: pc.sample_colorscale(scale, [pos])[0]
+    for name, (scale, pos) in _POLICY_FAMILY.items()
 }
 
 
@@ -37,8 +45,11 @@ def get_policy_color(name: str) -> str:
     return "#888888"
 
 
-def _rgba(hex_color: str, alpha: float) -> str:
-    r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
+def _rgba(color: str, alpha: float) -> str:
+    """Convert a '#rrggbb' or 'rgb(r, g, b)' string to 'rgba(r, g, b, alpha)'."""
+    if color.startswith("rgb"):
+        return color.replace("rgb(", "rgba(")[:-1] + f", {alpha})"
+    r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
     return f"rgba({r},{g},{b},{alpha})"
 
 
@@ -92,44 +103,59 @@ def _interpolate_on_time_grid(
 # ---------------------------------------------------------------------------
 
 
-def plot_boss_objective(df_boss: pd.DataFrame, n_points: int = 300) -> go.Figure:
+def plot_objective(
+    df_boss: pd.DataFrame | None,
+    df_tnale: pd.DataFrame | None,
+    max_evals: int | None = None,
+    n_points: int = 300,
+) -> go.Figure:
     """
-    2-subplot side-by-side figure for BOSS:
-      Left  — cumulative min objective (CR + λ·RSE) vs search step (min–max band over seeds)
-      Right — cumulative min objective vs cumulative wall-clock runtime (zero-order hold)
+    Cumulative-min objective (CR + λ·RSE) for BOSS and TnALE on shared axes.
+
+    The x-axis is the per-seed function-evaluation count (one row = one
+    decomposition). Legacy rows missing step_time_s are dropped. Optional
+    max_evals crops the eval axis.
+
+      Left  — vs function evaluations (min–max band over seeds)
+      Right — vs cumulative wall-clock runtime (zero-order hold)
     """
     fig = make_subplots(
         rows=1, cols=2,
         subplot_titles=(
-            "Cumulative Min Objective vs. Step (min–max band)",
+            "Cumulative Min Objective vs. Function Evaluations (min–max band)",
             "Cumulative Min Objective vs. Cumulative Runtime (min–max band)",
         ),
     )
 
-    for policy in sorted(df_boss["Algo"].unique()):
+    df = pd.concat([df_boss, df_tnale], ignore_index=True)
+    df = df[df["step_time_s"].notna() & df["objective"].notna()].copy()
+    df["n_evals"] = df.groupby(["Algo", "Seed"], sort=False).cumcount() + 1
+    if max_evals is not None:
+        df = df[df["n_evals"] <= max_evals]
+
+    for policy in sorted(df["Algo"].unique()):
         color = get_policy_color(policy)
         rgb = _rgba(color, 0.2)
-        pol = df_boss[df_boss["Algo"] == policy].copy().sort_values(["Seed", "step"])
+        pol = df[df["Algo"] == policy].copy().sort_values(["Seed", "n_evals"])
         pol["cum_min_obj"] = pol.groupby("Seed")["objective"].cummin()
         pol["cum_time_s"] = pol.groupby("Seed")["step_time_s"].cumsum()
 
-        # Left: vs step — aggregate over seeds
-        gb = pol.groupby("step")
-        steps = list(gb.groups.keys())
-        mean_obj = gb["cum_min_obj"].mean().values
-        lo_obj = gb["cum_min_obj"].min().values
-        hi_obj = gb["cum_min_obj"].max().values
+        # Left: vs n_evals — aggregate over seeds
+        gb = pol.groupby("n_evals")["cum_min_obj"]
+        evals = list(gb.groups.keys())
+        mean_obj = gb.mean().values
+        lo_obj, hi_obj = gb.min().values, gb.max().values
 
         fig.add_trace(go.Scatter(
-            x=steps, y=hi_obj, mode="lines", line=dict(width=0),
+            x=evals, y=hi_obj, mode="lines", line=dict(width=0),
             showlegend=False, hoverinfo="skip",
         ), row=1, col=1)
         fig.add_trace(go.Scatter(
-            x=steps, y=lo_obj, mode="lines", line=dict(width=0),
+            x=evals, y=lo_obj, mode="lines", line=dict(width=0),
             fill="tonexty", fillcolor=rgb, showlegend=False, hoverinfo="skip",
         ), row=1, col=1)
         fig.add_trace(go.Scatter(
-            x=steps, y=mean_obj, mode="lines",
+            x=evals, y=mean_obj, mode="lines",
             line=dict(color=color, width=2),
             name=policy.upper(), showlegend=False,
         ), row=1, col=1)
@@ -160,7 +186,29 @@ def plot_boss_objective(df_boss: pd.DataFrame, n_points: int = 300) -> go.Figure
             name=policy.upper(), showlegend=True,
         ), row=1, col=2)
 
-    fig.update_xaxes(title_text="Search Step", row=1, col=1)
+    # Mark end of BOSS init phase on both subplots.
+    boss_init = df[df["Algo"].str.startswith("boss-") & (df["phase"] == "init")]
+    if not boss_init.empty:
+        _init_line = dict(color="#888888", width=1, dash="dot")
+        _init_anno = dict(size=9, color="#888888")
+        fig.add_vline(
+            x=int(boss_init["n_evals"].max()),
+            line=_init_line, row=1, col=1,
+            annotation_text="end of init",
+            annotation_position="top",
+            annotation_font=_init_anno,
+        )
+        # Runtime axis: mean total init wall time across BOSS (Algo, Seed) pairs.
+        t_init = boss_init.groupby(["Algo", "Seed"])["step_time_s"].sum().mean()
+        fig.add_vline(
+            x=float(t_init),
+            line=_init_line, row=1, col=2,
+            annotation_text="end of init",
+            annotation_position="top",
+            annotation_font=_init_anno,
+        )
+
+    fig.update_xaxes(title_text="Function Evaluations", row=1, col=1)
     fig.update_xaxes(title_text="Cumulative Runtime (s)", row=1, col=2)
     fig.update_yaxes(title_text="Cumulative Min Objective", row=1, col=1)
     fig.update_yaxes(title_text="Cumulative Min Objective", row=1, col=2)
@@ -674,10 +722,6 @@ def plot_decomp_curves(decomp_data: list[dict], algo_name: str, color: str) -> g
         all_y.extend(losses)
         epoch_cursor += len(losses)
 
-    r = int(color[1:3], 16)
-    g = int(color[3:5], 16)
-    b = int(color[5:7], 16)
-
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -696,13 +740,13 @@ def plot_decomp_curves(decomp_data: list[dict], algo_name: str, color: str) -> g
             type="line",
             x0=x0, x1=x0, y0=0, y1=1,
             yref="paper",
-            line=dict(color=f"rgba({r},{g},{b},0.4)", width=1, dash="dash"),
+            line=dict(color=_rgba(color, 0.4), width=1, dash="dash"),
         ))
         annotations.append(dict(
             x=x0, y=1, yref="paper",
             text=f"s{step}<br>a{arm}",
             showarrow=False,
-            font=dict(size=9, color=f"rgba({r},{g},{b},0.8)"),
+            font=dict(size=9, color=_rgba(color, 0.8)),
             xanchor="left",
             yanchor="top",
         ))
@@ -729,9 +773,6 @@ def plot_time_to_threshold(
     Each point is one (policy, seed) pair. Colored by policy.
     Points where the threshold is never reached are omitted.
     """
-    if "step_loss" not in df_rows.columns or "step_time_s" not in df_rows.columns:
-        return go.Figure()
-
     use_efficiency = y_metric == "Efficiency" and "efficiency" in df_rows.columns
     y_col = "efficiency" if use_efficiency else "current_cr"
     y_label = "Efficiency (CR / target CR)" if use_efficiency else "Compression Ratio (CR)"

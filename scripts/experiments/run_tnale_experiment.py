@@ -42,8 +42,10 @@ from tnss.algo.tnale import TnALE
 
 
 def _seed_all(seed: int) -> None:
+    import torch
     np.random.seed(seed)
     cp.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 def main() -> None:
@@ -83,6 +85,13 @@ def main() -> None:
                         help="Algorithm 1 radius: transpositions per sample.")
     parser.add_argument("--no-phase-change-reset", dest="phase_change_reset",
                         action="store_false")
+    parser.add_argument("--init-method", type=str, default="sparse",
+                        choices=["sparse", "sobol"],
+                        help="'sparse' = single random sparse init (paper default); "
+                             "'sobol' = BOSS-style Sobol init, evaluate n samples "
+                             "and start from the best.")
+    parser.add_argument("--n-sobol-init", type=int, default=10,
+                        help="Number of Sobol samples when --init-method=sobol.")
     # IO
     parser.add_argument("--out-dir", type=str, required=True)
     parser.add_argument("--target-path", type=str, default=None)
@@ -141,6 +150,9 @@ def main() -> None:
         loss_patience=args.loss_patience,
         lr_patience=args.lr_patience,
         phase_change_reset=args.phase_change_reset,
+        init_method=args.init_method,
+        n_sobol_init=args.n_sobol_init,
+        seed=args.seed,
         dtype=args.dtype,
         verbose=True,
     )

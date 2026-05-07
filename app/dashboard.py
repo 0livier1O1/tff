@@ -95,15 +95,12 @@ if "active_runs" not in st.session_state:
 render_job_status_panel(ROOT)
 
 # ---------------------------------------------------------------------------
-# Mode-specific rendering
+# Mode-specific rendering — results are only rendered in Load Past Artifact mode
 # ---------------------------------------------------------------------------
-
-data_ready = False
 
 if cfg.app_mode == "Load Past Artifact":
     data_ready, df_mabss, df_boss, df_tnale, summaries, decomp_dict, pol_diagnostics_dict, df_summary, out_dir = render_load_mode(ROOT)
-
-if data_ready:
-    render_results(df_mabss, df_boss, df_tnale, summaries, decomp_dict, pol_diagnostics_dict, df_summary, out_dir, ROOT)
+    if data_ready:
+        render_results(df_mabss, df_boss, df_tnale, summaries, decomp_dict, pol_diagnostics_dict, df_summary, out_dir, ROOT)
 elif not st.session_state.get("active_runs"):
     st.info("**Awaiting initialization.** Setup your environment context and click Execute.")

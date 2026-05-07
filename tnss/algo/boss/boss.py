@@ -94,6 +94,7 @@ class BOSS:
         lr_patience: int = 250,
         raw_samples: int = 256,
         num_restarts: int = 10,
+        seed: int | None = None,
         verbose: bool = True,
     ):
         self.target = target
@@ -118,6 +119,7 @@ class BOSS:
         self.budget = budget
         self.raw_samples = raw_samples
         self.num_restarts = num_restarts
+        self.seed = seed
         self.verbose = verbose
         
         # Search space: [1, max_rank]^D normalized to [0, 1]^D
@@ -250,7 +252,9 @@ class BOSS:
         )
 
     def _sobol_init(self, progress_file):
-        raw = draw_sobol_samples(bounds=self.std_bounds, n=self.n_init, q=1).squeeze(1)
+        raw = draw_sobol_samples(
+            bounds=self.std_bounds, n=self.n_init, q=1, seed=self.seed,
+        ).squeeze(1)
         X = raw.to(torch.double)
 
         rse_list, cr_list, t_list = [], [], []

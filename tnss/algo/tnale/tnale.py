@@ -102,6 +102,9 @@ class TnALE:
         loss_patience: int = 2500,
         lr_patience: int = 250,
         phase_change_reset: bool = True,
+        init_method: str = "sparse",
+        n_sobol_init: int = 10,
+        seed: int | None = None,
         verbose: bool = True,
     ) -> None:
         tgt = target.numpy() if hasattr(target, "numpy") else np.asarray(target)
@@ -147,6 +150,11 @@ class TnALE:
         self.loss_patience = loss_patience
         self.lr_patience = lr_patience
         self.phase_change_reset = phase_change_reset
+        if init_method not in ("sparse", "sobol"):
+            raise ValueError(f"init_method must be 'sparse' or 'sobol', got {init_method!r}")
+        self.init_method = init_method
+        self.n_sobol_init = n_sobol_init
+        self.seed = seed
         self.verbose = verbose
 
         self.rows: list[dict] = []
@@ -188,68 +196,76 @@ class TnALE:
         N = self.N
         D = self.D
 
-        # Random sparse initial bond ranks (shape D)
-        raw = np.array(
-            [
-                0 if np.random.random() <= self.init_sparsity
-                else np.random.randint(2, self.max_rank)
-                for _ in range(D)
-            ],
-            dtype=int,
-        )
-        raw[raw == 0] = 1  # 0 → rank=1 (no bond)
-
+        # Permutation + position sweep ordering
         if self._use_perm:
-            # Ring: permutation searched at position D (= N), between fwd/bwd rank sweeps
-            self._fixed_permute = np.random.permutation(N)
-            self._PERM_IDX = D          # = N for ring
-            fwd = np.arange(D + 1)      # rank positions 0..D-1 plus permutation at D
-            bwd = np.arange(1, D)[::-1] # backward rank sweep D-1..1 (no permutation)
+            # Ring: permutation searched at position D (= N), between fwd/bwd rank sweeps.
+            # Sobol init uses identity permutation to match BOSS; sparse init randomises.
+            self._fixed_permute = (
+                np.arange(N) if self.init_method == "sobol"
+                else np.random.permutation(N)
+            )
+            self._PERM_IDX = D
+            fwd = np.arange(D + 1)
+            bwd = np.arange(1, D)[::-1]
             self._round_trip_len = 2 * D * self.local_opt_iter + 1
         else:
-            # Full / custom: identity permutation, no permutation step
             self._fixed_permute = np.arange(N)
-            self._PERM_IDX = -1         # disabled
+            self._PERM_IDX = -1
             fwd = np.arange(D)
             bwd = np.arange(1, D - 1)[::-1]
             self._round_trip_len = 2 * (D - 1) * self.local_opt_iter + 1
 
+        # Phase / sweep state needed both for Sobol evaluations (if any) and main loop
+        self._interp_on = self.interp_on
+        self._in_init_phase = True  # Sobol/sparse init evaluations are 'init' regardless of interp_on
+        self._local_step = self.local_step_init if self._interp_on else self.local_step_main
+        self._times_of_local_sampling = 1
+        self._update_idx = -1  # placeholder for any pre-ALE evaluations
+        self._last_row_time = time.time()
+
+        # Choose initial ranks
+        if self.init_method == "sobol":
+            raw = self._run_sobol_init()
+        else:
+            raw = np.array(
+                [
+                    0 if np.random.random() <= self.init_sparsity
+                    else np.random.randint(2, self.max_rank)
+                    for _ in range(D)
+                ],
+                dtype=int,
+            )
+            raw[raw == 0] = 1  # 0 → rank=1 (no bond)
+
+        # Center + grid are pinned to the chosen ranks
         self._center = Structure(raw, self.phys_dims, self._fixed_permute, self._bonds)
         self._center_fitness = float("inf")
         self._center_rse = float("inf")
         self._center_cr = float("inf")
 
-        self._interp_on = self.interp_on
-        self._in_init_phase = self.interp_on  # False once local_step shrinks to local_step_main
-        self._local_step = self.local_step_init if self._interp_on else self.local_step_main
-        self._times_of_local_sampling = 1
-
         self._grid = make_grid(raw, self.max_rank, self._local_step)
-
-        # fixed_ranks[i] = currently locked-in rank for bond position i
         self._fixed_ranks = raw.copy()
 
         self._position_seq = np.concatenate(
             [np.tile(np.concatenate([fwd, bwd]), self.local_opt_iter), [0]]
         )
-        self._times_of_update = 1  # position_seq[0] = pos 0 evaluated in bootstrap below
+        self._times_of_update = 1
 
-        # Temporary best within the current round-trip
         self._temp_best = self._center.copy()
         self._temp_best_fitness = float("inf")
         self._temp_best_rse = float("inf")
         self._temp_best_cr = float("inf")
 
-        # Convergence state
         self._unchange_count = 0
         self._round_trip_complete = False
         self._local_reupdate = False
-        self._local_reinit = False   # True when in random-perturbation mode
+        self._local_reinit = False
 
-        # RSE propagation: carry forward best known RSE when the same structure
-        # reappears as a candidate in the next position's sweep
         self._rse_propagate = float("inf")
         self._rse_propagate_index: int | None = None
+
+        # From here on _in_init_phase reflects interp_on (drives ALE phase logic)
+        self._in_init_phase = self.interp_on
 
         # Bootstrap: evaluate position 0 to start the round-trip
         self._update_idx = 0
@@ -576,11 +592,55 @@ class TnALE:
         self._eval_position(0)
 
     # ------------------------------------------------------------------
+    # Sobol initialisation phase
+    # ------------------------------------------------------------------
+
+    def _run_sobol_init(self) -> np.ndarray:
+        """
+        Draw n_sobol_init Sobol candidates, evaluate each, return ranks of the best.
+
+        Bit-identical samples to BOSS when topology='full', same seed, same
+        n_sobol_init, and tnale.max_rank == boss.max_rank + 1 (TnALE's bound
+        is exclusive, BOSS's inclusive). Caller must have already set
+        self._fixed_permute and the _in_init_phase / _last_row_time state
+        used by _record.
+        """
+        import torch
+        from botorch.utils.sampling import draw_sobol_samples
+        from botorch.utils.transforms import unnormalize
+
+        R = self.max_rank - 1
+        bounds = torch.stack([
+            torch.ones(self.D, dtype=torch.double),
+            torch.full((self.D,), float(R), dtype=torch.double),
+        ])
+        std = torch.zeros_like(bounds); std[1] = 1.0
+        sobol = draw_sobol_samples(bounds=std, n=self.n_sobol_init, q=1, seed=self.seed).squeeze(1)
+        samples = unnormalize(sobol, bounds).round().clamp(1, R).to(torch.int).numpy()
+
+        best_obj = float("inf")
+        best_ranks = samples[0].copy()
+        for ranks in samples:
+            s = Structure(ranks.copy(), self.phys_dims, self._fixed_permute, self._bonds)
+            rse, cr, _ = self._eval_one(s, update_idx=None)
+            obj = cr + self.lambda_fitness * rse
+            if obj < best_obj:
+                best_obj = obj
+                best_ranks = ranks.copy()
+
+        if self.verbose:
+            print(f"[TnALE Sobol init] best obj = {best_obj:.5f}  ranks = {best_ranks.tolist()}")
+        return best_ranks
+
+    # ------------------------------------------------------------------
     # Row recording and output
     # ------------------------------------------------------------------
 
     def _record(self, s: Structure, rse: float, cr: float, elapsed: float) -> None:
         self.eval_count += 1
+        now = time.time()
+        step_time = now - self._last_row_time
+        self._last_row_time = now
         self.rows.append(
             {
                 "step": self.eval_count,
@@ -594,8 +654,9 @@ class TnALE:
                 "best_rse": self.best_rse,
                 "best_cr": self.best_cr,
                 "sparsity": cr,
-                "fitness": cr + self.lambda_fitness * rse,
-                "eval_time_s": elapsed,
+                "objective": cr + self.lambda_fitness * rse,
+                "decomp_time": elapsed,
+                "step_time_s": step_time,
             }
         )
 
