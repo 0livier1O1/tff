@@ -854,6 +854,338 @@ def plot_time_to_threshold(
     return fig
 
 
+# ---------------------------------------------------------------------------
+# GP-UCB geometry visualisations (matplotlib, notebook-friendly)
+# ---------------------------------------------------------------------------
+
+def plot_tn_arms_gp_overlay_plotly(
+    A,
+    max_rank: int,
+    mu,
+    sigma=None,
+    *,
+    normalize: str = "rank",
+    title: str | None = None,
+    cmap: str = "Viridis",
+    node_color: str = "lightblue",
+    width: int = 672,
+    height: int = 672,
+) -> go.Figure:
+    """
+    Plotly version of `plot_tn_arms_gp_overlay` for dashboard comparison.
+
+    NetworkX is not needed for rendering: the same circular TN layout is
+    converted directly into Plotly line, marker, and annotation traces.
+    """
+    import math
+    import numpy as _np
+
+    # Normalize inputs to NumPy arrays so masking and ranking use predictable shapes.
+    A_np = _np.asarray(A).astype(int)
+    N = A_np.shape[0]
+    mu = _np.asarray(mu, dtype=float)
+
+    # Split upper-triangular bonds into admissible arms and saturated bonds.
+    arm_edges, saturated_edges = [], []
+    full_mask = []
+    for i in range(N):
+        for j in range(i + 1, N):
+            if A_np[i, j] < max_rank:
+                arm_edges.append((i, j))
+                full_mask.append(True)
+            else:
+                full_mask.append(False)
+                if A_np[i, j] == max_rank:
+                    saturated_edges.append((i, j))
+    full_mask = _np.asarray(full_mask)
+
+    # Keep posterior values only for currently admissible arms.
+    mu = mu[full_mask]
+    sigma = _np.asarray(sigma, dtype=float)
+    if sigma.shape[0] == full_mask.size:
+        sigma = sigma[full_mask]
+
+    # Scale Plotly point and line sizes from the requested pixel dimensions.
+    linear_scale = float(_np.sqrt((width * height) / (672.0 * 672.0)))
+    linear_scale = float(_np.clip(linear_scale, 0.48, 1.35))
+
+    node_size = 50 * linear_scale
+    core_label_size = max(12, 18 * linear_scale)
+    edge_label_size = max(12, 17 * linear_scale)
+    title_size = max(14, 18 * linear_scale)
+    legend_font_size = max(12, 13 * linear_scale)
+    cbar_font_size = max(12, 13 * linear_scale)
+
+    # Place core nodes on a fixed circle.
+    pos = {}
+    for i in range(N):
+        angle = math.pi / 2 - 2 * math.pi * i / N
+        pos[f"C{i}"] = _np.array([math.cos(angle), math.sin(angle)])
+
+    # Map GP means to color ranks so close posterior values remain visible.
+    K = len(arm_edges)
+    mu_sorted = _np.sort(mu)
+    color_values = _np.argsort(_np.argsort(mu)) / (K - 1)
+    colorbar_values = color_values
+    colorbar_cmin, colorbar_cmax = 0.0, 1.0
+    max_ticks = max(3, min(K, int(round(height / 120))))
+    if K <= max_ticks:
+        tick_idx = _np.arange(K)
+    else:
+        tick_idx = _np.unique(_np.linspace(0, K - 1, max_ticks).round().astype(int))
+    colorbar_tickvals = tick_idx / max(K - 1, 1)
+
+    # Convert GP uncertainty into edge widths; smaller sigma means thicker edge.
+    if normalize == "rank" and K > 1:
+        s_pos = _np.argsort(_np.argsort(sigma)) / (K - 1)
+    else:
+        s_pos = (sigma - sigma.min()) / max(sigma.max() - sigma.min(), 1e-12)
+    widths = (8.0 - 6.5 * s_pos) * linear_scale
+
+    def _sample_color(value: float) -> str:
+        return pc.sample_colorscale(cmap, [float(value)])[0]
+
+    plotly_cmap = cmap
+    fig = go.Figure()
+
+    # Draw saturated bonds separately because they have no GP overlay.
+    for i, j in saturated_edges:
+        x0, y0 = pos[f"C{i}"]
+        x1, y1 = pos[f"C{j}"]
+        fig.add_trace(go.Scatter(
+            x=[x0, x1], y=[y0, y1],
+            mode="lines",
+            line=dict(color="black", width=max(1, 2.0 * linear_scale), dash="dot"),
+            hovertemplate=f"C{i}-C{j}<br>rank={max_rank}<br>saturated<extra></extra>",
+            showlegend=False,
+        ))
+
+    # Draw admissible arm edges with GP mean color and sigma width.
+    for idx, (i, j) in enumerate(arm_edges):
+        x0, y0 = pos[f"C{i}"]
+        x1, y1 = pos[f"C{j}"]
+        sigma_text = "" if sigma is None else f"<br>sigma={sigma[idx]:.4g}"
+        fig.add_trace(go.Scatter(
+            x=[x0, x1], y=[y0, y1],
+            mode="lines",
+            line=dict(color=_sample_color(color_values[idx]), width=float(widths[idx])),
+            hovertemplate=(
+                f"C{i}-C{j}<br>rank={A_np[i, j]}"
+                f"<br>mu={mu[idx]:.4g}{sigma_text}<extra></extra>"
+            ),
+            showlegend=False,
+        ))
+
+    # Draw core nodes above all edge traces.
+    node_names = [f"C{i}" for i in range(N)]
+    fig.add_trace(go.Scatter(
+        x=[pos[n][0] for n in node_names],
+        y=[pos[n][1] for n in node_names],
+        mode="markers+text",
+        marker=dict(
+            color=node_color,
+            size=node_size,
+            line=dict(color="gray", width=max(1, 2 * linear_scale)),
+        ),
+        text=[f"𝒢<sub>{i + 1}</sub>" for i in range(N)],
+        textposition="middle center",
+        textfont=dict(size=core_label_size, color="black"),
+        hovertemplate="%{text}<extra></extra>",
+        showlegend=False,
+    ))
+
+    # Add an invisible marker trace solely to host the GP mean colorbar.
+    if K:
+        mid_x = [(pos[f"C{i}"][0] + pos[f"C{j}"][0]) / 2 for i, j in arm_edges]
+        mid_y = [(pos[f"C{i}"][1] + pos[f"C{j}"][1]) / 2 for i, j in arm_edges]
+        colorbar_x = 0.92
+        colorbar_y = 0.50
+        colorbar_len = 0.58
+        colorbar_title_gap = 0.015
+        colorbar = dict(
+            tickfont=dict(size=cbar_font_size),
+            thickness=max(8, int(14 * linear_scale)),
+            len=colorbar_len,
+            x=colorbar_x,
+            y=colorbar_y,
+            yanchor="middle",
+        )
+        if colorbar_tickvals is not None:
+            colorbar["tickvals"] = colorbar_tickvals.tolist()
+            colorbar["ticktext"] = [f"{float(v):.7g}" for v in mu_sorted[tick_idx]]
+        fig.add_trace(go.Scatter(
+            x=mid_x,
+            y=mid_y,
+            mode="markers",
+            marker=dict(
+                color=colorbar_values,
+                colorscale=cmap,
+                cmin=colorbar_cmin,
+                cmax=colorbar_cmax,
+                size=0.1,
+                opacity=0.001,
+                colorbar=colorbar,
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+        fig.add_annotation(
+            x=colorbar_x,
+            y=colorbar_y + colorbar_len / 2 + colorbar_title_gap,
+            xref="paper",
+            yref="paper",
+            text=r"$\mu(\phi(s,a))$",
+            showarrow=False,
+            xanchor="center",
+            yanchor="bottom",
+            font=dict(size=cbar_font_size, color="black"),
+        )
+
+    # Label admissible ranks and saturated Rmax bonds at edge midpoints.
+    for i, j in arm_edges:
+        x = (pos[f"C{i}"][0] + pos[f"C{j}"][0]) / 2
+        y = (pos[f"C{i}"][1] + pos[f"C{j}"][1]) / 2
+        fig.add_annotation(
+            x=x, y=y,
+            text=str(A_np[i, j]),
+            showarrow=False,
+            font=dict(size=edge_label_size, color="black"),
+            bgcolor="rgba(255,255,255,0.55)",
+            borderpad=1,
+        )
+    for i, j in saturated_edges:
+        x = (pos[f"C{i}"][0] + pos[f"C{j}"][0]) / 2
+        y = (pos[f"C{i}"][1] + pos[f"C{j}"][1]) / 2
+        fig.add_annotation(
+            x=x, y=y,
+            text="R<sub>max</sub>",
+            showarrow=False,
+            font=dict(size=edge_label_size, color="black"),
+            bgcolor="rgba(255,255,255,0.55)",
+            borderpad=1,
+        )
+
+    # Add dummy legend traces to explain the sigma-to-width encoding.
+    if sigma is not None and K:
+        s_lo, s_hi = float(sigma.min()), float(sigma.max())
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None],
+            mode="lines",
+            line=dict(color="dimgray", width=max(1, 1.5 * linear_scale)),
+            name=f"high sigma ({s_hi:.2g})",
+        ))
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None],
+            mode="lines",
+            line=dict(color="dimgray", width=max(2, 5.5 * linear_scale)),
+            name=f"low sigma ({s_lo:.2g})",
+        ))
+
+    # Hide axes and keep equal aspect so the circular graph is not distorted.
+    fig.update_layout(
+        # title=dict(text=title or "GP-UCB arms over current TN", font=dict(size=title_size)),
+        template="plotly_white",
+        width=width,
+        height=height,
+        margin=dict(l=4, r=18, t=20, b=4),
+        legend=dict(
+            x=0.98,
+            y=1,
+            xanchor="right",
+            yanchor="top",
+            bgcolor="rgba(255,255,255,0.75)",
+            bordercolor="rgba(0,0,0,0.15)",
+            borderwidth=1,
+            font=dict(size=legend_font_size),
+        ),
+        hovermode="closest",
+    )
+    fig.update_xaxes(visible=False, range=[-1.28, 1.42], constrain="domain")
+    fig.update_yaxes(visible=False, range=[-1.35, 1.35], scaleanchor="x", scaleratio=1)
+    return fig
+
+
+def plot_arm_feature_space(
+    phi_hist,
+    r_hist,
+    phi_candidates,
+    mu_candidates=None,
+    *,
+    method: str = "pca",
+    ax=None,
+    title: str | None = None,
+    cmap: str = "viridis",
+    figsize: tuple[float, float] = (7, 6),
+):
+    """
+    Option B — 2D projection of (state, arm) feature vectors.
+
+    Past evaluations are plotted as filled circles coloured by their realised
+    reward; admissible arms at the current step are plotted as crosses
+    coloured by GP posterior mean (or grey if `mu_candidates` is None). The
+    projection (PCA by default, UMAP if installed and requested) is fit on
+    the union of past and candidate features so both sit in the same frame.
+
+    Parameters
+    ----------
+    phi_hist        : (N, d) historical feature vectors
+    r_hist          : (N,)   realised rewards
+    phi_candidates  : (K, d) admissible (state, arm) feature vectors at step t
+    mu_candidates   : (K,)   GP posterior mean per candidate (optional)
+    method          : "pca" or "umap"
+    """
+    import matplotlib.pyplot as plt
+    import numpy as _np
+
+    phi_hist = _np.asarray(phi_hist, dtype=float)
+    phi_cand = _np.asarray(phi_candidates, dtype=float)
+    r_hist = _np.asarray(r_hist, dtype=float)
+
+    X = _np.vstack([phi_hist, phi_cand])
+    if method == "umap":
+        import umap  # type: ignore
+        Z = umap.UMAP(n_components=2, random_state=0).fit_transform(X)
+    else:
+        from sklearn.decomposition import PCA
+        Z = PCA(n_components=2, random_state=0).fit_transform(X)
+    Z_hist, Z_cand = Z[:len(phi_hist)], Z[len(phi_hist):]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    sc_hist = ax.scatter(
+        Z_hist[:, 0], Z_hist[:, 1],
+        c=r_hist, cmap=cmap, s=70, edgecolors="white", linewidths=0.8,
+        label="evaluated arms", zorder=2,
+    )
+    if mu_candidates is not None:
+        mu_candidates = _np.asarray(mu_candidates, dtype=float)
+        ax.scatter(
+            Z_cand[:, 0], Z_cand[:, 1],
+            c=mu_candidates, cmap=cmap,
+            marker="x", s=180, linewidths=2.5,
+            label="admissible arms (GP mean)", zorder=3,
+        )
+    else:
+        ax.scatter(
+            Z_cand[:, 0], Z_cand[:, 1],
+            color="dimgray", marker="x", s=180, linewidths=2.5,
+            label="admissible arms", zorder=3,
+        )
+    cbar = fig.colorbar(sc_hist, ax=ax, fraction=0.04, pad=0.02)
+    cbar.set_label("reward (history) / $\\mu$ (candidates)", fontsize=10)
+
+    ax.set_title(title or f"Feature space ({method.upper()}) — past rewards + admissible arms",
+                 fontsize=13)
+    ax.set_xlabel(f"{method.upper()} 1")
+    ax.set_ylabel(f"{method.upper()} 2")
+    ax.legend(loc="best", fontsize=9, frameon=True)
+    ax.grid(True, alpha=0.3)
+    return fig, ax
+
+
 def plot_pareto_at_step(
     df_rows: pd.DataFrame, step: int, y_metric: str = "CR"
 ) -> go.Figure:
