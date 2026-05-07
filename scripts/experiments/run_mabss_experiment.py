@@ -406,6 +406,8 @@ def run_policy(
 
         # Logging
         _current_cr = float(info["current_cr"].item())
+        _adj_np = cp.asnumpy(env.adj).astype(int)
+        _triu_i, _triu_j = np.triu_indices(_adj_np.shape[0], k=1)
         row = {
             "step": step + 1,
             "par_loss": float(par_loss.item()),
@@ -416,6 +418,7 @@ def run_policy(
             "objective": float(step_loss),
             "objective_name": "RSE",
             "efficiency": _current_cr / target_cr if target_cr else float("nan"),
+            "adj_triu": "-".join(str(int(v)) for v in _adj_np[_triu_i, _triu_j]),
             "selected_arm": int(action),
             "oracle_best_arm": int(oracle_best_arm.item()),
             "oracle_arm_rank": chosen_arm_rank,

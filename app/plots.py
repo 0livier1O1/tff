@@ -867,9 +867,11 @@ def plot_tn_arms_gp_overlay_plotly(
     normalize: str = "rank",
     title: str | None = None,
     cmap: str = "Viridis",
-    node_color: str = "lightblue",
+    node_color: str = "#e6e6e6",
     width: int = 672,
     height: int = 672,
+    plot_acqf: bool = False,
+    beta: float = 1.0,
 ) -> go.Figure:
     """
     Plotly version of `plot_tn_arms_gp_overlay` for dashboard comparison.
@@ -900,10 +902,21 @@ def plot_tn_arms_gp_overlay_plotly(
     full_mask = _np.asarray(full_mask)
 
     # Keep posterior values only for currently admissible arms.
-    mu = mu[full_mask]
-    sigma = _np.asarray(sigma, dtype=float)
-    if sigma.shape[0] == full_mask.size:
-        sigma = sigma[full_mask]
+    if mu.size == full_mask.size:
+        mu = mu[full_mask]
+    elif mu.size != len(arm_edges):
+        raise ValueError(f"mu has length {mu.size}, expected {full_mask.size} or {len(arm_edges)}.")
+    if sigma is None:
+        if plot_acqf:
+            raise ValueError("sigma is required when plot_acqf=True.")
+    else:
+        sigma = _np.asarray(sigma, dtype=float)
+        if sigma.size == full_mask.size:
+            sigma = sigma[full_mask]
+        elif sigma.size != len(arm_edges):
+            raise ValueError(
+                f"sigma has length {sigma.size}, expected {full_mask.size} or {len(arm_edges)}."
+            )
 
     # Scale Plotly point and line sizes from the requested pixel dimensions.
     linear_scale = float(_np.sqrt((width * height) / (672.0 * 672.0)))
@@ -919,44 +932,81 @@ def plot_tn_arms_gp_overlay_plotly(
     # Place core nodes on a fixed circle.
     pos = {}
     for i in range(N):
-        angle = math.pi / 2 - 2 * math.pi * i / N
+        angle = math.pi / 2 + 2 * math.pi * i / N
         pos[f"C{i}"] = _np.array([math.cos(angle), math.sin(angle)])
 
     # Map GP means to color ranks so close posterior values remain visible.
     K = len(arm_edges)
-    mu_sorted = _np.sort(mu)
-    color_values = _np.argsort(_np.argsort(mu)) / (K - 1)
-    colorbar_values = color_values
-    colorbar_cmin, colorbar_cmax = 0.0, 1.0
-    max_ticks = max(3, min(K, int(round(height / 120))))
-    if K <= max_ticks:
-        tick_idx = _np.arange(K)
+    if K > 1:
+        mu_sorted = _np.sort(mu)
+        color_values = _np.argsort(_np.argsort(mu)) / (K - 1)
+        colorbar_values = color_values
+        colorbar_cmin, colorbar_cmax = 0.0, 1.0
+        max_ticks = max(3, min(K, int(round(height / 120))))
+        if K <= max_ticks:
+            tick_idx = _np.arange(K)
+        else:
+            tick_idx = _np.unique(_np.linspace(0, K - 1, max_ticks).round().astype(int))
+        colorbar_tickvals = tick_idx / max(K - 1, 1)
+    elif K == 1:
+        mu_sorted = _np.asarray(mu)
+        color_values = _np.array([0.5])
+        colorbar_values = color_values
+        colorbar_cmin, colorbar_cmax = 0.0, 1.0
+        tick_idx = _np.array([0])
+        colorbar_tickvals = _np.array([0.5])
     else:
-        tick_idx = _np.unique(_np.linspace(0, K - 1, max_ticks).round().astype(int))
-    colorbar_tickvals = tick_idx / max(K - 1, 1)
+        mu_sorted = _np.asarray([])
+        color_values = _np.asarray([])
+        colorbar_values = color_values
+        colorbar_cmin, colorbar_cmax = 0.0, 1.0
+        tick_idx = _np.asarray([], dtype=int)
+        colorbar_tickvals = _np.asarray([])
 
     # Convert GP uncertainty into edge widths; smaller sigma means thicker edge.
-    if normalize == "rank" and K > 1:
+    if sigma is not None and normalize == "rank" and K > 1:
         s_pos = _np.argsort(_np.argsort(sigma)) / (K - 1)
-    else:
+    elif sigma is not None and K:
         s_pos = (sigma - sigma.min()) / max(sigma.max() - sigma.min(), 1e-12)
-    widths = (8.0 - 6.5 * s_pos) * linear_scale
+    else:
+        s_pos = _np.zeros(K)
+    widths = (8.0 - 6.5 * s_pos) * linear_scale if sigma is not None else _np.full(K, 4.0 * linear_scale)
 
     def _sample_color(value: float) -> str:
         return pc.sample_colorscale(cmap, [float(value)])[0]
 
     plotly_cmap = cmap
-    fig = go.Figure()
+    if plot_acqf:
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            row_heights=[0.78, 0.22],
+            vertical_spacing=0,
+        )
+    else:
+        fig = go.Figure()
+
+    def _add_graph_trace(trace):
+        if plot_acqf:
+            fig.add_trace(trace, row=1, col=1)
+        else:
+            fig.add_trace(trace)
+
+    def _add_graph_annotation(**kwargs):
+        if plot_acqf:
+            fig.add_annotation(row=1, col=1, **kwargs)
+        else:
+            fig.add_annotation(**kwargs)
 
     # Draw saturated bonds separately because they have no GP overlay.
     for i, j in saturated_edges:
         x0, y0 = pos[f"C{i}"]
         x1, y1 = pos[f"C{j}"]
-        fig.add_trace(go.Scatter(
+        _add_graph_trace(go.Scatter(
             x=[x0, x1], y=[y0, y1],
             mode="lines",
             line=dict(color="black", width=max(1, 2.0 * linear_scale), dash="dot"),
-            hovertemplate=f"C{i}-C{j}<br>rank={max_rank}<br>saturated<extra></extra>",
+            # hovertemplate=f"C{i}-C{j}<br>rank={max_rank}<br>saturated<extra></extra>",
             showlegend=False,
         ))
 
@@ -965,42 +1015,43 @@ def plot_tn_arms_gp_overlay_plotly(
         x0, y0 = pos[f"C{i}"]
         x1, y1 = pos[f"C{j}"]
         sigma_text = "" if sigma is None else f"<br>sigma={sigma[idx]:.4g}"
-        fig.add_trace(go.Scatter(
+        _add_graph_trace(go.Scatter(
             x=[x0, x1], y=[y0, y1],
             mode="lines",
             line=dict(color=_sample_color(color_values[idx]), width=float(widths[idx])),
-            hovertemplate=(
-                f"C{i}-C{j}<br>rank={A_np[i, j]}"
-                f"<br>mu={mu[idx]:.4g}{sigma_text}<extra></extra>"
-            ),
+            # hovertemplate=(
+            #     f"C{i}-C{j}<br>rank={A_np[i, j]}"
+            #     f"<br>mu={mu[idx]:.4g}{sigma_text}<extra></extra>"
+            # ),
             showlegend=False,
         ))
 
     # Draw core nodes above all edge traces.
     node_names = [f"C{i}" for i in range(N)]
-    fig.add_trace(go.Scatter(
+    _add_graph_trace(go.Scatter(
         x=[pos[n][0] for n in node_names],
         y=[pos[n][1] for n in node_names],
         mode="markers+text",
         marker=dict(
             color=node_color,
             size=node_size,
-            line=dict(color="gray", width=max(1, 2 * linear_scale)),
+            line=dict(color="#4d4d4d", width=max(1, 2 * linear_scale)),
         ),
         text=[f"𝒢<sub>{i + 1}</sub>" for i in range(N)],
         textposition="middle center",
         textfont=dict(size=core_label_size, color="black"),
-        hovertemplate="%{text}<extra></extra>",
+        # hovertemplate="%{text}<extra></extra>",
         showlegend=False,
     ))
 
     # Add an invisible marker trace solely to host the GP mean colorbar.
     if K:
+        graph_domain = fig.layout.yaxis.domain if plot_acqf else (0.0, 1.0)
         mid_x = [(pos[f"C{i}"][0] + pos[f"C{j}"][0]) / 2 for i, j in arm_edges]
         mid_y = [(pos[f"C{i}"][1] + pos[f"C{j}"][1]) / 2 for i, j in arm_edges]
-        colorbar_x = 0.92
-        colorbar_y = 0.50
-        colorbar_len = 0.58
+        colorbar_x = 0.96
+        colorbar_y = float((graph_domain[0] + graph_domain[1]) / 2)
+        colorbar_len = 0.58 * float(graph_domain[1] - graph_domain[0])
         colorbar_title_gap = 0.015
         colorbar = dict(
             tickfont=dict(size=cbar_font_size),
@@ -1013,7 +1064,7 @@ def plot_tn_arms_gp_overlay_plotly(
         if colorbar_tickvals is not None:
             colorbar["tickvals"] = colorbar_tickvals.tolist()
             colorbar["ticktext"] = [f"{float(v):.7g}" for v in mu_sorted[tick_idx]]
-        fig.add_trace(go.Scatter(
+        _add_graph_trace(go.Scatter(
             x=mid_x,
             y=mid_y,
             mode="markers",
@@ -1045,7 +1096,7 @@ def plot_tn_arms_gp_overlay_plotly(
     for i, j in arm_edges:
         x = (pos[f"C{i}"][0] + pos[f"C{j}"][0]) / 2
         y = (pos[f"C{i}"][1] + pos[f"C{j}"][1]) / 2
-        fig.add_annotation(
+        _add_graph_annotation(
             x=x, y=y,
             text=str(A_np[i, j]),
             showarrow=False,
@@ -1056,7 +1107,7 @@ def plot_tn_arms_gp_overlay_plotly(
     for i, j in saturated_edges:
         x = (pos[f"C{i}"][0] + pos[f"C{j}"][0]) / 2
         y = (pos[f"C{i}"][1] + pos[f"C{j}"][1]) / 2
-        fig.add_annotation(
+        _add_graph_annotation(
             x=x, y=y,
             text="R<sub>max</sub>",
             showarrow=False,
@@ -1068,18 +1119,66 @@ def plot_tn_arms_gp_overlay_plotly(
     # Add dummy legend traces to explain the sigma-to-width encoding.
     if sigma is not None and K:
         s_lo, s_hi = float(sigma.min()), float(sigma.max())
-        fig.add_trace(go.Scatter(
+        _add_graph_trace(go.Scatter(
             x=[None], y=[None],
             mode="lines",
             line=dict(color="dimgray", width=max(1, 1.5 * linear_scale)),
             name=f"high sigma ({s_hi:.2g})",
         ))
-        fig.add_trace(go.Scatter(
+        _add_graph_trace(go.Scatter(
             x=[None], y=[None],
             mode="lines",
             line=dict(color="dimgray", width=max(2, 5.5 * linear_scale)),
             name=f"low sigma ({s_lo:.2g})",
         ))
+
+    if plot_acqf:
+        ucb = mu + beta * sigma
+        best_idx = int(_np.argmax(ucb)) if len(ucb) else -1
+        bar_colors = ["#0f766e" if k == best_idx else "#b7c7c9" for k in range(len(ucb))]
+        edge_labels = [f"({i + 1},{j + 1})" for i, j in arm_edges]
+        fig.add_trace(
+            go.Bar(
+                x=edge_labels,
+                y=ucb,
+                marker=dict(color=bar_colors, line=dict(color="#4b5563", width=0.4)),
+                # hovertemplate="edge %{x}<br>UCB=%{y:.4g}<extra></extra>",
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
+        if len(ucb):
+            lo, hi = float(ucb.min()), float(ucb.max())
+            pad = 0.03 * (hi - lo) if hi > lo else max(abs(hi), 1.0) * 1e-3
+            fig.update_yaxes(range=[lo - pad, hi + pad], row=2, col=1)
+        acqf_font_size = max(10, 12 * linear_scale)
+        fig.update_xaxes(
+            title_text="edges",
+            title_font=dict(size=acqf_font_size),
+            tickfont=dict(size=acqf_font_size),
+            domain=[0.16, 0.78],
+            row=2,
+            col=1,
+        )
+        fig.update_yaxes(
+            title_text="",
+            tickfont=dict(size=acqf_font_size),
+            row=2,
+            col=1,
+        )
+        acqf_domain = fig.layout.yaxis2.domain
+        fig.add_annotation(
+            x=0.16,
+            y=float(acqf_domain[1]) + 0.01,
+            xref="paper",
+            yref="paper",
+            text="UCB values",
+            showarrow=False,
+            xanchor="left",
+            yanchor="bottom",
+            font=dict(size=acqf_font_size, color="black"),
+        )
 
     # Hide axes and keep equal aspect so the circular graph is not distorted.
     fig.update_layout(
@@ -1087,7 +1186,7 @@ def plot_tn_arms_gp_overlay_plotly(
         template="plotly_white",
         width=width,
         height=height,
-        margin=dict(l=4, r=18, t=20, b=4),
+        margin=dict(l=2, r=8, t=8, b=2),
         legend=dict(
             x=0.98,
             y=1,
@@ -1100,9 +1199,169 @@ def plot_tn_arms_gp_overlay_plotly(
         ),
         hovermode="closest",
     )
-    fig.update_xaxes(visible=False, range=[-1.28, 1.42], constrain="domain")
-    fig.update_yaxes(visible=False, range=[-1.35, 1.35], scaleanchor="x", scaleratio=1)
+    if plot_acqf:
+        fig.update_layout(bargap=0.35)
+    if plot_acqf:
+        fig.update_xaxes(visible=False, range=[-1.14, 1.22], constrain="domain", row=1, col=1)
+        fig.update_yaxes(visible=False, range=[-1.18, 1.18], scaleanchor="x", scaleratio=1, row=1, col=1)
+    else:
+        fig.update_xaxes(visible=False, range=[-1.14, 1.22], constrain="domain")
+        fig.update_yaxes(visible=False, range=[-1.18, 1.18], scaleanchor="x", scaleratio=1)
     return fig
+
+
+def plot_tensor_network_example(
+    A=None,
+    edge: tuple[int, int] | None = None,
+    cur_rank=None,
+    *,
+    max_rank: int,
+    ax=None,
+    figsize: tuple[float, float] = (7, 7),
+    edge_index_base: int = 1,
+    edge_color: str = "#777777",
+    node_color: str = "#e6e6e6",
+    node_edge_color: str = "#4d4d4d",
+    edge_width: float = 2.2,
+    node_size: float = 0.18,
+):
+    """
+    Draw a neutral tensor-network schematic from an adjacency matrix.
+
+    By default this draws the five-core complete example from the paper figure.
+    Off-diagonal entries in [1, max_rank] create virtual bonds; larger ranks
+    and diagonal physical legs are intentionally omitted. Non-highlighted edge
+    labels show A[i, j]. If `edge=(i, j)` and `cur_rank` are supplied, the
+    highlighted bond is labelled as a rank increment.
+    """
+    import math
+    import matplotlib.pyplot as plt
+    import numpy as _np
+    from matplotlib.patches import Circle
+
+    if A is None:
+        A_np = _np.ones((5, 5), dtype=int)
+    else:
+        A_np = _np.asarray(A).astype(int)
+    N = A_np.shape[0]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    selected_edge = None
+    if edge is not None:
+        selected_edge = tuple(sorted((edge[0] - edge_index_base, edge[1] - edge_index_base)))
+        if (
+            len(selected_edge) != 2
+            or selected_edge[0] == selected_edge[1]
+            or selected_edge[0] < 0
+            or selected_edge[1] >= N
+        ):
+            raise ValueError(
+                f"edge={edge!r} is invalid for a tensor network with {N} cores "
+                f"and edge_index_base={edge_index_base}."
+            )
+
+    selected_nodes = set() if selected_edge is None else set(selected_edge)
+
+    with plt.rc_context({"mathtext.fontset": "cm", "font.family": "serif"}):
+        # Layout mirrors the TN overlay: cores sit on a circle with G1 at top.
+        pos = {}
+        for i in range(N):
+            angle = math.pi / 2 + 2 * math.pi * i / N
+            pos[i] = _np.array([math.cos(angle), math.sin(angle)])
+
+        def _draw_solid_edge(p0, p1, *, lw=edge_width, alpha=1.0, zorder=1):
+            ax.plot(
+                [p0[0], p1[0]],
+                [p0[1], p1[1]],
+                color=edge_color,
+                lw=lw,
+                alpha=alpha,
+                solid_capstyle="round",
+                zorder=zorder,
+            )
+
+        def _draw_edge_rank_label(p0, p1, label, *, alpha=1.0, zorder=3):
+            midpoint = 0.5 * (p0 + p1)
+            ax.text(
+                midpoint[0],
+                midpoint[1],
+                str(label),
+                ha="center",
+                va="center",
+                fontsize=18,
+                color="black",
+                alpha=alpha,
+                zorder=zorder,
+            )
+
+        # Draw virtual bonds from the upper triangle of A.
+        selected_midpoint = None
+        for i in range(N):
+            for j in range(i + 1, N):
+                bond = (i, j)
+                rank = int(A_np[i, j])
+                if rank <= 0 or rank > max_rank:
+                    continue
+                p0, p1 = pos[i], pos[j]
+                is_selected = selected_edge is not None and bond == selected_edge
+                alpha = 1.0 if selected_edge is None or is_selected else 0.16
+                zorder = 2 if is_selected else 1
+                _draw_solid_edge(p0, p1, alpha=alpha, zorder=zorder)
+                if is_selected:
+                    selected_midpoint = 0.5 * (p0 + p1)
+                else:
+                    _draw_edge_rank_label(p0, p1, rank, alpha=alpha, zorder=zorder + 1)
+
+        # Draw neutral tensor cores and core labels.
+        for i, p in pos.items():
+            alpha = 1.0 if selected_edge is None or i in selected_nodes else 0.16
+            zorder = 4 if selected_edge is not None and i in selected_nodes else 3
+            ax.add_patch(Circle(
+                p,
+                node_size,
+                facecolor=node_color,
+                edgecolor=node_edge_color,
+                lw=1.0,
+                alpha=alpha,
+                zorder=zorder,
+            ))
+            ax.text(
+                p[0],
+                p[1],
+                rf"$\mathcal{{G}}_{{{i + 1}}}$",
+                ha="center",
+                va="center",
+                fontsize=28,
+                color="black",
+                alpha=alpha,
+                zorder=zorder + 1,
+            )
+
+        # Label only the highlighted rank update.
+        if selected_midpoint is not None and cur_rank is not None:
+            ax.text(
+                selected_midpoint[0],
+                selected_midpoint[1],
+                rf"$R_{{{edge[0]}, {edge[1]}}}={cur_rank}\rightarrow {cur_rank + 1}$",
+                ha="center",
+                va="center",
+                fontsize=22,
+                color="black",
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=0.3),
+                zorder=5,
+            )
+
+        pad = node_size + 0.25
+        ax.set_aspect("equal")
+        ax.set_xlim(-1 - pad, 1 + pad)
+        ax.set_ylim(-1 - pad, 1 + pad)
+        ax.axis("off")
+        fig.tight_layout(pad=0)
+    return fig, ax
 
 
 def plot_arm_feature_space(
