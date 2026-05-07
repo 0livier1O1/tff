@@ -369,6 +369,25 @@ def run_policy(
             "gp_ucb":   _to_list(gp_scores["ucb"])  if "ucb"  in gp_scores else None,
             "gp_std":   _to_list(gp_scores["std"])  if "std"  in gp_scores else None,
             "expert_weights": p_info.get("expert_weights"),  # EXP4 only, else None
+            "exp3_log_weights": (
+                _to_list(policy.log_weights) if policy_str == "exp3" else None
+            ),
+            "exp3_probs": (
+                _to_list(policy.last_probs)
+                if policy_str == "exp3" and policy.last_probs is not None else None
+            ),
+            "exp4_ctx": (
+                list(policy.last_ctx)
+                if policy_str == "exp4" and getattr(policy, "last_ctx", None) is not None else None
+            ),
+            "exp4_probs": (
+                _to_list(policy.last_probs)
+                if policy_str == "exp4" and policy.last_probs is not None else None
+            ),
+            "exp4_expert_dists": (
+                policy.last_expert_dists.tolist()
+                if policy_str == "exp4" and policy.last_expert_dists is not None else None
+            ),
         }
         diagnostics.append(diag)
 
