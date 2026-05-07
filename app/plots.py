@@ -880,12 +880,11 @@ def plot_tn_arms_gp_overlay_plotly(
     converted directly into Plotly line, marker, and annotation traces.
     """
     import math
-    import numpy as _np
 
     # Normalize inputs to NumPy arrays so masking and ranking use predictable shapes.
-    A_np = _np.asarray(A).astype(int)
+    A_np = np.asarray(A).astype(int)
     N = A_np.shape[0]
-    mu = _np.asarray(mu, dtype=float)
+    mu = np.asarray(mu, dtype=float)
 
     # Split upper-triangular bonds into admissible arms and saturated bonds.
     arm_edges, saturated_edges = [], []
@@ -899,7 +898,7 @@ def plot_tn_arms_gp_overlay_plotly(
                 full_mask.append(False)
                 if A_np[i, j] == max_rank:
                     saturated_edges.append((i, j))
-    full_mask = _np.asarray(full_mask)
+    full_mask = np.asarray(full_mask)
 
     # Keep posterior values only for currently admissible arms.
     if mu.size == full_mask.size:
@@ -910,7 +909,7 @@ def plot_tn_arms_gp_overlay_plotly(
         if plot_acqf:
             raise ValueError("sigma is required when plot_acqf=True.")
     else:
-        sigma = _np.asarray(sigma, dtype=float)
+        sigma = np.asarray(sigma, dtype=float)
         if sigma.size == full_mask.size:
             sigma = sigma[full_mask]
         elif sigma.size != len(arm_edges):
@@ -919,8 +918,8 @@ def plot_tn_arms_gp_overlay_plotly(
             )
 
     # Scale Plotly point and line sizes from the requested pixel dimensions.
-    linear_scale = float(_np.sqrt((width * height) / (672.0 * 672.0)))
-    linear_scale = float(_np.clip(linear_scale, 0.48, 1.35))
+    linear_scale = float(np.sqrt((width * height) / (672.0 * 672.0)))
+    linear_scale = float(np.clip(linear_scale, 0.48, 1.35))
 
     node_size = 50 * linear_scale
     core_label_size = max(12, 18 * linear_scale)
@@ -933,44 +932,44 @@ def plot_tn_arms_gp_overlay_plotly(
     pos = {}
     for i in range(N):
         angle = math.pi / 2 + 2 * math.pi * i / N
-        pos[f"C{i}"] = _np.array([math.cos(angle), math.sin(angle)])
+        pos[f"C{i}"] = np.array([math.cos(angle), math.sin(angle)])
 
     # Map GP means to color ranks so close posterior values remain visible.
     K = len(arm_edges)
     if K > 1:
-        mu_sorted = _np.sort(mu)
-        color_values = _np.argsort(_np.argsort(mu)) / (K - 1)
+        mu_sorted = np.sort(mu)
+        color_values = np.argsort(np.argsort(mu)) / (K - 1)
         colorbar_values = color_values
         colorbar_cmin, colorbar_cmax = 0.0, 1.0
         max_ticks = max(3, min(K, int(round(height / 120))))
         if K <= max_ticks:
-            tick_idx = _np.arange(K)
+            tick_idx = np.arange(K)
         else:
-            tick_idx = _np.unique(_np.linspace(0, K - 1, max_ticks).round().astype(int))
+            tick_idx = np.unique(np.linspace(0, K - 1, max_ticks).round().astype(int))
         colorbar_tickvals = tick_idx / max(K - 1, 1)
     elif K == 1:
-        mu_sorted = _np.asarray(mu)
-        color_values = _np.array([0.5])
+        mu_sorted = np.asarray(mu)
+        color_values = np.array([0.5])
         colorbar_values = color_values
         colorbar_cmin, colorbar_cmax = 0.0, 1.0
-        tick_idx = _np.array([0])
-        colorbar_tickvals = _np.array([0.5])
+        tick_idx = np.array([0])
+        colorbar_tickvals = np.array([0.5])
     else:
-        mu_sorted = _np.asarray([])
-        color_values = _np.asarray([])
+        mu_sorted = np.asarray([])
+        color_values = np.asarray([])
         colorbar_values = color_values
         colorbar_cmin, colorbar_cmax = 0.0, 1.0
-        tick_idx = _np.asarray([], dtype=int)
-        colorbar_tickvals = _np.asarray([])
+        tick_idx = np.asarray([], dtype=int)
+        colorbar_tickvals = np.asarray([])
 
     # Convert GP uncertainty into edge widths; smaller sigma means thicker edge.
     if sigma is not None and normalize == "rank" and K > 1:
-        s_pos = _np.argsort(_np.argsort(sigma)) / (K - 1)
+        s_pos = np.argsort(np.argsort(sigma)) / (K - 1)
     elif sigma is not None and K:
         s_pos = (sigma - sigma.min()) / max(sigma.max() - sigma.min(), 1e-12)
     else:
-        s_pos = _np.zeros(K)
-    widths = (8.0 - 6.5 * s_pos) * linear_scale if sigma is not None else _np.full(K, 4.0 * linear_scale)
+        s_pos = np.zeros(K)
+    widths = (8.0 - 6.5 * s_pos) * linear_scale if sigma is not None else np.full(K, 4.0 * linear_scale)
 
     def _sample_color(value: float) -> str:
         return pc.sample_colorscale(cmap, [float(value)])[0]
@@ -1134,7 +1133,7 @@ def plot_tn_arms_gp_overlay_plotly(
 
     if plot_acqf:
         ucb = mu + beta * sigma
-        best_idx = int(_np.argmax(ucb)) if len(ucb) else -1
+        best_idx = int(np.argmax(ucb)) if len(ucb) else -1
         bar_colors = ["#0f766e" if k == best_idx else "#b7c7c9" for k in range(len(ucb))]
         edge_labels = [f"({i + 1},{j + 1})" for i, j in arm_edges]
         fig.add_trace(
@@ -1236,13 +1235,12 @@ def plot_tensor_network_example(
     """
     import math
     import matplotlib.pyplot as plt
-    import numpy as _np
     from matplotlib.patches import Circle
 
     if A is None:
-        A_np = _np.ones((5, 5), dtype=int)
+        A_np = np.ones((5, 5), dtype=int)
     else:
-        A_np = _np.asarray(A).astype(int)
+        A_np = np.asarray(A).astype(int)
     N = A_np.shape[0]
 
     if ax is None:
@@ -1271,7 +1269,7 @@ def plot_tensor_network_example(
         pos = {}
         for i in range(N):
             angle = math.pi / 2 + 2 * math.pi * i / N
-            pos[i] = _np.array([math.cos(angle), math.sin(angle)])
+            pos[i] = np.array([math.cos(angle), math.sin(angle)])
 
         def _draw_solid_edge(p0, p1, *, lw=edge_width, alpha=1.0, zorder=1):
             ax.plot(
@@ -1364,6 +1362,122 @@ def plot_tensor_network_example(
     return fig, ax
 
 
+def plot_gp_oracle_reward_calibration(
+    pol_diagnostics_dict,
+    algo: str = "mabss-ucb",
+    seed: int = 1,
+    *,
+    std_scale: float = 1.0,
+    title: str | None = None,
+    width: int = 560,
+    height: int = 430,
+) -> go.Figure:
+    """
+    Compare GP posterior mean against oracle arm rewards across all steps for
+    one (seed, algo). Each point is one admissible arm at one step, colored by
+    arm index; chosen arms are drawn larger. GP σ is shown as a vertical error
+    bar around the predicted mean (y-axis).
+    """
+    records = pol_diagnostics_dict[(seed, algo)]
+
+    mu_all, oracle_all, std_all, step_all, arm_all, chosen_all = [], [], [], [], [], []
+    for rec in records:
+        mu = np.asarray(rec.get("gp_mean") or [], dtype=float)
+        oracle = np.asarray(rec.get("oracle_rewards") or [], dtype=float)
+        if mu.size == 0 or oracle.size == 0:
+            continue
+
+        # gp_mean is full-K with NaN at saturated arms; gp_std is admissible-only.
+        valid = np.isfinite(mu)
+        std_valid = np.asarray(rec.get("gp_std") or [], dtype=float)
+        std = np.full_like(mu, np.nan)
+        if std_valid.size == valid.sum():
+            std[valid] = std_valid
+
+        idx = np.flatnonzero(valid)
+        mu_all.append(mu[idx])
+        oracle_all.append(oracle[idx])
+        std_all.append(std[idx])
+        step_all.append(np.full(idx.size, rec.get("step", -1), dtype=int))
+        arm_all.append(idx.astype(int))
+        chosen_all.append(idx == int(rec.get("arm", -1)))
+
+    mu = np.concatenate(mu_all)
+    oracle = np.concatenate(oracle_all)
+    s = np.concatenate(std_all)
+    steps = np.concatenate(step_all)
+    arms = np.concatenate(arm_all)
+    chosen = np.concatenate(chosen_all).astype(bool)
+
+    # Map arm → label "(i,j)" via N(N-1)/2 = K
+    K = int(arms.max()) + 1
+    N = int((1 + np.sqrt(1 + 8 * K)) / 2)
+    triu_i, triu_j = np.triu_indices(N, k=1)
+    arm_label = {k: f"({int(triu_i[k]) + 1},{int(triu_j[k]) + 1})" for k in range(K)}
+    palette = pc.qualitative.Plotly + pc.qualitative.Set2 + pc.qualitative.Pastel
+    arm_color = {k: palette[k % len(palette)] for k in range(K)}
+
+    fig = go.Figure()
+    err_avail = np.isfinite(s).any()
+
+    # One scatter trace per arm so the legend names are edge labels.
+    for k in range(K):
+        sel = arms == k
+        if not sel.any():
+            continue
+        sx = s[sel]
+        err_y = dict(
+            type="data",
+            array=sx * std_scale,
+            thickness=0.6,
+            width=0,
+            color=arm_color[k],
+        ) if err_avail and np.isfinite(sx).any() else None
+        ch = chosen[sel]
+        fig.add_trace(go.Scatter(
+            x=oracle[sel],
+            y=mu[sel],
+            mode="markers",
+            marker=dict(
+                size=8.0,
+                symbol=np.where(ch, "star", "circle").tolist(),
+                color=arm_color[k],
+                opacity=0.85,
+                line=dict(
+                    color=np.where(ch, "black", "white").tolist(),
+                    width=np.where(ch, 0.8, 0.4).tolist(),
+                ),
+            ),
+            error_y=err_y,
+            name=arm_label[k],
+            text=[
+                f"arm {arm_label[k]}<br>step={st}<br>μ={my:.4g}<br>oracle={ox:.4g}"
+                + (f"<br>σ={sv:.4g}" if np.isfinite(sv) else "")
+                + ("<br>(chosen)" if c else "")
+                for st, my, ox, sv, c in zip(steps[sel], mu[sel], oracle[sel], sx, ch)
+            ],
+            hovertemplate="%{text}<extra></extra>",
+        ))
+
+    lo, hi = float(min(oracle.min(), mu.min())), float(max(oracle.max(), mu.max()))
+    pad = 0.04 * (hi - lo) if hi > lo else max(abs(hi), 1.0) * 1e-3
+    fig.add_trace(go.Scatter(
+        x=[lo - pad, hi + pad], y=[lo - pad, hi + pad],
+        mode="lines", line=dict(color="rgba(0,0,0,0.55)", width=1, dash="dash"),
+        hoverinfo="skip", showlegend=False,
+    ))
+
+    fig.update_layout(
+        title=title, template="plotly_white",
+        width=width, height=height,
+        margin=dict(l=55, r=20, t=35 if title else 15, b=50),
+        xaxis=dict(title="Oracle reward", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
+        yaxis=dict(title="GP mean μ ± σ", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
+        legend=dict(title=dict(text="arm"), itemsizing="constant"),
+    )
+    return fig
+
+
 def plot_arm_feature_space(
     phi_hist,
     r_hist,
@@ -1394,13 +1508,12 @@ def plot_arm_feature_space(
     method          : "pca" or "umap"
     """
     import matplotlib.pyplot as plt
-    import numpy as _np
 
-    phi_hist = _np.asarray(phi_hist, dtype=float)
-    phi_cand = _np.asarray(phi_candidates, dtype=float)
-    r_hist = _np.asarray(r_hist, dtype=float)
+    phi_hist = np.asarray(phi_hist, dtype=float)
+    phi_cand = np.asarray(phi_candidates, dtype=float)
+    r_hist = np.asarray(r_hist, dtype=float)
 
-    X = _np.vstack([phi_hist, phi_cand])
+    X = np.vstack([phi_hist, phi_cand])
     if method == "umap":
         import umap  # type: ignore
         Z = umap.UMAP(n_components=2, random_state=0).fit_transform(X)
@@ -1420,7 +1533,7 @@ def plot_arm_feature_space(
         label="evaluated arms", zorder=2,
     )
     if mu_candidates is not None:
-        mu_candidates = _np.asarray(mu_candidates, dtype=float)
+        mu_candidates = np.asarray(mu_candidates, dtype=float)
         ax.scatter(
             Z_cand[:, 0], Z_cand[:, 1],
             c=mu_candidates, cmap=cmap,
