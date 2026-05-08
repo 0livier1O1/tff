@@ -505,11 +505,33 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
 
     _sc1, _sc2 = st.sidebar.columns(2)
     cfg.seeds_str = _sc1.text_input(
-        "New Seeds (csv)",
+        "Seeds (csv)",
         "",
         help=EXTEND_SEEDS,
     )
     cfg.cuda_device = _sc2.selectbox("CUDA Device", [0, 1], index=0)
+
+    _existing_algos = existing_cfg.get("algos", existing_cfg.get("policies", [])) or []
+    cfg.algos_to_run = st.sidebar.multiselect(
+        "Algorithms to (re)run",
+        ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4", "boss-ei", "boss-ucb", "tnale"],
+        default=_existing_algos,
+        help="Subset of algorithms to run on the chosen seeds.",
+    )
+
+    cfg.force_overwrite = st.sidebar.toggle(
+        "Overwrite existing", value=False,
+        help="If on, wipe matching `<seed>/<algo>/` directories before running.",
+    )
+    if cfg.force_overwrite:
+        st.sidebar.warning(
+            "⚠️ Will wipe these directories before running:\n"
+            + "\n".join(
+                f"- `seed_{s}/{a.replace('-', '_')}/`"
+                for s in (cfg.seeds_str or "").replace(",", " ").split() if s
+                for a in cfg.algos_to_run
+            )
+        )
 
     _render_tmux(cfg)
 
@@ -524,7 +546,6 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.max_rank              = _get("max_rank", _D.max_rank)
     cfg.problem_source        = _get("problem_source", _D.problem_source)
     cfg.target_path           = _get("target_path", _D.target_path)
-    cfg.algos_to_run          = _get("algos", _get("policies", _D.algos_to_run))
     cfg.mabss_budget          = _get("mabss_budget", _D.mabss_budget)
     cfg.mabss_max_rank        = _get("mabss_max_rank", _D.mabss_max_rank)
     cfg.boss_budget           = _get("boss_budget", _D.boss_budget)

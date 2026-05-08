@@ -27,6 +27,7 @@ class SidebarConfig:
     # Extend mode
     extend_mode: bool = False
     extend_run: str | None = None
+    force_overwrite: bool = False
     # Algorithm
     algos_to_run: list = field(default_factory=list)
     mabss_budget: int = 50

@@ -1366,19 +1366,36 @@ def plot_gp_oracle_reward_calibration(
     pol_diagnostics_dict,
     algo: str = "mabss-ucb",
     seed: int = 1,
+    step: int | str = "all",
     *,
-    std_scale: float = 1.0,
+    std_scale: float = 2.0,
     title: str | None = None,
     width: int = 560,
     height: int = 430,
 ) -> go.Figure:
     """
-    Compare GP posterior mean against oracle arm rewards across all steps for
-    one (seed, algo). Each point is one admissible arm at one step, colored by
-    arm index; chosen arms are drawn larger. GP σ is shown as a vertical error
-    bar around the predicted mean (y-axis).
+    Compare GP posterior mean against oracle arm rewards for one (seed, algo).
+    Each point is one admissible arm at one step, colored by arm index. GP σ
+    is shown as a vertical error bar around the predicted mean.
+
+    step: "all" (default) for every step, or an int to subset to that step.
     """
-    records = pol_diagnostics_dict[(seed, algo)]
+    all_records = pol_diagnostics_dict[(seed, algo)]
+    records = (
+        [r for r in all_records if r.get("step") == int(step)]
+        if step != "all" else all_records
+    )
+
+    # Axis range stays fixed across step subsets — compute from all records.
+    full_mu = np.concatenate([
+        np.asarray(r.get("gp_mean") or [], dtype=float) for r in all_records
+    ] or [np.array([0.0])])
+    full_oracle = np.concatenate([
+        np.asarray(r.get("oracle_rewards") or [], dtype=float) for r in all_records
+    ] or [np.array([0.0])])
+    finite = np.isfinite(full_mu) & np.isfinite(full_oracle[:full_mu.size])
+    lo = float(min(np.nanmin(full_mu[finite]), np.nanmin(full_oracle[finite])))
+    hi = float(max(np.nanmax(full_mu[finite]), np.nanmax(full_oracle[finite])))
 
     mu_all, oracle_all, std_all, step_all, arm_all, chosen_all = [], [], [], [], [], []
     for rec in records:
@@ -1409,57 +1426,67 @@ def plot_gp_oracle_reward_calibration(
     arms = np.concatenate(arm_all)
     chosen = np.concatenate(chosen_all).astype(bool)
 
-    # Map arm → label "(i,j)" via N(N-1)/2 = K
+    # Map arm → label "(i,j)" via N(N-1)/2 = K, sample colors from Portland.
     K = int(arms.max()) + 1
     N = int((1 + np.sqrt(1 + 8 * K)) / 2)
     triu_i, triu_j = np.triu_indices(N, k=1)
     arm_label = {k: f"({int(triu_i[k]) + 1},{int(triu_j[k]) + 1})" for k in range(K)}
-    palette = pc.qualitative.Plotly + pc.qualitative.Set2 + pc.qualitative.Pastel
-    arm_color = {k: palette[k % len(palette)] for k in range(K)}
+    arm_color = dict(zip(
+        range(K),
+        pc.sample_colorscale("Portland", [k / max(K - 1, 1) for k in range(K)]),
+    ))
 
     fig = go.Figure()
     err_avail = np.isfinite(s).any()
 
-    # One scatter trace per arm so the legend names are edge labels.
+    # Per-arm circle traces (non-chosen) — these drive the per-arm legend.
     for k in range(K):
-        sel = arms == k
+        sel = (arms == k) & ~chosen
         if not sel.any():
             continue
         sx = s[sel]
-        err_y = dict(
-            type="data",
-            array=sx * std_scale,
-            thickness=0.6,
-            width=0,
-            color=arm_color[k],
-        ) if err_avail and np.isfinite(sx).any() else None
-        ch = chosen[sel]
         fig.add_trace(go.Scatter(
-            x=oracle[sel],
-            y=mu[sel],
-            mode="markers",
-            marker=dict(
-                size=8.0,
-                symbol=np.where(ch, "star", "circle").tolist(),
-                color=arm_color[k],
-                opacity=0.85,
-                line=dict(
-                    color=np.where(ch, "black", "white").tolist(),
-                    width=np.where(ch, 0.8, 0.4).tolist(),
-                ),
-            ),
-            error_y=err_y,
-            name=arm_label[k],
-            text=[
-                f"arm {arm_label[k]}<br>step={st}<br>μ={my:.4g}<br>oracle={ox:.4g}"
-                + (f"<br>σ={sv:.4g}" if np.isfinite(sv) else "")
-                + ("<br>(chosen)" if c else "")
-                for st, my, ox, sv, c in zip(steps[sel], mu[sel], oracle[sel], sx, ch)
-            ],
+            x=oracle[sel], y=mu[sel], mode="markers",
+            marker=dict(size=10, symbol="circle", color=arm_color[k], opacity=0.85,
+                        line=dict(color="white", width=0.4)),
+            error_y=dict(type="data", array=sx * std_scale, thickness=0.6,
+                         width=0, color=arm_color[k])
+                    if err_avail and np.isfinite(sx).any() else None,
+            name=arm_label[k], legendgroup=f"arm-{k}",
+            text=[f"arm {arm_label[k]}<br>step={st}<br>μ={my:.4g}<br>oracle={ox:.4g}"
+                  + (f"<br>σ={sv:.4g}" if np.isfinite(sv) else "")
+                  for st, my, ox, sv in zip(steps[sel], mu[sel], oracle[sel], sx)],
             hovertemplate="%{text}<extra></extra>",
         ))
 
-    lo, hi = float(min(oracle.min(), mu.min())), float(max(oracle.max(), mu.max()))
+    # All chosen points in one star-shaped trace, colored per-arm — no legend.
+    if chosen.any():
+        sx = s[chosen]
+        fig.add_trace(go.Scatter(
+            x=oracle[chosen], y=mu[chosen], mode="markers",
+            marker=dict(
+                size=10, symbol="star",
+                color=[arm_color[a] for a in arms[chosen]],
+                line=dict(color="black", width=0.6),
+            ),
+            error_y=dict(type="data", array=sx * std_scale, thickness=0.6,
+                         width=0, color="rgba(0,0,0,0.45)")
+                    if err_avail and np.isfinite(sx).any() else None,
+            text=[f"arm {arm_label[int(a)]} (selected)<br>step={st}<br>μ={my:.4g}<br>oracle={ox:.4g}"
+                  + (f"<br>σ={sv:.4g}" if np.isfinite(sv) else "")
+                  for a, st, my, ox, sv in zip(arms[chosen], steps[chosen], mu[chosen], oracle[chosen], sx)],
+            hovertemplate="%{text}<extra></extra>",
+            showlegend=False,
+        ))
+
+    # Dummy "selected arm" legend entry (color-agnostic star).
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None], mode="markers",
+        marker=dict(size=10, symbol="star", color="rgba(0,0,0,0.55)",
+                    line=dict(color="black", width=0.6)),
+        name="selected arm", showlegend=True,
+    ))
+
     pad = 0.04 * (hi - lo) if hi > lo else max(abs(hi), 1.0) * 1e-3
     fig.add_trace(go.Scatter(
         x=[lo - pad, hi + pad], y=[lo - pad, hi + pad],
@@ -1468,12 +1495,17 @@ def plot_gp_oracle_reward_calibration(
     ))
 
     fig.update_layout(
-        title=title, template="plotly_white",
+        template="plotly_white",
         width=width, height=height,
         margin=dict(l=55, r=20, t=35 if title else 15, b=50),
         xaxis=dict(title="Oracle reward", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
         yaxis=dict(title="GP mean μ ± σ", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
-        legend=dict(title=dict(text="arm"), itemsizing="constant"),
+        legend=dict(
+            font=dict(size=11), itemsizing="constant",
+            bgcolor="rgba(255,255,255,0)", borderwidth=0,
+            tracegroupgap=0, itemwidth=30,
+            yanchor="top", y=1.0, xanchor="left", x=1.005,
+        ),
     )
     return fig
 

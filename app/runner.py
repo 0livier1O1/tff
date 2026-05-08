@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import asdict
@@ -256,10 +257,11 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
 
         for p in cfg.algos_to_run:
             algo_dir = seed_dir / p.replace("-", "_")
-            algo_dir.mkdir(exist_ok=True)
-            # Skip combos that already finished successfully
-            if (algo_dir / ".done").exists():
-                continue
+            if algo_dir.exists() and (algo_dir / ".done").exists():
+                if not cfg.force_overwrite:
+                    continue
+                shutil.rmtree(algo_dir)
+            algo_dir.mkdir(parents=True, exist_ok=True)
             for stale in [algo_dir / "progress.json"]:
                 if stale.exists():
                     stale.unlink()
