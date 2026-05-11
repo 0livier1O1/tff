@@ -7,17 +7,17 @@ from typing import List
 def _grid_for_rank(r: int, max_rank: int, local_step: int) -> List[int]:
     """
     Candidate list for one bond position: window [r-step, r+step] of size 2*step+1,
-    clipped to [1, max_rank-1] and shifted to maintain the full window size.
+    clipped to [1, max_rank] (inclusive) and shifted to maintain the full window size.
     """
     grid = np.arange(r - local_step, r + local_step + 1)
 
-    if len(grid) >= max_rank - 1:
-        return list(range(1, max_rank))
+    if len(grid) >= max_rank:
+        return list(range(1, max_rank + 1))
 
     if grid[0] < 1:
         grid = grid + (1 - int(grid[0]))
-    elif grid[-1] > max_rank - 1:
-        grid = grid - (int(grid[-1]) - (max_rank - 1))
+    elif grid[-1] > max_rank:
+        grid = grid - (int(grid[-1]) - max_rank)
 
     return grid.tolist()
 

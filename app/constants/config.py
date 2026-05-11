@@ -36,7 +36,7 @@ class SidebarConfig:
     tnale_budget: int = 200
     tnale_max_rank: int = 10
     # Decomposition
-    mabss_decomp_epochs: int = 60
+    mabss_decomp_epochs: int = 200
     boss_decomp_epochs: int = 2000
     mabss_decomp_method: str = "sgd"
     boss_decomp_method: str = "sgd"
@@ -44,8 +44,8 @@ class SidebarConfig:
     boss_decomp_init_lr: float | None = 0.1
     mabss_decomp_momentum: float = 0.5
     boss_decomp_momentum: float = 0.5
-    mabss_decomp_loss_patience: int = 2500
-    boss_decomp_loss_patience: int = 2500
+    mabss_decomp_loss_patience: int = 1000
+    boss_decomp_loss_patience: int = 1000
     mabss_decomp_lr_patience: int = 250
     boss_decomp_lr_patience: int = 250
     mabss_warm_start_method: str | None = None
@@ -74,7 +74,7 @@ class SidebarConfig:
     tnale_decomp_method: str = "adam"
     tnale_decomp_init_lr: float | None = 0.1
     tnale_decomp_momentum: float = 0.9
-    tnale_decomp_loss_patience: int = 2500
+    tnale_decomp_loss_patience: int = 1000
     tnale_decomp_lr_patience: int = 250
     tnale_n_runs: int = 1
     # TnALE — advanced

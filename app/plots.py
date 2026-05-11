@@ -1375,8 +1375,8 @@ def plot_gp_oracle_reward_calibration(
 ) -> go.Figure:
     """
     Compare GP posterior mean against oracle arm rewards for one (seed, algo).
-    Each point is one admissible arm at one step, colored by arm index. GP σ
-    is shown as a vertical error bar around the predicted mean.
+    Each point is one admissible arm at one step, colored by arm index. GP σ is
+    shown as a horizontal error bar around the predicted mean.
 
     step: "all" (default) for every step, or an int to subset to that step.
     """
@@ -1386,27 +1386,22 @@ def plot_gp_oracle_reward_calibration(
         if step != "all" else all_records
     )
 
-    # Axis range stays fixed across step subsets — compute from all records.
-    full_mu = np.concatenate([
-        np.asarray(r.get("gp_mean") or [], dtype=float) for r in all_records
-    ] or [np.array([0.0])])
-    full_oracle = np.concatenate([
-        np.asarray(r.get("oracle_rewards") or [], dtype=float) for r in all_records
-    ] or [np.array([0.0])])
-    finite = np.isfinite(full_mu) & np.isfinite(full_oracle[:full_mu.size])
-    lo = float(min(np.nanmin(full_mu[finite]), np.nanmin(full_oracle[finite])))
-    hi = float(max(np.nanmax(full_mu[finite]), np.nanmax(full_oracle[finite])))
+    # Keep a fixed range across step subsets for easier visual comparison.
+    full_mu = np.concatenate([np.asarray(r["gp_mean"], dtype=float) for r in all_records])
+    full_oracle = np.concatenate([np.asarray(r["oracle_rewards"], dtype=float) for r in all_records])
+    full_valid = np.isfinite(full_mu)
+    lo = float(min(np.nanmin(full_mu[full_valid]), np.nanmin(full_oracle[full_valid])))
+    hi = float(max(np.nanmax(full_mu[full_valid]), np.nanmax(full_oracle[full_valid])))
 
+    K = len(all_records[0]["oracle_rewards"])
     mu_all, oracle_all, std_all, step_all, arm_all, chosen_all = [], [], [], [], [], []
     for rec in records:
-        mu = np.asarray(rec.get("gp_mean") or [], dtype=float)
-        oracle = np.asarray(rec.get("oracle_rewards") or [], dtype=float)
-        if mu.size == 0 or oracle.size == 0:
-            continue
+        mu = np.asarray(rec["gp_mean"], dtype=float)
+        oracle = np.asarray(rec["oracle_rewards"], dtype=float)
 
         # gp_mean is full-K with NaN at saturated arms; gp_std is admissible-only.
         valid = np.isfinite(mu)
-        std_valid = np.asarray(rec.get("gp_std") or [], dtype=float)
+        std_valid = np.asarray(rec["gp_std"], dtype=float)
         std = np.full_like(mu, np.nan)
         if std_valid.size == valid.sum():
             std[valid] = std_valid
@@ -1427,7 +1422,6 @@ def plot_gp_oracle_reward_calibration(
     chosen = np.concatenate(chosen_all).astype(bool)
 
     # Map arm → label "(i,j)" via N(N-1)/2 = K, sample colors from Portland.
-    K = int(arms.max()) + 1
     N = int((1 + np.sqrt(1 + 8 * K)) / 2)
     triu_i, triu_j = np.triu_indices(N, k=1)
     arm_label = {k: f"({int(triu_i[k]) + 1},{int(triu_j[k]) + 1})" for k in range(K)}
@@ -1446,10 +1440,10 @@ def plot_gp_oracle_reward_calibration(
             continue
         sx = s[sel]
         fig.add_trace(go.Scatter(
-            x=oracle[sel], y=mu[sel], mode="markers",
+            x=mu[sel], y=oracle[sel], mode="markers",
             marker=dict(size=10, symbol="circle", color=arm_color[k], opacity=0.85,
                         line=dict(color="white", width=0.4)),
-            error_y=dict(type="data", array=sx * std_scale, thickness=0.6,
+            error_x=dict(type="data", array=sx * std_scale, thickness=0.6,
                          width=0, color=arm_color[k])
                     if err_avail and np.isfinite(sx).any() else None,
             name=arm_label[k], legendgroup=f"arm-{k}",
@@ -1463,13 +1457,13 @@ def plot_gp_oracle_reward_calibration(
     if chosen.any():
         sx = s[chosen]
         fig.add_trace(go.Scatter(
-            x=oracle[chosen], y=mu[chosen], mode="markers",
+            x=mu[chosen], y=oracle[chosen], mode="markers",
             marker=dict(
                 size=10, symbol="star",
                 color=[arm_color[a] for a in arms[chosen]],
                 line=dict(color="black", width=0.6),
             ),
-            error_y=dict(type="data", array=sx * std_scale, thickness=0.6,
+            error_x=dict(type="data", array=sx * std_scale, thickness=0.6,
                          width=0, color="rgba(0,0,0,0.45)")
                     if err_avail and np.isfinite(sx).any() else None,
             text=[f"arm {arm_label[int(a)]} (selected)<br>step={st}<br>μ={my:.4g}<br>oracle={ox:.4g}"
@@ -1498,14 +1492,162 @@ def plot_gp_oracle_reward_calibration(
         template="plotly_white",
         width=width, height=height,
         margin=dict(l=55, r=20, t=35 if title else 15, b=50),
-        xaxis=dict(title="Oracle reward", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
-        yaxis=dict(title="GP mean μ ± σ", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
+        xaxis=dict(title="GP mean μ ± σ", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
+        yaxis=dict(title="Oracle reward", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
         legend=dict(
             font=dict(size=11), itemsizing="constant",
             bgcolor="rgba(255,255,255,0)", borderwidth=0,
             tracegroupgap=0, itemwidth=30,
             yanchor="top", y=1.0, xanchor="left", x=1.005,
         ),
+    )
+    return fig
+
+
+_EXP4_EXPERT_NAMES = ["uniform", "GP-mean", "GP-UCB", "empirical", "recency"]
+
+
+def _arm_labels_from_K(K: int) -> list[str]:
+    N = int((1 + np.sqrt(1 + 8 * K)) / 2)
+    triu_i, triu_j = np.triu_indices(N, k=1)
+    return [f"({int(triu_i[k]) + 1},{int(triu_j[k]) + 1})" for k in range(K)]
+
+
+def _arm_heatmap(steps, values, selected_arms, *, value_name: str, visible_mask=None):
+    """One arm-distribution heatmap with zero-probability arms left blank."""
+    K = values.shape[1]
+    y_labels = _arm_labels_from_K(K)
+
+    # Mark saturated arms as NaN so they render as empty cells on the white background.
+    if visible_mask is None:
+        visible_mask = values > 0
+    z = np.where(visible_mask, values, np.nan).T
+
+    main = go.Heatmap(
+        z=z, x=steps, y=y_labels,
+        colorscale="Viridis",
+        zmin=0.0, zmax=float(max(np.nanmax(z), 1e-12)),
+        colorbar=dict(thickness=10, len=0.85),
+        hovertemplate=f"step %{{x}}<br>arm %{{y}}<br>{value_name}=%{{z:.3g}}<extra></extra>",
+        hoverongaps=False,
+        ygap=1,
+    )
+
+    # Overlay the arm chosen by the policy at each step.
+    overlay = go.Scatter(
+        x=steps, y=[y_labels[i] for i in selected_arms],
+        mode="markers",
+        marker=dict(size=6, color="black", symbol="circle-open",
+                    line=dict(color="black", width=1.2)),
+        name="selected arm", hoverinfo="skip", showlegend=True,
+    )
+    return main, overlay, y_labels
+
+
+def plot_policy_weights(
+    pol_diagnostics_dict,
+    algo: str,
+    seed: int = 1,
+    *,
+    arm_value: str = "probability",
+    title: str | None = None,
+    width: int = 720,
+    height: int = 320,
+) -> go.Figure:
+    """
+    Heatmap of an EXP3/EXP4 policy's distribution evolution.
+
+    EXP3 → arm-distribution heatmap.
+    EXP4 → two heatmaps: expert weights (top) + arm distribution (bottom).
+    The selected arm at each step is overlaid as a black open circle.
+    """
+    records = pol_diagnostics_dict[(seed, algo)]
+    steps = [r["step"] for r in records]
+    selected_arms = [int(r["arm"]) for r in records]
+    if arm_value not in {"probability", "weight"}:
+        raise ValueError("arm_value must be 'probability' or 'weight'")
+    value_name = "p" if arm_value == "probability" else "w"
+
+    if algo.endswith("exp3"):
+        probs = np.array([r["exp3_probs"] for r in records], dtype=float)
+        if arm_value == "weight":
+            log_w = np.array([r["exp3_log_weights"] for r in records], dtype=float)
+            centered = log_w - log_w.max(axis=1, keepdims=True)
+            values = np.exp(centered)
+            values = values / values.sum(axis=1, keepdims=True)
+        else:
+            values = probs
+        main, overlay, _ = _arm_heatmap(
+            steps, values, selected_arms,
+            value_name=value_name,
+            visible_mask=probs > 0,
+        )
+        fig = go.Figure([main, overlay])
+        fig.update_layout(yaxis=dict(title="arm (edge)", autorange="reversed"))
+    elif algo.endswith("exp4"):
+        ew = np.array([r["expert_weights"] for r in records], dtype=float)
+        probs = np.array([r["exp4_probs"] for r in records], dtype=float)
+        if arm_value == "weight":
+            expert_dists = np.array([r["exp4_expert_dists"] for r in records], dtype=float)
+            values = np.einsum("se,sek->sk", ew, expert_dists)
+        else:
+            values = probs
+        main, overlay, _ = _arm_heatmap(
+            steps, values, selected_arms,
+            value_name=value_name,
+            visible_mask=probs > 0,
+        )
+
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.30, 0.70], vertical_spacing=0.06,
+        )
+        fig.add_trace(go.Heatmap(
+            z=ew.T, x=steps, y=_EXP4_EXPERT_NAMES[: ew.shape[1]],
+            colorscale="Cividis", zmin=0.0, zmax=1.0,
+            colorbar=dict(thickness=10, len=0.30, y=0.85, yanchor="middle"),
+            hovertemplate="step %{x}<br>expert %{y}<br>w=%{z:.3g}<extra></extra>",
+            ygap=1,
+        ), row=1, col=1)
+        main.update(colorbar=dict(thickness=10, len=0.55, y=0.30, yanchor="middle"))
+        fig.add_trace(main, row=2, col=1)
+        fig.add_trace(overlay, row=2, col=1)
+        fig.update_yaxes(title_text="expert", autorange="reversed", row=1, col=1)
+        fig.update_yaxes(title_text="arm (edge)", autorange="reversed", row=2, col=1)
+        height = max(height, 460)
+    else:
+        raise ValueError(f"plot_policy_weights only supports EXP3/EXP4, got {algo!r}")
+
+    fig.update_layout(
+        title=None, template="plotly_white",
+        width=width, height=height,
+        margin=dict(l=70, r=95, t=8, b=45),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(size=13),
+        legend=dict(
+            x=1,
+            y=1.0,
+            xanchor="left",
+            yanchor="top",
+            bgcolor="rgba(255,255,255,0.8)",
+            borderwidth=0,
+            font=dict(size=11),
+            itemsizing="constant",
+        ),
+    )
+    fig.update_yaxes(
+        showgrid=False,
+        tickfont=dict(size=12),
+        title_font=dict(size=13),
+        title_standoff=4,
+    )
+    fig.update_xaxes(
+        title_text="Function evals",
+        showgrid=False,
+        tickfont=dict(size=12),
+        title_font=dict(size=13),
+        title_standoff=4,
     )
     return fig
 

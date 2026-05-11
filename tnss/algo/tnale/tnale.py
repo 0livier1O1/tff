@@ -8,6 +8,9 @@ from random import choice
 
 import cupy as cp
 import numpy as np
+import torch
+from botorch.utils.sampling import draw_sobol_samples
+from botorch.utils.transforms import unnormalize
 
 from tensors.networks.cutensor_network import cuTensorNetwork
 from tnss.algo.tnale.structure import Structure
@@ -36,7 +39,7 @@ class TnALE:
 
     Search space
     ------------
-    D bond ranks in {1, …, max_rank-1} where D is determined by the topology:
+    D bond ranks in {1, …, max_rank} where D is determined by the topology:
       "ring" (default) — N ring bonds + vertex permutation search (Algorithm 3).
       "full"           — all N*(N-1)/2 bonds, no permutation (classic FCTN search).
       list of (i,j)    — custom bond set, no permutation.
@@ -56,7 +59,7 @@ class TnALE:
     ----------
     target        : target tensor as a numpy/torch array
     phys_dims     : (N,) physical mode sizes
-    max_rank      : exclusive upper bound on any bond rank (ranks in [1, max_rank-1])
+    max_rank      : inclusive upper bound on any bond rank (ranks in [1, max_rank])
     budget        : number of ALE position-update steps (one step = one position sweep)
     topology      : "ring" (TR, default), "full" (FCTN), or a list of (i,j) bond pairs
     n_perm_samples: candidates per permutation step. None = enumerate all N*(N-1)/2
@@ -230,7 +233,7 @@ class TnALE:
             raw = np.array(
                 [
                     0 if np.random.random() <= self.init_sparsity
-                    else np.random.randint(2, self.max_rank)
+                    else np.random.randint(2, self.max_rank + 1)
                     for _ in range(D)
                 ],
                 dtype=int,
@@ -600,16 +603,11 @@ class TnALE:
         Draw n_sobol_init Sobol candidates, evaluate each, return ranks of the best.
 
         Bit-identical samples to BOSS when topology='full', same seed, same
-        n_sobol_init, and tnale.max_rank == boss.max_rank + 1 (TnALE's bound
-        is exclusive, BOSS's inclusive). Caller must have already set
-        self._fixed_permute and the _in_init_phase / _last_row_time state
-        used by _record.
+        n_sobol_init, and same max_rank (both bounds are inclusive). Caller
+        must have already set self._fixed_permute and the _in_init_phase /
+        _last_row_time state used by _record.
         """
-        import torch
-        from botorch.utils.sampling import draw_sobol_samples
-        from botorch.utils.transforms import unnormalize
-
-        R = self.max_rank - 1
+        R = self.max_rank
         bounds = torch.stack([
             torch.ones(self.D, dtype=torch.double),
             torch.full((self.D,), float(R), dtype=torch.double),
