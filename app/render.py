@@ -308,50 +308,50 @@ def render_results(
             key="objective_global",
         )
 
-    st.markdown("#### Performance vs Runtime")
-    _ctrl_col, _chart_col = st.columns([1, 5])
-    with _ctrl_col:
-        _threshold = st.number_input(
-            "Loss threshold",
-            min_value=0.0, max_value=1.0, value=0.05, step=0.01, format="%.3f",
-            key="ttt_threshold",
-        )
-        _has_eff = "efficiency" in df_rows.columns
-        _y_metric = st.selectbox(
-            "Y-axis",
-            options=["CR", "Efficiency"] if _has_eff else ["CR"],
-            key="ttt_y_metric",
-        )
-    with _chart_col:
-        st.plotly_chart(
-            plot_time_to_threshold(df_rows, threshold=_threshold, y_metric=_y_metric),
-            use_container_width=True,
-            key="time_to_threshold_global",
-        )
+    # st.markdown("#### Performance vs Runtime")
+    # _ctrl_col, _chart_col = st.columns([1, 5])
+    # with _ctrl_col:
+    #     _threshold = st.number_input(
+    #         "Loss threshold",
+    #         min_value=0.0, max_value=1.0, value=0.05, step=0.01, format="%.3f",
+    #         key="ttt_threshold",
+    #     )
+    #     _has_eff = "efficiency" in df_rows.columns
+    #     _y_metric = st.selectbox(
+    #         "Y-axis",
+    #         options=["CR", "Efficiency"] if _has_eff else ["CR"],
+    #         key="ttt_y_metric",
+    #     )
+    # with _chart_col:
+    #     st.plotly_chart(
+    #         plot_time_to_threshold(df_rows, threshold=_threshold, y_metric=_y_metric),
+    #         use_container_width=True,
+    #         key="time_to_threshold_global",
+    #     )
 
-    st.markdown("#### Pareto Curves")
-    _pareto_ctrl, _pareto_chart = st.columns([1, 5])
-    with _pareto_ctrl:
-        _available_steps = sorted(df_rows["step"].dropna().unique().astype(int))
-        _pareto_step = st.select_slider(
-            "Step",
-            options=_available_steps,
-            value=_available_steps[-1],
-            key="pareto_step",
-        )
-        _pareto_y_metric = st.selectbox(
-            "Y-axis",
-            options=["CR", "Efficiency"] if _has_eff else ["CR"],
-            key="pareto_y_metric",
-        )
-    with _pareto_chart:
-        st.plotly_chart(
-            plot_pareto_at_step(df_rows, step=_pareto_step, y_metric=_pareto_y_metric),
-            use_container_width=True,
-            key="pareto_global",
-        )
+    # st.markdown("#### Pareto Curves")
+    # _pareto_ctrl, _pareto_chart = st.columns([1, 5])
+    # with _pareto_ctrl:
+    #     _available_steps = sorted(df_rows["step"].dropna().unique().astype(int))
+    #     _pareto_step = st.select_slider(
+    #         "Step",
+    #         options=_available_steps,
+    #         value=_available_steps[-1],
+    #         key="pareto_step",
+    #     )
+    #     _pareto_y_metric = st.selectbox(
+    #         "Y-axis",
+    #         options=["CR", "Efficiency"] if _has_eff else ["CR"],
+    #         key="pareto_y_metric",
+    #     )
+    # with _pareto_chart:
+    #     st.plotly_chart(
+    #         plot_pareto_at_step(df_rows, step=_pareto_step, y_metric=_pareto_y_metric),
+    #         use_container_width=True,
+    #         key="pareto_global",
+    #     )
 
-    st.divider()
+    # st.divider()
     st.markdown("## Seed-Specific Analysis Maps")
 
     for seed in sorted(df_rows["Seed"].unique()):

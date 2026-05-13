@@ -26,9 +26,6 @@ from tnss.algo.tnale.neighborhood import (
 from tnss.algo.tnale.interpolation import interpolate_rse
 
 
-# Sparsity guard: skip evaluation when CR >= this (network larger than target)
-_MAX_CR = 10.0
-
 
 class TnALE:
     """
@@ -443,14 +440,6 @@ class TnALE:
         self, s: Structure, update_idx: int | None
     ) -> tuple[float, float, float]:
         """Run cuTensorNetwork decomposition on one structure. Returns (rse, cr, time_s)."""
-        cr_analytical = s.sparsity()
-
-        # Skip obviously degenerate structures (network larger than target)
-        if cr_analytical >= _MAX_CR:
-            rse = 9999.0
-            self._record(s, rse, cr_analytical, 0.0)
-            return rse, cr_analytical, 0.0
-
         t0 = time.time()
         A = cp.asarray(s.to_network_adj())
         net = cuTensorNetwork(A, backend=self.backend, dtype=self.dtype)

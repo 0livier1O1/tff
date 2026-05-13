@@ -129,6 +129,9 @@ def plot_objective(
 
     df = pd.concat([df_boss, df_tnale], ignore_index=True)
     df = df[df["step_time_s"].notna() & df["objective"].notna()].copy()
+    # Count every recorded row as a step so init samples line up across algos
+    # (TNALE's sparsity-guard rows have huge objective but never beat cum-min,
+    # so they don't distort the curve; they only add ~0.08s each to cum_time).
     df["n_evals"] = df.groupby(["Algo", "Seed"], sort=False).cumcount() + 1
     if max_evals is not None:
         df = df[df["n_evals"] <= max_evals]
@@ -1372,6 +1375,7 @@ def plot_gp_oracle_reward_calibration(
     title: str | None = None,
     width: int = 560,
     height: int = 430,
+    slider: bool = False,
 ) -> go.Figure:
     """
     Compare GP posterior mean against oracle arm rewards for one (seed, algo).
@@ -1379,49 +1383,20 @@ def plot_gp_oracle_reward_calibration(
     shown as a horizontal error bar around the predicted mean.
 
     step: "all" (default) for every step, or an int to subset to that step.
+    slider: when True, render every step as its own group of traces with a
+        Plotly-native step slider. Ignored when `step` is a specific integer.
     """
     all_records = pol_diagnostics_dict[(seed, algo)]
-    records = (
-        [r for r in all_records if r.get("step") == int(step)]
-        if step != "all" else all_records
-    )
 
-    # Keep a fixed range across step subsets for easier visual comparison.
+    # Global range over every step so the axes don't jump as the slider moves.
     full_mu = np.concatenate([np.asarray(r["gp_mean"], dtype=float) for r in all_records])
     full_oracle = np.concatenate([np.asarray(r["oracle_rewards"], dtype=float) for r in all_records])
     full_valid = np.isfinite(full_mu)
     lo = float(min(np.nanmin(full_mu[full_valid]), np.nanmin(full_oracle[full_valid])))
     hi = float(max(np.nanmax(full_mu[full_valid]), np.nanmax(full_oracle[full_valid])))
+    pad = 0.04 * (hi - lo) if hi > lo else max(abs(hi), 1.0) * 1e-3
 
     K = len(all_records[0]["oracle_rewards"])
-    mu_all, oracle_all, std_all, step_all, arm_all, chosen_all = [], [], [], [], [], []
-    for rec in records:
-        mu = np.asarray(rec["gp_mean"], dtype=float)
-        oracle = np.asarray(rec["oracle_rewards"], dtype=float)
-
-        # gp_mean is full-K with NaN at saturated arms; gp_std is admissible-only.
-        valid = np.isfinite(mu)
-        std_valid = np.asarray(rec["gp_std"], dtype=float)
-        std = np.full_like(mu, np.nan)
-        if std_valid.size == valid.sum():
-            std[valid] = std_valid
-
-        idx = np.flatnonzero(valid)
-        mu_all.append(mu[idx])
-        oracle_all.append(oracle[idx])
-        std_all.append(std[idx])
-        step_all.append(np.full(idx.size, rec.get("step", -1), dtype=int))
-        arm_all.append(idx.astype(int))
-        chosen_all.append(idx == int(rec.get("arm", -1)))
-
-    mu = np.concatenate(mu_all)
-    oracle = np.concatenate(oracle_all)
-    s = np.concatenate(std_all)
-    steps = np.concatenate(step_all)
-    arms = np.concatenate(arm_all)
-    chosen = np.concatenate(chosen_all).astype(bool)
-
-    # Map arm → label "(i,j)" via N(N-1)/2 = K, sample colors from Portland.
     N = int((1 + np.sqrt(1 + 8 * K)) / 2)
     triu_i, triu_j = np.triu_indices(N, k=1)
     arm_label = {k: f"({int(triu_i[k]) + 1},{int(triu_j[k]) + 1})" for k in range(K)}
@@ -1430,68 +1405,145 @@ def plot_gp_oracle_reward_calibration(
         pc.sample_colorscale("Portland", [k / max(K - 1, 1) for k in range(K)]),
     ))
 
+    def _extract(records):
+        """Stack (mu, oracle, std, steps, arms, chosen) across given records."""
+        mu_all, oracle_all, std_all, step_all, arm_all, chosen_all = [], [], [], [], [], []
+        for rec in records:
+            mu = np.asarray(rec["gp_mean"], dtype=float)
+            oracle = np.asarray(rec["oracle_rewards"], dtype=float)
+            valid = np.isfinite(mu)
+            std_valid = np.asarray(rec["gp_std"], dtype=float)
+            std = np.full_like(mu, np.nan)
+            if std_valid.size == valid.sum():
+                std[valid] = std_valid
+            idx = np.flatnonzero(valid)
+            mu_all.append(mu[idx])
+            oracle_all.append(oracle[idx])
+            std_all.append(std[idx])
+            step_all.append(np.full(idx.size, rec.get("step", -1), dtype=int))
+            arm_all.append(idx.astype(int))
+            chosen_all.append(idx == int(rec.get("arm", -1)))
+        return (
+            np.concatenate(mu_all) if mu_all else np.array([]),
+            np.concatenate(oracle_all) if oracle_all else np.array([]),
+            np.concatenate(std_all) if std_all else np.array([]),
+            np.concatenate(step_all) if step_all else np.array([], dtype=int),
+            np.concatenate(arm_all) if arm_all else np.array([], dtype=int),
+            np.concatenate(chosen_all).astype(bool) if chosen_all else np.array([], dtype=bool),
+        )
+
+    def _add_group(fig, records, *, visible=True, legend_for_arm=None):
+        """Add the K per-arm + 1 chosen-stars traces for one record subset.
+        Returns the list of indices of traces just added. `legend_for_arm` may
+        be a set of arm indices for which to show legend entries (used so the
+        slider doesn't duplicate the per-arm legend across step groups)."""
+        mu, oracle, s, steps_, arms, chosen = _extract(records)
+        err_avail = np.isfinite(s).any() if s.size else False
+        added: list[int] = []
+        legend_for_arm = legend_for_arm if legend_for_arm is not None else set(range(K))
+        for k in range(K):
+            sel = (arms == k) & ~chosen
+            if not sel.any():
+                # Add a stub trace so the slider can toggle the same number of
+                # traces per step.
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None], mode="markers",
+                    marker=dict(size=10, symbol="circle", color=arm_color[k], opacity=0.85,
+                                line=dict(color="white", width=0.4)),
+                    name=arm_label[k], legendgroup=f"arm-{k}",
+                    showlegend=(k in legend_for_arm),
+                    visible=visible, hoverinfo="skip",
+                ))
+                added.append(len(fig.data) - 1)
+                continue
+            sx = s[sel]
+            fig.add_trace(go.Scatter(
+                x=mu[sel], y=oracle[sel], mode="markers",
+                marker=dict(size=10, symbol="circle", color=arm_color[k], opacity=0.85,
+                            line=dict(color="white", width=0.4)),
+                error_x=dict(type="data", array=sx * std_scale, thickness=0.6,
+                             width=0, color=arm_color[k])
+                        if err_avail and np.isfinite(sx).any() else None,
+                name=arm_label[k], legendgroup=f"arm-{k}",
+                showlegend=(k in legend_for_arm),
+                visible=visible,
+                text=[f"arm {arm_label[k]}<br>step={st}<br>μ={my:.4g}<br>oracle={ox:.4g}"
+                      + (f"<br>σ={sv:.4g}" if np.isfinite(sv) else "")
+                      for st, my, ox, sv in zip(steps_[sel], mu[sel], oracle[sel], sx)],
+                hovertemplate="%{text}<extra></extra>",
+            ))
+            added.append(len(fig.data) - 1)
+
+        # Chosen-stars trace (always present, even if empty, for stable indexing).
+        if chosen.any():
+            sx = s[chosen]
+            fig.add_trace(go.Scatter(
+                x=mu[chosen], y=oracle[chosen], mode="markers",
+                marker=dict(
+                    size=10, symbol="star",
+                    color=[arm_color[a] for a in arms[chosen]],
+                    line=dict(color="black", width=0.6),
+                ),
+                error_x=dict(type="data", array=sx * std_scale, thickness=0.6,
+                             width=0, color="rgba(0,0,0,0.45)")
+                        if err_avail and np.isfinite(sx).any() else None,
+                text=[f"arm {arm_label[int(a)]} (selected)<br>step={st}<br>μ={my:.4g}<br>oracle={ox:.4g}"
+                      + (f"<br>σ={sv:.4g}" if np.isfinite(sv) else "")
+                      for a, st, my, ox, sv in zip(arms[chosen], steps_[chosen], mu[chosen], oracle[chosen], sx)],
+                hovertemplate="%{text}<extra></extra>",
+                showlegend=False, visible=visible,
+            ))
+        else:
+            fig.add_trace(go.Scatter(
+                x=[None], y=[None], mode="markers",
+                marker=dict(size=10, symbol="star", color="rgba(0,0,0,0.55)",
+                            line=dict(color="black", width=0.6)),
+                showlegend=False, visible=visible, hoverinfo="skip",
+            ))
+        added.append(len(fig.data) - 1)
+        return added
+
     fig = go.Figure()
-    err_avail = np.isfinite(s).any()
 
-    # Per-arm circle traces (non-chosen) — these drive the per-arm legend.
-    for k in range(K):
-        sel = (arms == k) & ~chosen
-        if not sel.any():
-            continue
-        sx = s[sel]
-        fig.add_trace(go.Scatter(
-            x=mu[sel], y=oracle[sel], mode="markers",
-            marker=dict(size=10, symbol="circle", color=arm_color[k], opacity=0.85,
-                        line=dict(color="white", width=0.4)),
-            error_x=dict(type="data", array=sx * std_scale, thickness=0.6,
-                         width=0, color=arm_color[k])
-                    if err_avail and np.isfinite(sx).any() else None,
-            name=arm_label[k], legendgroup=f"arm-{k}",
-            text=[f"arm {arm_label[k]}<br>step={st}<br>μ={my:.4g}<br>oracle={ox:.4g}"
-                  + (f"<br>σ={sv:.4g}" if np.isfinite(sv) else "")
-                  for st, my, ox, sv in zip(steps[sel], mu[sel], oracle[sel], sx)],
-            hovertemplate="%{text}<extra></extra>",
-        ))
+    use_slider = slider and step == "all"
+    if use_slider:
+        # One group of (K + 1) traces per step; only the first group is initially visible.
+        step_values = sorted({r.get("step", -1) for r in all_records})
+        group_traces: list[list[int]] = []
+        for i, sv in enumerate(step_values):
+            recs = [r for r in all_records if r.get("step") == sv]
+            visible = (i == 0)
+            # Only first group contributes per-arm legend entries.
+            legend_for_arm = set(range(K)) if i == 0 else set()
+            group_traces.append(_add_group(fig, recs, visible=visible, legend_for_arm=legend_for_arm))
+    else:
+        records = (
+            [r for r in all_records if r.get("step") == int(step)]
+            if step != "all" else all_records
+        )
+        _add_group(fig, records)
 
-    # All chosen points in one star-shaped trace, colored per-arm — no legend.
-    if chosen.any():
-        sx = s[chosen]
-        fig.add_trace(go.Scatter(
-            x=mu[chosen], y=oracle[chosen], mode="markers",
-            marker=dict(
-                size=10, symbol="star",
-                color=[arm_color[a] for a in arms[chosen]],
-                line=dict(color="black", width=0.6),
-            ),
-            error_x=dict(type="data", array=sx * std_scale, thickness=0.6,
-                         width=0, color="rgba(0,0,0,0.45)")
-                    if err_avail and np.isfinite(sx).any() else None,
-            text=[f"arm {arm_label[int(a)]} (selected)<br>step={st}<br>μ={my:.4g}<br>oracle={ox:.4g}"
-                  + (f"<br>σ={sv:.4g}" if np.isfinite(sv) else "")
-                  for a, st, my, ox, sv in zip(arms[chosen], steps[chosen], mu[chosen], oracle[chosen], sx)],
-            hovertemplate="%{text}<extra></extra>",
-            showlegend=False,
-        ))
-
-    # Dummy "selected arm" legend entry (color-agnostic star).
+    # Color-agnostic "selected arm" legend stub — always visible.
     fig.add_trace(go.Scatter(
         x=[None], y=[None], mode="markers",
         marker=dict(size=10, symbol="star", color="rgba(0,0,0,0.55)",
                     line=dict(color="black", width=0.6)),
         name="selected arm", showlegend=True,
     ))
+    legend_idx = len(fig.data) - 1
 
-    pad = 0.04 * (hi - lo) if hi > lo else max(abs(hi), 1.0) * 1e-3
+    # Diagonal y=x — always visible.
     fig.add_trace(go.Scatter(
         x=[lo - pad, hi + pad], y=[lo - pad, hi + pad],
         mode="lines", line=dict(color="rgba(0,0,0,0.55)", width=1, dash="dash"),
         hoverinfo="skip", showlegend=False,
     ))
+    diag_idx = len(fig.data) - 1
 
-    fig.update_layout(
+    layout_kwargs = dict(
         template="plotly_white",
         width=width, height=height,
-        margin=dict(l=55, r=20, t=35 if title else 15, b=50),
+        margin=dict(l=55, r=20, t=35 if title else 15, b=70 if use_slider else 50),
         xaxis=dict(title="GP mean μ ± σ", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
         yaxis=dict(title="Oracle reward", range=[lo - pad, hi + pad], showgrid=False, zeroline=False),
         legend=dict(
@@ -1501,6 +1553,36 @@ def plot_gp_oracle_reward_calibration(
             yanchor="top", y=1.0, xanchor="left", x=1.005,
         ),
     )
+    if title is not None:
+        layout_kwargs["title"] = dict(text=title)
+    fig.update_layout(**layout_kwargs)
+
+    if use_slider:
+        n_traces = len(fig.data)
+        slider_steps = []
+        for i, sv in enumerate(step_values):
+            visible = [False] * n_traces
+            for ti in group_traces[i]:
+                visible[ti] = True
+            visible[legend_idx] = True
+            visible[diag_idx] = True
+            label_step = sv if sv >= 0 else i
+            slider_steps.append(dict(
+                method="update",
+                label=str(label_step),
+                args=[
+                    {"visible": visible},
+                    {"title.text": (
+                        f"{title} — step {label_step}" if title else f"step {label_step}"
+                    )},
+                ],
+            ))
+        fig.update_layout(sliders=[dict(
+            active=0, pad=dict(t=30, b=10),
+            currentvalue=dict(prefix="step = ", font=dict(size=12)),
+            steps=slider_steps,
+        )])
+
     return fig
 
 
