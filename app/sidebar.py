@@ -52,7 +52,7 @@ def render_sidebar() -> SidebarConfig:
 # ---------------------------------------------------------------------------
 
 def _render_run_mode(cfg: SidebarConfig) -> None:
-    from app.problem import render_problem_source
+    from app.problem import render_problem_section
 
     cfg.extend_mode = st.sidebar.toggle(
         "Extend existing run",
@@ -63,8 +63,9 @@ def _render_run_mode(cfg: SidebarConfig) -> None:
         _render_extend_mode(cfg)
         return
 
+    st.sidebar.markdown("### Problem")
+    render_problem_section(cfg, ROOT)
     st.sidebar.markdown("### General Settings")
-    render_problem_source(cfg)
 
     _sc1, _sc2 = st.sidebar.columns(2)
     cfg.seeds_str = _sc1.text_input(
@@ -542,10 +543,7 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     def _get(key, default):
         return existing_cfg.get(key, default)
 
-    cfg.n_cores               = _get("n_cores", _D.n_cores)
-    cfg.max_rank              = _get("max_rank", _D.max_rank)
-    cfg.problem_source        = _get("problem_source", _D.problem_source)
-    cfg.target_path           = _get("target_path", _D.target_path)
+    cfg.problem_id            = _get("problem_id", _D.problem_id)
     cfg.mabss_budget          = _get("mabss_budget", _D.mabss_budget)
     cfg.mabss_max_rank        = _get("mabss_max_rank", _D.mabss_max_rank)
     cfg.boss_budget           = _get("boss_budget", _D.boss_budget)
@@ -602,12 +600,6 @@ def _render_extend_mode(cfg: SidebarConfig) -> None:
     cfg.tnale_min_rse            = _get("tnale_min_rse", _D.tnale_min_rse)
     cfg.tnale_init_method        = _get("tnale_init_method", _D.tnale_init_method)
     cfg.tnale_n_sobol_init       = _get("tnale_n_sobol_init", _D.tnale_n_sobol_init)
-    cfg.adj_spec                     = _get("adj_spec", _D.adj_spec)
-    cfg.adj_r_min                    = _get("adj_r_min", _D.adj_r_min)
-    cfg.adj_r_max                    = _get("adj_r_max", _D.adj_r_max)
-    cfg.topology                     = _get("topology", _D.topology)
-    cfg.fix_adj                      = _get("fix_adj", _D.fix_adj)
-    cfg.lightfield_dataset           = _get("lightfield_dataset", _D.lightfield_dataset)
     cfg.mabss_stopping_threshold     = _get("mabss_stopping_threshold", _D.mabss_stopping_threshold)
     cfg.mabss_exp3_reward_scale      = _get("mabss_exp3_reward_scale", _D.mabss_exp3_reward_scale)
     cfg.mabss_exp3_loss_cap          = _get("mabss_exp3_loss_cap", _D.mabss_exp3_loss_cap)

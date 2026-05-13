@@ -6,18 +6,8 @@ from dataclasses import dataclass, field
 @dataclass
 class SidebarConfig:
     app_mode: str = ""
-    # Problem
-    problem_source: str = "Synthetic"
-    n_cores: int = 5
-    max_rank: int = 6          # kept for Images mode and backward-compat
-    target_path: str | None = None
-    lightfield_dataset: str | None = None
-    # Adjacency matrix editor (Synthetic mode)
-    adj_spec: list | None = None  # N×N list of lists of str; None = use old random path
-    adj_r_min: int = 2
-    adj_r_max: int = 8
-    topology: str = "FCTN"
-    fix_adj: bool = True
+    # Problem — fully identified by problem_id; load via app.problem_io.load_problem
+    problem_id: str | None = None
     # Run control
     seeds_str: str = "1"
     cuda_device: int = 0

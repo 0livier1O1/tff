@@ -181,13 +181,25 @@ def render_load_mode(ROOT: Path):
 
         with open(out_dir / "config.json") as f:
             cfg_json = json.load(f)
+
+        from app.problem_io import load_problem
+        _problem = None
+        _pid = cfg_json.get("problem_id")
+        if _pid:
+            try:
+                _problem = load_problem(ROOT, _pid)
+            except FileNotFoundError:
+                st.sidebar.warning(f"Problem `{_pid}` referenced by this run has been deleted.")
+
         st.sidebar.markdown("### Static Configuration")
         c1, c2 = st.sidebar.columns(2)
-        c1.metric("Cores ($N$)", cfg_json.get("n_cores", "-"))
-        c2.metric("Max Search Rank", cfg_json.get("max_edge_rank", "-"))
+        c1.metric("Cores ($N$)", _problem.n_cores if _problem else "-")
+        c2.metric("Max Rank", _problem.max_rank if _problem else "-")
         b1, b2 = st.sidebar.columns(2)
-        b1.metric("Steps Budget", cfg_json.get("budget", "-"))
+        b1.metric("MABSS Budget", cfg_json.get("mabss_budget", "-"))
         b2.metric("Decomp Epochs", f"{cfg_json.get('mabss_decomp_epochs', '-')}/{cfg_json.get('boss_decomp_epochs', '-')}")
+        if _problem is not None:
+            st.sidebar.caption(f"Problem: `{_pid}` — {_problem.name}")
         with st.sidebar.expander("Underlying Hyperparameters", expanded=False):
             st.json(cfg_json)
 

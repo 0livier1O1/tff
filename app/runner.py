@@ -2,12 +2,12 @@
 runner.py — subprocess orchestration for the BOSS dashboard.
 
 Builds CLI command lists, writes the run shell script, and launches it either
-directly or via tmux.  All functions take a SidebarConfig explicitly so they
-have no dependency on module-level sidebar state.
+directly or via tmux. The problem is loaded by problem_id; per-seed targets
+are lazy-materialized under problems/<pid>/seed_<k>/ and read directly from
+there — no copies into artifacts/.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shutil
@@ -19,6 +19,8 @@ from pathlib import Path
 import streamlit as st
 
 from app.constants.config import SidebarConfig
+from app.constants.problem import Problem, mint_problem_id, now_iso
+from app.problem_io import load_problem, save_problem, target_path_for, adj_path_for
 from app.utils import _write_run_script, _script_alive
 
 
@@ -42,19 +44,19 @@ def parse_seeds(seeds_str: str) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# CLI command builders
+# CLI command builders — all take the resolved problem so we don't reach
+# into cfg for problem-shaped attributes.
 # ---------------------------------------------------------------------------
 
-def mabss_cmd(cfg: SidebarConfig, seed: int, algo_name: str, algo_dir: Path) -> list[str]:
-    """Build the CLI argument list for run_mabss_experiment.py."""
+def mabss_cmd(cfg: SidebarConfig, problem: Problem, seed: int, algo_name: str, algo_dir: Path) -> list[str]:
     mabss_algo = algo_name.replace("mabss-", "")
     cmd = [
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_mabss_experiment.py",
         "--budget",              str(cfg.mabss_budget),
         "--warm-start-epochs",    str(cfg.mabss_decomp_epochs),
-        "--n-cores",             str(cfg.n_cores),
-        "--max-rank",            str(cfg.max_rank),
+        "--n-cores",             str(problem.n_cores),
+        "--max-rank",            str(problem.max_rank),
         "--max-edge-rank",       str(cfg.mabss_max_rank),
         "--beta",                str(cfg.beta),
         "--kernel-name",         cfg.kernel_name,
@@ -89,22 +91,16 @@ def mabss_cmd(cfg: SidebarConfig, seed: int, algo_name: str, algo_dir: Path) -> 
             "--warm-start-method",       cfg.mabss_warm_start_method,
             "--warm-start-decomp-epochs", str(cfg.mabss_warm_start_epochs),
         ])
-    if cfg.target_path:
-        cmd.extend(["--target-path", cfg.target_path])
-    return cmd  # --adj-path injected by launch_run after saving per-seed .npy
+    return cmd  # --target-path / --adj-path injected by launch_run
 
 
-
-
-
-def tnale_cmd(cfg: SidebarConfig, seed: int, algo_dir: Path) -> list[str]:
-    """Build the CLI argument list for run_tnale_experiment.py."""
+def tnale_cmd(cfg: SidebarConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
     cmd = [
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_tnale_experiment.py",
         "--budget",          str(cfg.tnale_budget),
-        "--n-cores",         str(cfg.n_cores),
-        "--max-rank",        str(cfg.max_rank),
+        "--n-cores",         str(problem.n_cores),
+        "--max-rank",        str(problem.max_rank),
         "--max-search-rank", str(cfg.tnale_max_rank),
         "--maxiter-tn",      str(cfg.tnale_decomp_epochs),
         "--n-runs",          str(cfg.tnale_n_runs),
@@ -133,19 +129,16 @@ def tnale_cmd(cfg: SidebarConfig, seed: int, algo_dir: Path) -> list[str]:
         cmd.append("--no-interp")
     if not cfg.tnale_phase_change_reset:
         cmd.append("--no-phase-change-reset")
-    if cfg.target_path:
-        cmd.extend(["--target-path", cfg.target_path])
     return cmd
 
 
-def boss_cmd(cfg: SidebarConfig, seed: int, algo_name: str, algo_dir: Path) -> list[str]:
-    """Build the CLI argument list for run_boss_experiment.py."""
+def boss_cmd(cfg: SidebarConfig, problem: Problem, seed: int, algo_name: str, algo_dir: Path) -> list[str]:
     acqf = algo_name.split("-")[1]  # boss-ei → ei
     cmd = [
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_boss_experiment.py",
-        "--n-cores",     str(cfg.n_cores),
-        "--max-rank",    str(cfg.max_rank),
+        "--n-cores",     str(problem.n_cores),
+        "--max-rank",    str(problem.max_rank),
         "--seed",        str(seed),
         "--budget",      str(cfg.boss_budget),
         "--n-init",      str(cfg.boss_n_init),
@@ -164,9 +157,31 @@ def boss_cmd(cfg: SidebarConfig, seed: int, algo_name: str, algo_dir: Path) -> l
     ]
     if cfg.boss_decomp_init_lr is not None:
         cmd.extend(["--init-lr", str(cfg.boss_decomp_init_lr)])
-    if cfg.target_path:
-        cmd.extend(["--target-path", cfg.target_path])
-    return cmd  # --adj-path injected by launch_run after saving per-seed .npy
+    return cmd
+
+
+# ---------------------------------------------------------------------------
+# Problem resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_problem(cfg: SidebarConfig, repo_root: Path) -> Problem:
+    """Resolve cfg → Problem, saving a pending new problem to disk if needed."""
+    if cfg.problem_id:
+        return load_problem(repo_root, cfg.problem_id)
+
+    pending = st.session_state.get("pending_problem")
+    if pending is None:
+        st.sidebar.error("No problem selected. Pick an existing one or fill in a new one.")
+        st.stop()
+
+    pid = mint_problem_id(pending.kind, pending.name)
+    pending.problem_id = pid
+    pending.created_at = now_iso()
+    save_problem(repo_root, pending)
+    cfg.problem_id = pid
+    st.session_state["pending_problem"] = None
+    st.sidebar.success(f"Created problem `{pid}`.")
+    return pending
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +189,6 @@ def boss_cmd(cfg: SidebarConfig, seed: int, algo_name: str, algo_dir: Path) -> l
 # ---------------------------------------------------------------------------
 
 def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
-    """Validate config, build all commands, write run.sh, launch it, update session state."""
-    from scripts.utils import make_problem, save_tensor, save_image
-
     if not cfg.run_name or not cfg.run_name.strip():
         st.sidebar.error("Run Name is required.")
         st.stop()
@@ -195,10 +207,11 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         st.sidebar.error("Provide valid integer seeds.")
         st.stop()
 
+    problem = _resolve_problem(cfg, ROOT)
+
     out_dir = ROOT / "artifacts" / cfg.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Merge seeds into config: in extend mode preserve previously recorded seeds
     existing_config: dict = {}
     cfg_path = out_dir / "config.json"
     if cfg_path.exists():
@@ -206,57 +219,26 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
             existing_config = json.load(f)
     all_seeds = sorted(set(existing_config.get("seeds", [])) | set(seeds))
 
-    # UI-only fields that don't belong in the reproducibility record
     _UI_FIELDS = {
         "app_mode", "seeds_str", "extend_mode", "extend_run",
         "cuda_device", "use_tmux", "tmux_session", "run_name",
     }
     config_dict = {k: v for k, v in asdict(cfg).items() if k not in _UI_FIELDS}
-    config_dict["seeds"] = all_seeds          # computed list, not raw seeds_str
-    config_dict["algos"] = config_dict.pop("algos_to_run")  # stable JSON key
-    config_dict["mabss_exp4_decay"] = cfg.exp3_decay        # explicit alias
+    config_dict["seeds"] = all_seeds
+    config_dict["algos"] = config_dict.pop("algos_to_run")
+    config_dict["mabss_exp4_decay"] = cfg.exp3_decay
     with open(cfg_path, "w") as f:
         json.dump(config_dict, f, indent=4)
 
-    import numpy as np
-    from scripts.utils import resolve_adj_spec
-
     jobs: list[dict] = []
     cmds: list[list[str]] = []
-    resolved_adj: dict[str, list] = {}   # seed → concrete int matrix, written to config after loop
     for seed in seeds:
-        seed_dir = out_dir / f"seed_{seed}"
-        seed_dir.mkdir(exist_ok=True)
-
-        adj_npy = seed_dir / "adj_spec.npy"
-        adj_path_arg: str | None = None
-
-        if cfg.problem_source == "Synthetic":
-            adj_seed = 0 if cfg.fix_adj else seed
-            if cfg.adj_spec is not None:
-                adj_np = resolve_adj_spec(cfg.adj_spec, cfg.adj_r_min, cfg.adj_r_max, adj_seed)
-            else:
-                from scripts.utils import random_adj_matrix
-                _adj_t = random_adj_matrix(cfg.n_cores, cfg.max_rank, seed=adj_seed)
-                adj_np = _adj_t.numpy().astype(np.int32)
-            np.save(adj_npy, adj_np)
-            adj_path_arg = str(adj_npy)
-            resolved_adj[str(seed)] = adj_np.tolist()
-
-        _seed_args = argparse.Namespace(
-            n_cores=cfg.n_cores, max_rank=cfg.max_rank,
-            target_path=cfg.target_path,
-            adj_path=adj_path_arg,
-            dtype="float32", seed=seed,
-        )
-        init_adj, target = make_problem(_seed_args)
-        save_tensor(seed_dir / "target_tensor.npz", target)
-        if cfg.problem_source == "Images":
-            save_image(seed_dir / "target_image.png", target)
-        # Lightfield: no per-seed image saved (use preview from problem.py)
+        # Lazy-materialize the problem's per-seed target if synthetic.
+        target_path = target_path_for(ROOT, problem, seed)
+        adj_path = adj_path_for(ROOT, problem, seed)  # None for RealProblem
 
         for p in cfg.algos_to_run:
-            algo_dir = seed_dir / p.replace("-", "_")
+            algo_dir = out_dir / f"seed_{seed}" / p.replace("-", "_")
             if algo_dir.exists() and (algo_dir / ".done").exists():
                 if not cfg.force_overwrite:
                     continue
@@ -265,22 +247,21 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
             for stale in [algo_dir / "progress.json"]:
                 if stale.exists():
                     stale.unlink()
+
             if p.startswith("boss-"):
-                cmd = boss_cmd(cfg, seed, p, algo_dir)
+                cmd = boss_cmd(cfg, problem, seed, p, algo_dir)
             elif p == "tnale":
-                cmd = tnale_cmd(cfg, seed, algo_dir)
+                cmd = tnale_cmd(cfg, problem, seed, algo_dir)
             else:
-                cmd = mabss_cmd(cfg, seed, p, algo_dir)
-            if adj_path_arg:
-                cmd.extend(["--adj-path", adj_path_arg])
+                cmd = mabss_cmd(cfg, problem, seed, p, algo_dir)
+
+            if target_path:
+                cmd.extend(["--target-path", target_path])
+            if adj_path:
+                cmd.extend(["--adj-path", adj_path])
+
             cmds.append(cmd)
             jobs.append({"seed": seed, "algo": p, "algo_dir": str(algo_dir)})
-
-    # Persist the concrete per-seed adjacency matrices so config.json fully identifies the problem
-    if resolved_adj:
-        config_dict["adj_matrices"] = resolved_adj
-        with open(cfg_path, "w") as f:
-            json.dump(config_dict, f, indent=4)
 
     if not cmds:
         st.sidebar.warning("All requested seed/algo combinations are already complete. Nothing to run.")
@@ -307,6 +288,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
 
     run_record = {
         "run_name": cfg.run_name,
+        "problem_id": problem.problem_id,
         "jobs": jobs,
         "pid_file": str(out_dir / "run.pid"),
         "submitted_at": time.time(),
