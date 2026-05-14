@@ -57,10 +57,11 @@ def render_problem_section(cfg: SidebarConfig, repo_root: Path) -> None:
 
     default_mode = "Use existing" if has_existing else "Create new"
     mode = st.sidebar.radio(
-        "Problem",
+        "Problem mode",
         mode_options,
         index=mode_options.index(default_mode),
         horizontal=True,
+        label_visibility="collapsed",
         key="problem_mode",
     )
 
@@ -102,22 +103,39 @@ def _render_problem_summary(p: Problem) -> None:
 
 def _render_new(cfg: SidebarConfig, repo_root: Path) -> None:
     cfg.problem_id = None
-    name = st.sidebar.text_input(
-        "Problem name *",
-        value=st.session_state.get("new_problem_name", ""),
-        placeholder="Required — describe this problem",
-        key="new_problem_name",
-    )
     source = st.sidebar.selectbox("Source", PROBLEM_SOURCES, key="new_problem_source")
 
     if source == "Synthetic":
-        p = _build_synthetic(name)
+        p = _build_synthetic()
     elif source == "Images":
-        p = _build_image(name)
+        p = _build_image()
     else:
-        p = _build_lightfield(name)
+        p = _build_lightfield()
 
     st.session_state["pending_problem"] = p
+
+
+def _name_input_with_auto(auto_default: str) -> str:
+    """Text input prefilled from settings.
+
+    The input tracks the auto-derived default until the user manually edits;
+    once edited, the user's value is sticky and won't be clobbered when
+    settings change.
+    """
+    KEY = "new_problem_name"
+    PREV_AUTO_KEY = "_new_problem_name_prev_auto"
+
+    prev_auto = st.session_state.get(PREV_AUTO_KEY)
+    if KEY not in st.session_state or st.session_state[KEY] == prev_auto:
+        st.session_state[KEY] = auto_default
+    st.session_state[PREV_AUTO_KEY] = auto_default
+
+    return st.sidebar.text_input(
+        "Problem name *",
+        key=KEY,
+        placeholder="Required — describe this problem",
+        help="Auto-derived from the settings above. Edit to override; manual edits are sticky.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +155,7 @@ def topology_active_edges(topology: str, n: int) -> set[tuple[int, int]]:
     return set()
 
 
-def _build_synthetic(name: str) -> SyntheticProblem | None:
+def _build_synthetic() -> SyntheticProblem | None:
     st.sidebar.markdown("#### Adjacency Matrix")
     nc1, nc2, nc3 = st.sidebar.columns(3)
     n = int(nc1.number_input(
@@ -162,11 +180,14 @@ def _build_synthetic(name: str) -> SyntheticProblem | None:
         "Fix adjacency across seeds", value=True, key="synth_fix_adj",
         help="When on, all seeds share the same bond-rank structure.",
     )
-    gen_seed = int(st.sidebar.number_input(
-        "Adjacency gen seed", min_value=0, max_value=10000,
-        value=st.session_state.get("synth_gen_seed", 0), step=1, key="synth_gen_seed",
-        help="Seed used to resolve 'R' entries (only when Fix adjacency is on).",
-    ))
+    if fix_adj:
+        gen_seed = int(st.sidebar.number_input(
+            "Adjacency gen seed", min_value=0, max_value=10000,
+            value=st.session_state.get("synth_gen_seed", 0), step=1, key="synth_gen_seed",
+            help="Seed used to resolve 'R' entries.",
+        ))
+    else:
+        gen_seed = 0  # unused — each seed resolves its own adjacency
 
     topology = st.sidebar.radio(
         "Topology", ["FCTN", "TT", "TR"],
@@ -217,6 +238,11 @@ def _build_synthetic(name: str) -> SyntheticProblem | None:
     ]
     max_rank = max(numeric_ranks, default=r_max)
 
+    auto_name = (
+        f"synth_{topology}_{n}c_{r_min}_to_{r_max}"
+        f"_{'fixedadj' if fix_adj else 'seededadj'}"
+    )
+    name = _name_input_with_auto(auto_name)
     if not name.strip():
         return None
     return SyntheticProblem(
@@ -238,7 +264,7 @@ def _build_synthetic(name: str) -> SyntheticProblem | None:
 # Images → RealProblem
 # ---------------------------------------------------------------------------
 
-def _build_image(name: str) -> RealProblem | None:
+def _build_image() -> RealProblem | None:
     img_dir = Path("data/natural_images")
     if not img_dir.exists():
         st.sidebar.error("data/natural_images directory not found.")
@@ -280,6 +306,8 @@ def _build_image(name: str) -> RealProblem | None:
         "Mode sizes are powers of 2 mapping to 256×256 pixels."
     )
 
+    auto_name = f"img_{Path(selected_img).stem}_{n_cores}c"
+    name = _name_input_with_auto(auto_name)
     if not name.strip():
         return None
     return RealProblem(
@@ -299,7 +327,7 @@ def _build_image(name: str) -> RealProblem | None:
 # Lightfield → RealProblem
 # ---------------------------------------------------------------------------
 
-def _build_lightfield(name: str) -> RealProblem | None:
+def _build_lightfield() -> RealProblem | None:
     import re
     import numpy as np
 
@@ -350,6 +378,8 @@ def _build_lightfield(name: str) -> RealProblem | None:
         except Exception as e:
             st.sidebar.warning(f"Preview failed: {e}")
 
+    auto_name = f"lf_{dataset}_{npy_path.stem}"
+    name = _name_input_with_auto(auto_name)
     if not name.strip():
         return None
     return RealProblem(

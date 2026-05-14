@@ -6,14 +6,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import json
-import matplotlib
-matplotlib.use("Agg")
 
 import streamlit as st
 
 from app.sidebar import render_sidebar
 from app.runner import launch_run
-from app.render import render_job_status_panel, render_load_mode, render_results
+from app.jobs import render_job_status_panel
 from app.utils import _artifact_fully_done
 
 # ---------------------------------------------------------------------------
@@ -23,14 +21,14 @@ from app.utils import _artifact_fully_done
 st.set_page_config(page_title="Boss | TNSS Dashboard", layout="wide")
 st.title("Adaptive Tensor Network Structure Search")
 st.markdown(
-    "Interactive analysis of sequential decision making algorithms over dynamically generated `cuTensorNet` rank states."
+    "Configure problems, launch search runs, and monitor jobs. "
+    "Results visualization will be rebuilt — for now use the on-disk artifacts directly."
 )
 st.markdown(
     """
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    /* header {visibility: hidden;} — DO NOT HIDE: removes sidebar toggle chevron */
 
     div[data-testid="stTooltipContent"] {
         background-color: #ffffff !important;
@@ -46,9 +44,6 @@ st.markdown(
     div[data-baseweb="tooltip"] > div {
         background-color: transparent !important;
     }
-    div[data-testid="stPlotlyChart"] {
-        margin-bottom: -1rem;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -61,23 +56,22 @@ st.markdown(
 cfg = render_sidebar()
 
 # ---------------------------------------------------------------------------
-# Launch button (Run New Evaluation mode only)
+# Launch button
 # ---------------------------------------------------------------------------
 
-if cfg.app_mode == "Run New Evaluation":
-    if st.sidebar.button("Execute Tensor Evaluation", type="primary", use_container_width=True):
-        launch_run(cfg, ROOT)
-        st.rerun()
+if st.sidebar.button("Execute Tensor Evaluation", type="primary", use_container_width=True):
+    launch_run(cfg, ROOT)
+    st.rerun()
 
 # ---------------------------------------------------------------------------
 # Restore active runs from disk after browser reconnect
 # ---------------------------------------------------------------------------
 
 if "active_runs" not in st.session_state:
-    _artifact_dir = ROOT / "artifacts"
+    _runs_dir = ROOT / "artifacts" / "runs"
     _restored = []
-    if _artifact_dir.exists():
-        for _run_d in sorted(_artifact_dir.iterdir(), reverse=True):
+    if _runs_dir.exists():
+        for _run_d in sorted(_runs_dir.iterdir(), reverse=True):
             _ss_file = _run_d / "session_state.json"
             if _ss_file.exists() and not _artifact_fully_done(_run_d):
                 try:
@@ -94,13 +88,5 @@ if "active_runs" not in st.session_state:
 
 render_job_status_panel(ROOT)
 
-# ---------------------------------------------------------------------------
-# Mode-specific rendering — results are only rendered in Load Past Artifact mode
-# ---------------------------------------------------------------------------
-
-if cfg.app_mode == "Load Past Artifact":
-    data_ready, df_mabss, df_boss, df_tnale, summaries, decomp_dict, pol_diagnostics_dict, df_summary, out_dir = render_load_mode(ROOT)
-    if data_ready:
-        render_results(df_mabss, df_boss, df_tnale, summaries, decomp_dict, pol_diagnostics_dict, df_summary, out_dir, ROOT)
-elif not st.session_state.get("active_runs"):
-    st.info("**Awaiting initialization.** Setup your environment context and click Execute.")
+if not st.session_state.get("active_runs"):
+    st.info("**Awaiting initialization.** Configure your problem and algorithm(s) in the sidebar, then click Execute.")

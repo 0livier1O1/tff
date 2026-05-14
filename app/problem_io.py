@@ -27,9 +27,16 @@ from app.constants.problem import (
 # ---------------------------------------------------------------------------
 
 def problems_root(repo_root: Path) -> Path:
-    """Return problems/ directory under the repo root, creating it if needed."""
-    p = repo_root / "problems"
-    p.mkdir(exist_ok=True)
+    """Return artifacts/problems/ directory, creating it if needed."""
+    p = repo_root / "artifacts" / "problems"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def runs_root(repo_root: Path) -> Path:
+    """Return artifacts/runs/ directory, creating it if needed."""
+    p = repo_root / "artifacts" / "runs"
+    p.mkdir(parents=True, exist_ok=True)
     return p
 
 
@@ -84,27 +91,37 @@ def is_seed_materialized(repo_root: Path, problem_id: str, seed: int) -> bool:
     return (sdir / "target_tensor.npz").exists() and (sdir / "adj_matrix.npy").exists()
 
 
-def ensure_seed_materialized(
-    repo_root: Path,
-    problem: SyntheticProblem,
-    seed: int,
-) -> Path:
-    """Generate target_tensor.npz + adj_matrix.npy for `seed` if missing.
+def ensure_seed_materialized(repo_root: Path, problem: Problem, seed: int) -> Path:
+    """Materialize target_tensor.npz + adj_matrix.npy for `seed` if missing.
 
-    Returns the seed directory path. Idempotent — re-calling with an existing
-    seed is a no-op and reads from cache on next access.
+    Layout for every Problem subclass (CLI scripts see a uniform interface):
+        artifacts/problems/<pid>/seed_<k>/target_tensor.npz   key="data"
+        artifacts/problems/<pid>/seed_<k>/adj_matrix.npy
+
+    Idempotent — re-calling with an existing seed is a no-op.
     """
-    from scripts.utils import resolve_adj_spec, random_adj_matrix, save_tensor
-    from tensors.networks.cutensor_network import sim_tensor_from_adj
-
     sdir = seed_dir(repo_root, problem.problem_id, seed)
     if is_seed_materialized(repo_root, problem.problem_id, seed):
         return sdir
 
     sdir.mkdir(parents=True, exist_ok=True)
 
-    # Resolve adjacency: with fix_adj the same gen_seed is used for every run;
-    # without it, the per-seed `seed` drives the resolution so each run differs.
+    if isinstance(problem, SyntheticProblem):
+        _materialize_synthetic(problem, seed, sdir)
+    elif isinstance(problem, RealProblem):
+        _materialize_real(problem, seed, sdir)
+    else:
+        raise TypeError(f"Unknown problem type: {type(problem).__name__}")
+
+    return sdir
+
+
+def _materialize_synthetic(problem: SyntheticProblem, seed: int, sdir: Path) -> None:
+    from scripts.utils import resolve_adj_spec, random_adj_matrix, save_tensor
+    from tensors.networks.cutensor_network import sim_tensor_from_adj
+    import torch
+
+    # With fix_adj, gen_seed drives adjacency resolution; otherwise each seed differs.
     adj_seed = problem.gen_seed if problem.fix_adj else seed
     if problem.adj_spec is not None:
         adj_np = resolve_adj_spec(
@@ -116,35 +133,46 @@ def ensure_seed_materialized(
 
     np.save(sdir / "adj_matrix.npy", adj_np)
 
-    import torch
     adj_torch = torch.from_numpy(adj_np).to(torch.int)
     target, _ = sim_tensor_from_adj(adj_torch, backend="cupy", dtype="float32", seed=seed)
     save_tensor(sdir / "target_tensor.npz", target)
 
-    return sdir
+
+def _materialize_real(problem: RealProblem, seed: int, sdir: Path) -> None:
+    """Load the canonical source file, retensorize images if needed, then
+    save a uniform target_tensor.npz (key='data') + a synthesized init adj."""
+    from scripts.utils import (
+        load_target_tensor, reconstruct_image, retensorize_image,
+        random_adj_matrix, save_tensor,
+    )
+    import cupy as cp
+
+    _, target_cp = load_target_tensor(problem.target_path, dtype="float32")
+
+    # Images come in as 2D and need re-tensorizing to the problem's n_cores
+    if target_cp.ndim <= 2 and problem.n_cores != target_cp.ndim:
+        img_2d = reconstruct_image(target_cp)
+        target_cp = cp.array(retensorize_image(img_2d, problem.n_cores)).astype(cp.float32)
+
+    save_tensor(sdir / "target_tensor.npz", target_cp)
+
+    adj_t = random_adj_matrix(
+        problem.n_cores, problem.max_rank, diag=target_cp.shape, seed=seed,
+    )
+    np.save(sdir / "adj_matrix.npy", adj_t.numpy().astype(np.int32))
 
 
 # ---------------------------------------------------------------------------
 # Resolution helpers used by the runner
 # ---------------------------------------------------------------------------
 
-def adj_path_for(repo_root: Path, problem: Problem, seed: int) -> str | None:
-    """Path to the adjacency matrix for (problem, seed), or None for real problems."""
-    if isinstance(problem, SyntheticProblem):
-        ensure_seed_materialized(repo_root, problem, seed)
-        return str(seed_dir(repo_root, problem.problem_id, seed) / "adj_matrix.npy")
-    return None
+def adj_path_for(repo_root: Path, problem: Problem, seed: int) -> str:
+    """Path to the materialized adjacency matrix for (problem, seed)."""
+    ensure_seed_materialized(repo_root, problem, seed)
+    return str(seed_dir(repo_root, problem.problem_id, seed) / "adj_matrix.npy")
 
 
-def target_path_for(repo_root: Path, problem: Problem, seed: int) -> str | None:
-    """Path to the target tensor for (problem, seed).
-
-    - SyntheticProblem: materialized npz under problems/<pid>/seed_<k>/.
-    - RealProblem: the canonical target_path on disk (seed-independent).
-    """
-    if isinstance(problem, SyntheticProblem):
-        ensure_seed_materialized(repo_root, problem, seed)
-        return str(seed_dir(repo_root, problem.problem_id, seed) / "target_tensor.npz")
-    if isinstance(problem, RealProblem):
-        return problem.target_path
-    raise TypeError(f"Unknown problem type: {type(problem).__name__}")
+def target_path_for(repo_root: Path, problem: Problem, seed: int) -> str:
+    """Path to the materialized target tensor for (problem, seed)."""
+    ensure_seed_materialized(repo_root, problem, seed)
+    return str(seed_dir(repo_root, problem.problem_id, seed) / "target_tensor.npz")

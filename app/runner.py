@@ -1,26 +1,25 @@
 """
 runner.py — subprocess orchestration for the BOSS dashboard.
 
-Builds CLI command lists, writes the run shell script, and launches it either
-directly or via tmux. The problem is loaded by problem_id; per-seed targets
-are lazy-materialized under problems/<pid>/seed_<k>/ and read directly from
-there — no copies into artifacts/.
+Each AlgoConfig becomes one subprocess invocation per seed, writing into
+`artifacts/<run>/seed_<k>/<algo_subdir>/`. The Problem is loaded by id;
+per-seed targets are lazy-materialized under `problems/<pid>/seed_<k>/`
+and read directly from there.
 """
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import streamlit as st
 
 from app.constants.config import SidebarConfig
+from app.constants.algo_config import AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig
 from app.constants.problem import Problem, mint_problem_id, now_iso
-from app.problem_io import load_problem, save_problem, target_path_for, adj_path_for
+from app.problem_io import load_problem, save_problem, runs_root, target_path_for, adj_path_for
 from app.utils import _write_run_script, _script_alive
 
 
@@ -40,124 +39,158 @@ def parse_seeds(seeds_str: str) -> list[int]:
                 prev, nxt = int(parts[i - 1]), int(parts[i + 1])
                 if prev < nxt:
                     raw.extend(range(prev + 1, nxt))
-    return list(dict.fromkeys(raw))  # deduplicate, preserve order
+    return list(dict.fromkeys(raw))
 
 
 # ---------------------------------------------------------------------------
-# CLI command builders — all take the resolved problem so we don't reach
-# into cfg for problem-shaped attributes.
+# CLI command builders — each takes one AlgoConfig + the resolved problem
 # ---------------------------------------------------------------------------
 
-def mabss_cmd(cfg: SidebarConfig, problem: Problem, seed: int, algo_name: str, algo_dir: Path) -> list[str]:
-    mabss_algo = algo_name.replace("mabss-", "")
+def _decomp_flags(acfg: AlgoConfig) -> list[str]:
+    """Decomposition flags shared by every family (same flag names across CLIs)."""
+    flags = [
+        "--decomp-method",   acfg.decomp_method,
+        "--momentum",        str(acfg.decomp_momentum),
+        "--loss-patience",   str(acfg.decomp_loss_patience),
+        "--lr-patience",     str(acfg.decomp_lr_patience),
+    ]
+    if acfg.decomp_init_lr is not None:
+        flags += ["--init-lr", str(acfg.decomp_init_lr)]
+    return flags
+
+
+def mabss_cmd(acfg: MABSSConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
+    """Build CLI args for a MABSS run. Only the flags relevant to the chosen
+    sub-policy are appended — no silent passthrough of unused params."""
+    p = acfg.policy
     cmd = [
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_mabss_experiment.py",
-        "--budget",              str(cfg.mabss_budget),
-        "--warm-start-epochs",    str(cfg.mabss_decomp_epochs),
-        "--n-cores",             str(problem.n_cores),
-        "--max-rank",            str(problem.max_rank),
-        "--max-edge-rank",       str(cfg.mabss_max_rank),
-        "--beta",                str(cfg.beta),
-        "--kernel-name",         cfg.kernel_name,
-        "--fixed-noise",         str(cfg.fixed_noise),
-        "--stopping-threshold",  str(cfg.mabss_stopping_threshold),
+        "--budget",             str(acfg.mabss_budget),
+        "--warm-start-epochs",  str(acfg.decomp_epochs),
+        "--n-cores",            str(problem.n_cores),
+        "--max-rank",           str(problem.max_rank),
+        "--max-edge-rank",      str(acfg.mabss_max_rank),
+        "--stopping-threshold", str(acfg.mabss_stopping_threshold),
         "--deterministic-eval",
-        "--exp3-gamma",          str(cfg.exp3_gamma),
-        "--exp3-decay",          str(cfg.exp3_decay),
-        "--exp3-reward-scale",   str(cfg.mabss_exp3_reward_scale),
-        "--exp3-loss-bins",      str(cfg.exp3_loss_bins),
-        "--exp3-cr-bins",        str(cfg.exp3_cr_bins),
-        "--exp3-loss-cap",       str(cfg.mabss_exp3_loss_cap),
-        "--exp3-log-cr-cap",     str(cfg.mabss_exp3_log_cr_cap),
-        "--exp4-gamma",          str(cfg.exp4_gamma),
-        "--exp4-decay",          str(cfg.exp3_decay),
-        "--exp4-eta",            str(cfg.exp4_eta),
-        "--dtype",               cfg.dtype,
-        "--decomp-method",       cfg.mabss_decomp_method,
-        "--momentum",            str(cfg.mabss_decomp_momentum),
-        "--loss-patience",       str(cfg.mabss_decomp_loss_patience),
-        "--lr-patience",         str(cfg.mabss_decomp_lr_patience),
-        "--seed",                str(seed),
-        "--policies",            mabss_algo,
-        "--out-dir",             str(algo_dir),
+        "--dtype",              acfg.dtype,
+        "--seed",               str(seed),
+        "--policies",           p.replace("mabss-", ""),
+        "--out-dir",            str(algo_dir),
     ]
-    if cfg.mabss_decomp_init_lr is not None:
-        cmd.extend(["--init-lr", str(cfg.mabss_decomp_init_lr)])
-    if cfg.learn_noise:
-        cmd.append("--learn-noise")
-    if cfg.mabss_warm_start_method and cfg.mabss_warm_start_epochs > 0:
-        cmd.extend([
-            "--warm-start-method",       cfg.mabss_warm_start_method,
-            "--warm-start-decomp-epochs", str(cfg.mabss_warm_start_epochs),
-        ])
-    return cmd  # --target-path / --adj-path injected by launch_run
+    cmd += _decomp_flags(acfg)
+
+    # GP surrogate — used by mabss-ucb and the GP-expert inside mabss-exp4
+    if p in ("mabss-ucb", "mabss-exp4"):
+        cmd += [
+            "--beta",         str(acfg.beta),
+            "--kernel-name",  acfg.kernel_name,
+            "--fixed-noise",  str(acfg.fixed_noise),
+        ]
+        if acfg.learn_noise:
+            cmd.append("--learn-noise")
+
+    # EXP3 weights — used by both EXP3 (directly) and EXP4 (per-expert)
+    if p in ("mabss-exp3", "mabss-exp4"):
+        cmd += [
+            "--exp3-gamma",        str(acfg.exp3_gamma),
+            "--exp3-decay",        str(acfg.exp3_decay),
+            "--exp3-reward-scale", str(acfg.mabss_exp3_reward_scale),
+        ]
+
+    # Context discretization + EXP4 weights — EXP4 only
+    if p == "mabss-exp4":
+        cmd += [
+            "--exp3-loss-bins",  str(acfg.exp3_loss_bins),
+            "--exp3-cr-bins",    str(acfg.exp3_cr_bins),
+            "--exp3-loss-cap",   str(acfg.mabss_exp3_loss_cap),
+            "--exp3-log-cr-cap", str(acfg.mabss_exp3_log_cr_cap),
+            "--exp4-gamma",      str(acfg.exp4_gamma),
+            "--exp4-decay",      str(acfg.exp3_decay),  # EXP4 shares decay
+            "--exp4-eta",        str(acfg.exp4_eta),
+        ]
+
+    if acfg.mabss_warm_start_method and acfg.mabss_warm_start_epochs > 0:
+        cmd += [
+            "--warm-start-method",        acfg.mabss_warm_start_method,
+            "--warm-start-decomp-epochs", str(acfg.mabss_warm_start_epochs),
+        ]
+    return cmd
 
 
-def tnale_cmd(cfg: SidebarConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
+def boss_cmd(acfg: BOSSConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
+    acqf = acfg.policy.split("-")[1]  # boss-ei → ei
+    cmd = [
+        "conda", "run", "-n", "tensors",
+        "python", "scripts/experiments/run_boss_experiment.py",
+        "--n-cores",    str(problem.n_cores),
+        "--max-rank",   str(problem.max_rank),
+        "--seed",       str(seed),
+        "--budget",     str(acfg.boss_budget),
+        "--n-init",     str(acfg.boss_n_init),
+        "--max-bond",   str(acfg.boss_max_bond),
+        "--n-runs",     str(acfg.boss_n_runs),
+        "--min-rse",    str(acfg.boss_min_rse),
+        "--maxiter-tn", str(acfg.decomp_epochs),
+        "--acqf",       acqf,
+        "--lamda",      str(acfg.boss_lambda_fitness),
+        "--out-dir",    str(algo_dir),
+    ]
+    cmd += _decomp_flags(acfg)
+
+    if acfg.policy == "boss-ucb":
+        cmd += ["--ucb-beta", str(acfg.boss_ucb_beta)]
+
+    return cmd
+
+
+def tnale_cmd(acfg: TnALEConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
     cmd = [
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_tnale_experiment.py",
-        "--budget",          str(cfg.tnale_budget),
+        "--budget",          str(acfg.tnale_budget),
         "--n-cores",         str(problem.n_cores),
         "--max-rank",        str(problem.max_rank),
-        "--max-search-rank", str(cfg.tnale_max_rank),
-        "--maxiter-tn",      str(cfg.tnale_decomp_epochs),
-        "--n-runs",          str(cfg.tnale_n_runs),
-        "--min-rse",         str(cfg.tnale_min_rse),
-        "--decomp-method",   cfg.tnale_decomp_method,
-        "--momentum",        str(cfg.tnale_decomp_momentum),
-        "--loss-patience",   str(cfg.tnale_decomp_loss_patience),
-        "--lr-patience",     str(cfg.tnale_decomp_lr_patience),
-        "--topology",        cfg.tnale_topology,
-        "--local-step-init", str(cfg.tnale_local_step_init),
-        "--local-step-main", str(cfg.tnale_local_step_main),
-        "--interp-iters",    str(cfg.tnale_interp_iters),
-        "--local-opt-iter",  str(cfg.tnale_local_opt_iter),
-        "--init-sparsity",   str(cfg.tnale_init_sparsity),
-        "--lambda-fitness",  str(cfg.tnale_lambda_fitness),
-        "--n-perm-samples",  str(cfg.tnale_n_perm_samples),
-        "--perm-radius",     str(cfg.tnale_perm_radius),
-        "--init-method",     cfg.tnale_init_method,
-        "--n-sobol-init",    str(cfg.tnale_n_sobol_init),
+        "--max-search-rank", str(acfg.tnale_max_rank),
+        "--maxiter-tn",      str(acfg.decomp_epochs),
+        "--n-runs",          str(acfg.tnale_n_runs),
+        "--min-rse",         str(acfg.tnale_min_rse),
+        "--topology",        acfg.tnale_topology,
+        "--local-step-init", str(acfg.tnale_local_step_init),
+        "--local-step-main", str(acfg.tnale_local_step_main),
+        "--interp-iters",    str(acfg.tnale_interp_iters),
+        "--local-opt-iter",  str(acfg.tnale_local_opt_iter),
+        "--init-sparsity",   str(acfg.tnale_init_sparsity),
+        "--lambda-fitness",  str(acfg.tnale_lambda_fitness),
+        "--init-method",     acfg.tnale_init_method,
+        "--n-sobol-init",    str(acfg.tnale_n_sobol_init),
         "--seed",            str(seed),
         "--out-dir",         str(algo_dir),
     ]
-    if cfg.tnale_decomp_init_lr is not None:
-        cmd.extend(["--init-lr", str(cfg.tnale_decomp_init_lr)])
-    if not cfg.tnale_interp_on:
+    cmd += _decomp_flags(acfg)
+
+    if acfg.tnale_topology == "ring":
+        cmd += [
+            "--n-perm-samples", str(acfg.tnale_n_perm_samples),
+            "--perm-radius",    str(acfg.tnale_perm_radius),
+        ]
+    if not acfg.tnale_interp_on:
         cmd.append("--no-interp")
-    if not cfg.tnale_phase_change_reset:
+    if not acfg.tnale_phase_change_reset:
         cmd.append("--no-phase-change-reset")
     return cmd
 
 
-def boss_cmd(cfg: SidebarConfig, problem: Problem, seed: int, algo_name: str, algo_dir: Path) -> list[str]:
-    acqf = algo_name.split("-")[1]  # boss-ei → ei
-    cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_boss_experiment.py",
-        "--n-cores",     str(problem.n_cores),
-        "--max-rank",    str(problem.max_rank),
-        "--seed",        str(seed),
-        "--budget",      str(cfg.boss_budget),
-        "--n-init",      str(cfg.boss_n_init),
-        "--max-bond",    str(cfg.boss_max_bond),
-        "--n-runs",      str(cfg.boss_n_runs),
-        "--min-rse",     str(cfg.boss_min_rse),
-        "--maxiter-tn",  str(cfg.boss_decomp_epochs),
-        "--acqf",        acqf,
-        "--ucb-beta",    str(cfg.boss_ucb_beta),
-        "--decomp-method", cfg.boss_decomp_method,
-        "--lamda",       str(cfg.boss_lambda_fitness),
-        "--momentum",    str(cfg.boss_decomp_momentum),
-        "--loss-patience", str(cfg.boss_decomp_loss_patience),
-        "--lr-patience",   str(cfg.boss_decomp_lr_patience),
-        "--out-dir",     str(algo_dir),
-    ]
-    if cfg.boss_decomp_init_lr is not None:
-        cmd.extend(["--init-lr", str(cfg.boss_decomp_init_lr)])
-    return cmd
+def build_cmd(acfg: AlgoConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
+    """Dispatch on the concrete subclass. A wrong-family config raises here
+    instead of silently using defaults from another family."""
+    if isinstance(acfg, MABSSConfig):
+        return mabss_cmd(acfg, problem, seed, algo_dir)
+    if isinstance(acfg, BOSSConfig):
+        return boss_cmd(acfg, problem, seed, algo_dir)
+    if isinstance(acfg, TnALEConfig):
+        return tnale_cmd(acfg, problem, seed, algo_dir)
+    raise TypeError(f"Unknown AlgoConfig subclass: {type(acfg).__name__}")
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +226,14 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         st.sidebar.error("Run Name is required.")
         st.stop()
 
-    if not cfg.algos_to_run:
-        st.sidebar.error("Select at least one algorithm.")
+    if not cfg.algo_configs:
+        st.sidebar.error("Add at least one algorithm config.")
+        st.stop()
+
+    # Disallow duplicate config labels — they become column names in any future analysis
+    labels = [i.label for i in cfg.algo_configs]
+    if len(labels) != len(set(labels)):
+        st.sidebar.error("Algorithm config labels must be unique.")
         st.stop()
 
     for _er in st.session_state.get("active_runs", []):
@@ -209,7 +248,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
 
     problem = _resolve_problem(cfg, ROOT)
 
-    out_dir = ROOT / "artifacts" / cfg.run_name
+    out_dir = runs_root(ROOT) / cfg.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     existing_config: dict = {}
@@ -219,52 +258,42 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
             existing_config = json.load(f)
     all_seeds = sorted(set(existing_config.get("seeds", [])) | set(seeds))
 
-    _UI_FIELDS = {
-        "app_mode", "seeds_str", "extend_mode", "extend_run",
-        "cuda_device", "use_tmux", "tmux_session", "run_name",
+    config_dict = {
+        "problem_id": problem.problem_id,
+        "seeds": all_seeds,
+        "algo_configs": [i.to_dict() for i in cfg.algo_configs],
+        "created_at": time.time(),
     }
-    config_dict = {k: v for k, v in asdict(cfg).items() if k not in _UI_FIELDS}
-    config_dict["seeds"] = all_seeds
-    config_dict["algos"] = config_dict.pop("algos_to_run")
-    config_dict["mabss_exp4_decay"] = cfg.exp3_decay
     with open(cfg_path, "w") as f:
         json.dump(config_dict, f, indent=4)
 
     jobs: list[dict] = []
     cmds: list[list[str]] = []
     for seed in seeds:
-        # Lazy-materialize the problem's per-seed target if synthetic.
         target_path = target_path_for(ROOT, problem, seed)
-        adj_path = adj_path_for(ROOT, problem, seed)  # None for RealProblem
+        adj_path = adj_path_for(ROOT, problem, seed)
 
-        for p in cfg.algos_to_run:
-            algo_dir = out_dir / f"seed_{seed}" / p.replace("-", "_")
+        for acfg in cfg.algo_configs:
+            algo_dir = out_dir / f"seed_{seed}" / acfg.algo_subdir
             if algo_dir.exists() and (algo_dir / ".done").exists():
-                if not cfg.force_overwrite:
-                    continue
-                shutil.rmtree(algo_dir)
+                continue
             algo_dir.mkdir(parents=True, exist_ok=True)
-            for stale in [algo_dir / "progress.json"]:
-                if stale.exists():
-                    stale.unlink()
+            (algo_dir / "progress.json").unlink(missing_ok=True)
 
-            if p.startswith("boss-"):
-                cmd = boss_cmd(cfg, problem, seed, p, algo_dir)
-            elif p == "tnale":
-                cmd = tnale_cmd(cfg, problem, seed, algo_dir)
-            else:
-                cmd = mabss_cmd(cfg, problem, seed, p, algo_dir)
-
-            if target_path:
-                cmd.extend(["--target-path", target_path])
-            if adj_path:
-                cmd.extend(["--adj-path", adj_path])
+            cmd = build_cmd(acfg, problem, seed, algo_dir)
+            cmd.extend(["--target-path", target_path, "--adj-path", adj_path])
 
             cmds.append(cmd)
-            jobs.append({"seed": seed, "algo": p, "algo_dir": str(algo_dir)})
+            jobs.append({
+                "seed": seed,
+                "algo": acfg.policy,
+                "label": acfg.label,
+                "config_id": acfg.config_id,
+                "algo_dir": str(algo_dir),
+            })
 
     if not cmds:
-        st.sidebar.warning("All requested seed/algo combinations are already complete. Nothing to run.")
+        st.sidebar.warning("All requested seed/config combinations are already complete. Nothing to run.")
         st.stop()
 
     script = out_dir / "run.sh"

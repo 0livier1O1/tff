@@ -91,15 +91,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.utils import (
-    random_adj_matrix,
-    make_problem,
-    save_tensor,
-    save_image,
-    draw_tn_graph,
-    eval_generating_structure,
-    POLICY_COLORS,
-)
+from scripts.utils import random_adj_matrix, load_problem_artifacts
 from tnss.algo.mabs.env import TNSearchEnv
 from tnss.algo.mabs.encoders import LocalEncoder
 from tnss.algo.mabs.policies import (
@@ -602,37 +594,12 @@ def main() -> None:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Heuristic: If out_dir is a policy subdirectory, save shared target artifacts one level up
-    seed_dir = out_dir.parent if out_dir.name.startswith("mabss_") else out_dir
-
     _seed_all(args.seed)
-    init_adj, target = make_problem(args)
+    adj_np, target_np = load_problem_artifacts(args.target_path, args.adj_path)
+    target = cp.asarray(target_np)  # TNSearchEnv expects cupy
 
-    # Refresh shared target artifacts from this seeded subprocess.  The
-    # dashboard may have an older imported problem factory in memory, so the
-    # CLI process is the source of truth for the target used by the algorithm.
-    _adj_np = cp.asnumpy(cp.asarray(init_adj))
-    np.save(seed_dir / "target_adj.npy", _adj_np)
-    _a = _adj_np.astype(np.float64)
-    target_cr = float(np.prod(np.diag(_a)) / np.sum(np.prod(_a, axis=1)))
-    save_tensor(seed_dir / "target_tensor.npz", target)
-    if args.target_path:
-        save_image(seed_dir / "target_image.png", target)
-
-    if not args.target_path:  # Synthetic only — ground truth structure is known
-        eval_generating_structure(
-            init_adj, target,
-            max_epochs=args.warm_start_epochs,
-            decomp_method=getattr(args, "decomp_method", "sgd"),
-            out_path=seed_dir / "generating_rse.json",
-            dtype=args.dtype,
-        )
-    if not (seed_dir / "target_graph.png").exists():
-        draw_tn_graph(
-            init_adj,
-            seed_dir / "target_graph.png",
-            title="Target Structure",
-        )
+    _adj_np = adj_np.astype(np.float64)
+    target_cr = float(np.prod(np.diag(_adj_np)) / np.sum(np.prod(_adj_np, axis=1)))
 
     import pandas as pd
 
@@ -647,23 +614,11 @@ def main() -> None:
             args, target, policy_str=p, target_cr=target_cr, progress_file=progress_file
         )
 
-        # Save reconstruction
-        save_tensor(out_dir / "reconstruction.npz", best_recon)
-        if args.target_path:  # Image experiment
-            save_image(out_dir / "reconstruction.png", best_recon)
-
         for r in rows:
             r["Policy"] = p
             r["Seed"] = args.seed
         summary["policy"] = p
         summary["Seed"] = args.seed
-
-        draw_tn_graph(
-            summary["A"],
-            out_dir / f"tn_graph_{p}.png",
-            title=f"[{p.upper()}] Post-Search Topology",
-            node_color=POLICY_COLORS.get(f"mabss-{p}", "#888888"),
-        )
 
         # Each policy call in this script now saves its own local results file
         # to prevent overwriting when multiple subprocess calls target the same seed folder.

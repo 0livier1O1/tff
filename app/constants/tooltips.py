@@ -10,13 +10,6 @@ Import specific strings by name into sidebar.py.
 # General settings
 # ---------------------------------------------------------------------------
 
-EXTEND_RUN = (
-    "Add more seeds to an existing artifact directory. "
-    "Already-completed (seed, algo) pairs are automatically skipped."
-)
-
-EXTEND_SEEDS = "New seeds to add (comma-separated). Already-completed seed/algo pairs are automatically skipped."
-
 SEEDS = (
     "Comma-separated integers. Each seed runs the full set of selected algorithms "
     "independently, allowing statistical aggregation (mean ± std) across runs."

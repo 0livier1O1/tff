@@ -31,13 +31,7 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tensors") not in sys.path:
     sys.path.insert(0, str(ROOT / "tensors"))
 
-from scripts.utils import (
-    make_problem,
-    save_tensor,
-    save_image,
-    draw_tn_graph,
-    POLICY_COLORS,
-)
+from scripts.utils import load_problem_artifacts
 from tnss.algo.tnale import TnALE
 
 
@@ -102,25 +96,13 @@ def main() -> None:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    seed_dir = out_dir.parent if out_dir.name.startswith("tnale") else out_dir
     progress_file = out_dir / "progress.json"
 
     _seed_all(args.seed)
 
     print(f"--- TnALE Experiment [Seed {args.seed}] ---")
-    init_adj, target_cp = make_problem(args)
-
-    init_adj_np = cp.asnumpy(cp.asarray(init_adj))
-    phys_dims = np.diag(init_adj_np).astype(int)
-    target_np = target_cp.get() if hasattr(target_cp, "get") else np.asarray(target_cp)
-
-    np.save(seed_dir / "target_adj.npy", init_adj_np)
-    save_tensor(seed_dir / "target_tensor.npz", target_np)
-    if args.target_path:
-        save_image(seed_dir / "target_image.png", target_np)
-
-    if not (seed_dir / "target_graph.png").exists():
-        draw_tn_graph(init_adj, seed_dir / "target_graph.png", title="Target Structure")
+    adj_np, target_np = load_problem_artifacts(args.target_path, args.adj_path)
+    phys_dims = np.diag(adj_np).astype(int)
 
     n_perm_samples = None if args.n_perm_samples == 0 else args.n_perm_samples
 
@@ -166,12 +148,6 @@ def main() -> None:
     best_adj = summary.get("best_adj")
     if best_adj is not None:
         np.save(out_dir / "best_adj.npy", best_adj)
-        draw_tn_graph(
-            best_adj,
-            out_dir / "tn_graph_tnale.png",
-            title="[TnALE] Post-Search Topology",
-            node_color=POLICY_COLORS.get("tnale", "#e07b39"),
-        )
 
     df = pd.DataFrame(rows)
     df["Algo"] = "tnale"
