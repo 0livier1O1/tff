@@ -13,7 +13,7 @@ configs of the same policy with different params don't collide.
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from typing import Any
 
 
@@ -188,6 +188,15 @@ def algo_config_from_dict(d: dict[str, Any]) -> AlgoConfig:
         raise ValueError("Config dict missing 'family' discriminator")
     cls = _CONFIG_CLS[fam]
     return cls(**d)
+
+
+def duplicate_algo_config(orig: AlgoConfig) -> AlgoConfig:
+    """Return a clone of `orig` with a fresh config_id and a '_copy' label suffix.
+
+    All other fields (decomp, family-specific) are preserved exactly so the user
+    can tweak a single parameter without re-entering everything.
+    """
+    return replace(orig, config_id=_short_id(), label=f"{orig.label}_copy")
 
 
 def replace_policy(old: AlgoConfig, new_policy: str) -> AlgoConfig:

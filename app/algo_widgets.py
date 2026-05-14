@@ -16,7 +16,7 @@ import streamlit as st
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import (
     AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig,
-    POLICY_OPTIONS, new_algo_config, replace_policy,
+    POLICY_OPTIONS, new_algo_config, replace_policy, duplicate_algo_config,
 )
 from app.config.constants import (
     DECOMP_EPOCHS, DECOMP_ENGINE, DECOMP_INIT_LR, DECOMP_MOMENTUM,
@@ -48,14 +48,9 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
     """Render the algorithm-configs section. Mutates cfg.algo_configs."""
     configs: list[AlgoConfig] = _ensure_default_configs()
 
-    to_remove: list[str] = []
     for acfg in configs:
         with st.sidebar.expander(f"**{acfg.label}**  ·  `{acfg.policy}`", expanded=False):
-            _render_one_config(acfg, on_remove=lambda cid=acfg.config_id: to_remove.append(cid))
-
-    for cid in to_remove:
-        st.session_state["algo_configs"] = [i for i in configs if i.config_id != cid]
-        st.rerun()
+            _render_one_config(acfg)
 
     add_col1, add_col2 = st.sidebar.columns([2, 3])
     new_policy = add_col1.selectbox(
@@ -79,7 +74,7 @@ def _ensure_default_configs() -> list[AlgoConfig]:
     return st.session_state["algo_configs"]
 
 
-def _render_one_config(acfg: AlgoConfig, on_remove) -> None:
+def _render_one_config(acfg: AlgoConfig) -> None:
     cid = acfg.config_id
 
     acfg.label = st.text_input("Label", value=acfg.label, key=f"label_{cid}")
@@ -111,8 +106,18 @@ def _render_one_config(acfg: AlgoConfig, on_remove) -> None:
     elif isinstance(acfg, TnALEConfig):
         _render_tnale(acfg)
 
-    if st.button("🗑 Remove", key=f"remove_{cid}", use_container_width=True):
-        on_remove()
+    rm_col, dup_col = st.columns(2)
+    if rm_col.button(":material/delete:", key=f"remove_{cid}", use_container_width=True,
+                     type="primary",
+                     help="Remove this algorithm config"):
+        st.session_state["algo_configs"] = [
+            c for c in st.session_state["algo_configs"] if c.config_id != cid
+        ]
+        st.rerun()
+    if dup_col.button(":material/content_copy:", key=f"duplicate_{cid}", use_container_width=True,
+                      help="Duplicate this algorithm config (same params, new id)"):
+        st.session_state["algo_configs"].append(duplicate_algo_config(acfg))
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------

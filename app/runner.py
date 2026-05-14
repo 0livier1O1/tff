@@ -214,7 +214,7 @@ def _resolve_problem(cfg: SidebarConfig, repo_root: Path) -> ProblemConfig:
         st.sidebar.error("No problem selected. Pick an existing one or fill in a new one.")
         st.stop()
 
-    pid = mint_problem_id(pending.kind, pending.name)
+    pid = mint_problem_id(pending.name)
     pending.problem_id = pid
     pending.created_at = now_iso()
     save_problem(repo_root, pending)

@@ -77,17 +77,16 @@ def problem_config_from_dict(d: dict[str, Any]) -> ProblemConfig:
 # ID minting
 # ---------------------------------------------------------------------------
 
-def mint_problem_id(kind: str, name: str) -> str:
-    """Generate a short, collision-resistant problem id.
+def mint_problem_id(name: str) -> str:
+    """Generate a short, collision-resistant problem id from the user-given name
+    plus a 4-hex-char random suffix.
 
-    Format: <kind-prefix>_<timestamp>_<short-name-slug>
-    Example: synth_20260513T142301_5core_fctn
+    Example: synth_fctn_5c_2_to_8_fixedadj_a3f1
     """
     import re
-    prefix = {"synthetic": "synth", "real": "real"}.get(kind, "prob")
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:32] or "unnamed"
-    return f"{prefix}_{ts}_{slug}"
+    import secrets
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:48] or "unnamed"
+    return f"{slug}_{secrets.token_hex(2)}"
 
 
 def now_iso() -> str:
