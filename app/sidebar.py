@@ -24,7 +24,10 @@ from app.config.sidebar_config import SidebarConfig
 from app.config.constants import SEEDS, CUDA_DEVICE, TMUX_SESSION, RUN_NAME
 from app.problem import render_problem_section, _render_problem_summary
 from app.algo_widgets import render_algo_configs
+from app.views.analyze import render_analyze_sidebar
 from app.utils import _list_tmux_sessions
+
+APP_MODES = ["Deployment", "Analyze"]
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +38,22 @@ def render_sidebar() -> SidebarConfig:
     """Render all sidebar widgets and return a fully populated SidebarConfig."""
     cfg = SidebarConfig()
 
+    cfg.app_mode = st.sidebar.segmented_control(
+        "Mode", APP_MODES, default="Deployment",
+        key="app_mode", label_visibility="collapsed",
+    ) or "Deployment"
+
+    st.sidebar.markdown("---")
+
+    if cfg.app_mode == "Analyze":
+        render_analyze_sidebar(cfg, ROOT)
+        return cfg
+
+    _render_deployment_sidebar(cfg)
+    return cfg
+
+
+def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
     cfg.extend_mode = st.sidebar.toggle(
         "Extend existing run", value=False,
         help="Add new algorithm configs (and optionally new seeds) to an existing run. "
@@ -62,8 +81,6 @@ def render_sidebar() -> SidebarConfig:
 
     st.sidebar.markdown("### Algorithms")
     render_algo_configs(cfg)
-
-    return cfg
 
 
 # ---------------------------------------------------------------------------

@@ -45,9 +45,9 @@ def render_extend_preview(cfg: SidebarConfig, repo_root: Path) -> None:
 
     left, right = st.columns(2)
     with left:
-        _render_adj_matrix(repo_root, cfg.problem_id, preview_seed, problem)
+        render_adj_matrix(repo_root, cfg.problem_id, preview_seed, problem)
     with right:
-        _render_tn_graph(repo_root, cfg.problem_id, preview_seed)
+        render_tn_graph(repo_root, cfg.problem_id, preview_seed)
 
     st.markdown("#### Existing algorithm configs")
     _render_configs_table(run_cfg.get("algo_configs", []))
@@ -57,7 +57,7 @@ def render_extend_preview(cfg: SidebarConfig, repo_root: Path) -> None:
 # Adjacency matrix display
 # ---------------------------------------------------------------------------
 
-def _render_adj_matrix(repo_root: Path, pid: str, seed: int, problem: ProblemConfig) -> None:
+def render_adj_matrix(repo_root: Path, pid: str, seed: int, problem: ProblemConfig) -> None:
     sdir = seed_dir(repo_root, pid, seed)
     adj_path = sdir / "adj_matrix.npy"
     if not adj_path.exists():
@@ -83,7 +83,7 @@ def _render_adj_matrix(repo_root: Path, pid: str, seed: int, problem: ProblemCon
 # TN graph display — cached as PNG inside the problem's seed dir
 # ---------------------------------------------------------------------------
 
-def _render_tn_graph(repo_root: Path, pid: str, seed: int) -> None:
+def render_tn_graph(repo_root: Path, pid: str, seed: int) -> None:
     sdir = seed_dir(repo_root, pid, seed)
     png_path = sdir / "tn_graph.png"
 
@@ -113,7 +113,8 @@ _MABSS_LOOSE_FIELDS = {
 }
 
 
-def _order_columns(df: pd.DataFrame) -> list[str]:
+def order_columns(df: pd.DataFrame) -> list[str]:
+    """Order an algo_configs dataframe's columns: head → decomp → mabss → boss → tnale → leftover."""
     cols = list(df.columns)
     head = [c for c in _PREFERRED_HEAD if c in cols]
     decomp = sorted(c for c in cols if c.startswith("decomp_"))
@@ -133,4 +134,4 @@ def _render_configs_table(configs: list[dict]) -> None:
         st.info("No algorithm configs have been recorded for this run yet.")
         return
     df = pd.DataFrame(configs).fillna("")
-    st.dataframe(df[_order_columns(df)], use_container_width=True, hide_index=True)
+    st.dataframe(df[order_columns(df)], use_container_width=True, hide_index=True)

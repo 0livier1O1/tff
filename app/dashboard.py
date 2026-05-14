@@ -13,6 +13,7 @@ from app.sidebar import render_sidebar
 from app.runner import launch_run
 from app.jobs import render_job_status_panel
 from app.views.extend import render_extend_preview
+from app.views.analyze import render_analyze_main
 from app.utils import _artifact_fully_done
 
 # ---------------------------------------------------------------------------
@@ -21,10 +22,6 @@ from app.utils import _artifact_fully_done
 
 st.set_page_config(page_title="Boss | TNSS Dashboard", layout="wide")
 st.title("Adaptive Tensor Network Structure Search")
-st.markdown(
-    "Configure problems, launch search runs, and monitor jobs. "
-    "Results visualization will be rebuilt — for now use the on-disk artifacts directly."
-)
 st.markdown(
     """
     <style>
@@ -51,29 +48,35 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar — renders all widgets, returns a config object
+# Sidebar — returns a SidebarConfig (mode-aware)
 # ---------------------------------------------------------------------------
 
 cfg = render_sidebar()
 
 # ---------------------------------------------------------------------------
-# Launch button
+# Analyze mode — show the merged algorithms table and stop here
 # ---------------------------------------------------------------------------
+
+if cfg.app_mode == "Analyze":
+    render_analyze_main(cfg, ROOT)
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Deployment mode — launch button + previews + job status
+# ---------------------------------------------------------------------------
+
+st.markdown(
+    "Configure problems, launch search runs, and monitor jobs."
+)
 
 if st.sidebar.button("Execute Tensor Evaluation", type="primary", use_container_width=True):
     launch_run(cfg, ROOT)
     st.rerun()
 
-# ---------------------------------------------------------------------------
 # Extend-mode main-page preview (problem + algorithm configs already in run)
-# ---------------------------------------------------------------------------
-
 render_extend_preview(cfg, ROOT)
 
-# ---------------------------------------------------------------------------
 # Restore active runs from disk after browser reconnect
-# ---------------------------------------------------------------------------
-
 if "active_runs" not in st.session_state:
     _runs_dir = ROOT / "artifacts" / "runs"
     _restored = []
@@ -88,10 +91,6 @@ if "active_runs" not in st.session_state:
                     pass
     if _restored:
         st.session_state["active_runs"] = _restored
-
-# ---------------------------------------------------------------------------
-# Always-visible job status panel
-# ---------------------------------------------------------------------------
 
 render_job_status_panel(ROOT)
 
