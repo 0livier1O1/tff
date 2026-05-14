@@ -1,13 +1,13 @@
 """
-problem.py — Problem dataclass hierarchy.
+problem.py — ProblemConfig dataclass hierarchy.
 
-A Problem uniquely identifies a target tensor (and, for synthetic problems,
+A ProblemConfig uniquely identifies a target tensor (and, for synthetic problems,
 the adjacency structure used to generate it). Problems live on disk under
 `problems/<problem_id>/` and are immutable once written:
 
     problems/<problem_id>/
-        problem.json              # serialized Problem (this module)
-        seed_<k>/                 # SyntheticProblem only — lazy-materialized
+        problem.json              # serialized ProblemConfig (this module)
+        seed_<k>/                 # SyntheticProblemConfig only — lazy-materialized
             target_tensor.npz
             adj_matrix.npy
 
@@ -27,7 +27,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 @dataclass(kw_only=True)
-class Problem:
+class ProblemConfig:
     problem_id: str
     name: str
     n_cores: int
@@ -40,7 +40,7 @@ class Problem:
 
 
 @dataclass(kw_only=True)
-class SyntheticProblem(Problem):
+class SyntheticProblemConfig(ProblemConfig):
     adj_spec: list[list[str]]  # N×N symbolic matrix: "R" | "1" | "5" | ...
     adj_r_min: int
     adj_r_max: int
@@ -51,7 +51,7 @@ class SyntheticProblem(Problem):
 
 
 @dataclass(kw_only=True)
-class RealProblem(Problem):
+class RealProblemConfig(ProblemConfig):
     source: str                # "Images" | "Lightfield"
     target_path: str           # canonical path inside data/
     shape: list[int]           # cached for sidebar preview
@@ -63,13 +63,13 @@ class RealProblem(Problem):
 # Serialization
 # ---------------------------------------------------------------------------
 
-def problem_from_dict(d: dict[str, Any]) -> Problem:
-    """Reconstruct a Problem subclass from its serialized form."""
+def problem_config_from_dict(d: dict[str, Any]) -> ProblemConfig:
+    """Reconstruct a ProblemConfig subclass from its serialized form."""
     kind = d.get("kind")
     if kind == "synthetic":
-        return SyntheticProblem(**d)
+        return SyntheticProblemConfig(**d)
     if kind == "real":
-        return RealProblem(**d)
+        return RealProblemConfig(**d)
     raise ValueError(f"Unknown problem kind: {kind!r}")
 
 

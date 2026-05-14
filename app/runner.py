@@ -2,7 +2,7 @@
 runner.py — subprocess orchestration for the BOSS dashboard.
 
 Each AlgoConfig becomes one subprocess invocation per seed, writing into
-`artifacts/<run>/seed_<k>/<algo_subdir>/`. The Problem is loaded by id;
+`artifacts/<run>/seed_<k>/<algo_subdir>/`. The ProblemConfig is loaded by id;
 per-seed targets are lazy-materialized under `problems/<pid>/seed_<k>/`
 and read directly from there.
 """
@@ -16,9 +16,9 @@ from pathlib import Path
 
 import streamlit as st
 
-from app.constants.config import SidebarConfig
-from app.constants.algo_config import AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig
-from app.constants.problem import Problem, mint_problem_id, now_iso
+from app.config.sidebar_config import SidebarConfig
+from app.config.algo_config import AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig
+from app.config.problem_config import ProblemConfig, mint_problem_id, now_iso
 from app.problem_io import load_problem, save_problem, runs_root, target_path_for, adj_path_for
 from app.utils import _write_run_script, _script_alive
 
@@ -59,7 +59,7 @@ def _decomp_flags(acfg: AlgoConfig) -> list[str]:
     return flags
 
 
-def mabss_cmd(acfg: MABSSConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
+def mabss_cmd(acfg: MABSSConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
     """Build CLI args for a MABSS run. Only the flags relevant to the chosen
     sub-policy are appended — no silent passthrough of unused params."""
     p = acfg.policy
@@ -118,7 +118,7 @@ def mabss_cmd(acfg: MABSSConfig, problem: Problem, seed: int, algo_dir: Path) ->
     return cmd
 
 
-def boss_cmd(acfg: BOSSConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
+def boss_cmd(acfg: BOSSConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
     acqf = acfg.policy.split("-")[1]  # boss-ei → ei
     cmd = [
         "conda", "run", "-n", "tensors",
@@ -144,7 +144,7 @@ def boss_cmd(acfg: BOSSConfig, problem: Problem, seed: int, algo_dir: Path) -> l
     return cmd
 
 
-def tnale_cmd(acfg: TnALEConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
+def tnale_cmd(acfg: TnALEConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
     cmd = [
         "conda", "run", "-n", "tensors",
         "python", "scripts/experiments/run_tnale_experiment.py",
@@ -181,7 +181,7 @@ def tnale_cmd(acfg: TnALEConfig, problem: Problem, seed: int, algo_dir: Path) ->
     return cmd
 
 
-def build_cmd(acfg: AlgoConfig, problem: Problem, seed: int, algo_dir: Path) -> list[str]:
+def build_cmd(acfg: AlgoConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
     """Dispatch on the concrete subclass. A wrong-family config raises here
     instead of silently using defaults from another family."""
     if isinstance(acfg, MABSSConfig):
@@ -194,11 +194,11 @@ def build_cmd(acfg: AlgoConfig, problem: Problem, seed: int, algo_dir: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# Problem resolution
+# ProblemConfig resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_problem(cfg: SidebarConfig, repo_root: Path) -> Problem:
-    """Resolve cfg → Problem, saving a pending new problem to disk if needed.
+def _resolve_problem(cfg: SidebarConfig, repo_root: Path) -> ProblemConfig:
+    """Resolve cfg → ProblemConfig, saving a pending new problem to disk if needed.
 
     In extend mode the problem_id is locked by the existing run's config —
     we always go through load_problem, never mint."""

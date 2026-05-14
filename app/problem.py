@@ -1,11 +1,11 @@
 """
-problem.py — Problem source widgets for the BOSS dashboard.
+problem.py — Problem-source sidebar widgets for the BOSS dashboard.
 
 The sidebar lets you either:
   - Use an existing problem from problems/<id>/, OR
   - Create a new one (synthetic editor / image picker / lightfield picker).
 
-When creating, the Problem object is held in st.session_state as
+When creating, the ProblemConfig object is held in st.session_state as
 `pending_problem` and only written to disk by launch_run (or by an explicit
 "Save problem" button). Existing problems are immutable — editing forks
 into a new problem_id at save time.
@@ -16,9 +16,9 @@ from pathlib import Path
 
 import streamlit as st
 
-from app.constants.config import SidebarConfig
-from app.constants.problem import (
-    Problem, SyntheticProblem, RealProblem,
+from app.config.sidebar_config import SidebarConfig
+from app.config.problem_config import (
+    ProblemConfig, SyntheticProblemConfig, RealProblemConfig,
     mint_problem_id, now_iso,
 )
 from app.problem_io import list_problems
@@ -75,7 +75,7 @@ def render_problem_section(cfg: SidebarConfig, repo_root: Path) -> None:
 # Existing-problem picker
 # ---------------------------------------------------------------------------
 
-def _render_existing(cfg: SidebarConfig, problems: list[Problem]) -> None:
+def _render_existing(cfg: SidebarConfig, problems: list[ProblemConfig]) -> None:
     labels = {f"{p.problem_id}  —  {p.name}  ({p.kind})": p for p in problems}
     selected_label = st.sidebar.selectbox("Saved problem", list(labels))
     p = labels[selected_label]
@@ -84,16 +84,16 @@ def _render_existing(cfg: SidebarConfig, problems: list[Problem]) -> None:
     _render_problem_summary(p)
 
 
-def _render_problem_summary(p: Problem) -> None:
+def _render_problem_summary(p: ProblemConfig) -> None:
     c1, c2 = st.sidebar.columns(2)
     c1.metric("Cores", p.n_cores)
     c2.metric("Max Rank", p.max_rank)
-    if isinstance(p, SyntheticProblem):
+    if isinstance(p, SyntheticProblemConfig):
         st.sidebar.caption(
             f"Synthetic · topology={p.topology} · "
             f"fix_adj={p.fix_adj} · gen_seed={p.gen_seed}"
         )
-    elif isinstance(p, RealProblem):
+    elif isinstance(p, RealProblemConfig):
         st.sidebar.caption(f"{p.source} · `{Path(p.target_path).name}`")
 
 
@@ -139,7 +139,7 @@ def _name_input_with_auto(auto_default: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Synthetic editor → SyntheticProblem
+# Synthetic editor → SyntheticProblemConfig
 # ---------------------------------------------------------------------------
 
 def topology_active_edges(topology: str, n: int) -> set[tuple[int, int]]:
@@ -155,7 +155,7 @@ def topology_active_edges(topology: str, n: int) -> set[tuple[int, int]]:
     return set()
 
 
-def _build_synthetic() -> SyntheticProblem | None:
+def _build_synthetic() -> SyntheticProblemConfig | None:
     st.sidebar.markdown("#### Adjacency Matrix")
     nc1, nc2, nc3 = st.sidebar.columns(3)
     n = int(nc1.number_input(
@@ -245,7 +245,7 @@ def _build_synthetic() -> SyntheticProblem | None:
     name = _name_input_with_auto(auto_name)
     if not name.strip():
         return None
-    return SyntheticProblem(
+    return SyntheticProblemConfig(
         problem_id="<unminted>",
         name=name.strip(),
         n_cores=n,
@@ -261,10 +261,10 @@ def _build_synthetic() -> SyntheticProblem | None:
 
 
 # ---------------------------------------------------------------------------
-# Images → RealProblem
+# Images → RealProblemConfig
 # ---------------------------------------------------------------------------
 
-def _build_image() -> RealProblem | None:
+def _build_image() -> RealProblemConfig | None:
     img_dir = Path("data/natural_images")
     if not img_dir.exists():
         st.sidebar.error("data/natural_images directory not found.")
@@ -310,7 +310,7 @@ def _build_image() -> RealProblem | None:
     name = _name_input_with_auto(auto_name)
     if not name.strip():
         return None
-    return RealProblem(
+    return RealProblemConfig(
         problem_id="<unminted>",
         name=name.strip(),
         n_cores=n_cores,
@@ -324,10 +324,10 @@ def _build_image() -> RealProblem | None:
 
 
 # ---------------------------------------------------------------------------
-# Lightfield → RealProblem
+# Lightfield → RealProblemConfig
 # ---------------------------------------------------------------------------
 
-def _build_lightfield() -> RealProblem | None:
+def _build_lightfield() -> RealProblemConfig | None:
     import re
     import numpy as np
 
@@ -382,7 +382,7 @@ def _build_lightfield() -> RealProblem | None:
     name = _name_input_with_auto(auto_name)
     if not name.strip():
         return None
-    return RealProblem(
+    return RealProblemConfig(
         problem_id="<unminted>",
         name=name.strip(),
         n_cores=n_cores,

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.constants.algo_config import AlgoConfig
+from app.config.algo_config import AlgoConfig
 
 
 @dataclass
 class SidebarConfig:
-    # Problem — fully identified by problem_id; load via app.problem_io.load_problem
+    # ProblemConfig — fully identified by problem_id; load via app.problem_io.load_problem
     problem_id: str | None = None
     # Algorithm configs — each defines a policy + decomp + algo params
     algo_configs: list[AlgoConfig] = field(default_factory=list)

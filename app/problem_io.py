@@ -1,13 +1,13 @@
 """
-problem_io.py — Disk persistence for Problem objects under problems/<id>/.
+problem_io.py — Disk persistence for ProblemConfig objects under problems/<id>/.
 
-list_problems(root)            -> list[Problem]
-load_problem(root, pid)        -> Problem
+list_problems(root)            -> list[ProblemConfig]
+load_problem(root, pid)        -> ProblemConfig
 save_problem(root, p)          -> path
 ensure_seed_materialized(root, p, seed) -> Path to seed_<k>/ dir
 
-For SyntheticProblem, seeds are materialized lazily — generated on first
-request and cached. For RealProblem, target_path is canonical; no per-seed
+For SyntheticProblemConfig, seeds are materialized lazily — generated on first
+request and cached. For RealProblemConfig, target_path is canonical; no per-seed
 materialization happens.
 """
 from __future__ import annotations
@@ -17,8 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
-from app.constants.problem import (
-    Problem, SyntheticProblem, RealProblem, problem_from_dict,
+from app.config.problem_config import (
+    ProblemConfig, SyntheticProblemConfig, RealProblemConfig, problem_config_from_dict,
 )
 
 
@@ -44,7 +44,7 @@ def runs_root(repo_root: Path) -> Path:
 # Save / load / list
 # ---------------------------------------------------------------------------
 
-def save_problem(repo_root: Path, problem: Problem) -> Path:
+def save_problem(repo_root: Path, problem: ProblemConfig) -> Path:
     """Write problems/<pid>/problem.json. Refuses to overwrite — fork instead."""
     pdir = problems_root(repo_root) / problem.problem_id
     if pdir.exists():
@@ -58,28 +58,28 @@ def save_problem(repo_root: Path, problem: Problem) -> Path:
     return pdir
 
 
-def load_problem(repo_root: Path, problem_id: str) -> Problem:
+def load_problem(repo_root: Path, problem_id: str) -> ProblemConfig:
     pdir = problems_root(repo_root) / problem_id
     with open(pdir / "problem.json") as f:
-        return problem_from_dict(json.load(f))
+        return problem_config_from_dict(json.load(f))
 
 
-def list_problems(repo_root: Path) -> list[Problem]:
+def list_problems(repo_root: Path) -> list[ProblemConfig]:
     """Return all problems in problems/, sorted by created_at descending."""
     root = problems_root(repo_root)
-    out: list[Problem] = []
+    out: list[ProblemConfig] = []
     for d in root.iterdir():
         pf = d / "problem.json"
         if not pf.exists():
             continue
         with open(pf) as f:
-            out.append(problem_from_dict(json.load(f)))
+            out.append(problem_config_from_dict(json.load(f)))
     out.sort(key=lambda p: p.created_at, reverse=True)
     return out
 
 
 # ---------------------------------------------------------------------------
-# Lazy materialization (SyntheticProblem only)
+# Lazy materialization (SyntheticProblemConfig only)
 # ---------------------------------------------------------------------------
 
 def seed_dir(repo_root: Path, problem_id: str, seed: int) -> Path:
@@ -91,10 +91,10 @@ def is_seed_materialized(repo_root: Path, problem_id: str, seed: int) -> bool:
     return (sdir / "target_tensor.npz").exists() and (sdir / "adj_matrix.npy").exists()
 
 
-def ensure_seed_materialized(repo_root: Path, problem: Problem, seed: int) -> Path:
+def ensure_seed_materialized(repo_root: Path, problem: ProblemConfig, seed: int) -> Path:
     """Materialize target_tensor.npz + adj_matrix.npy for `seed` if missing.
 
-    Layout for every Problem subclass (CLI scripts see a uniform interface):
+    Layout for every ProblemConfig subclass (CLI scripts see a uniform interface):
         artifacts/problems/<pid>/seed_<k>/target_tensor.npz   key="data"
         artifacts/problems/<pid>/seed_<k>/adj_matrix.npy
 
@@ -106,9 +106,9 @@ def ensure_seed_materialized(repo_root: Path, problem: Problem, seed: int) -> Pa
 
     sdir.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(problem, SyntheticProblem):
+    if isinstance(problem, SyntheticProblemConfig):
         _materialize_synthetic(problem, seed, sdir)
-    elif isinstance(problem, RealProblem):
+    elif isinstance(problem, RealProblemConfig):
         _materialize_real(problem, seed, sdir)
     else:
         raise TypeError(f"Unknown problem type: {type(problem).__name__}")
@@ -116,7 +116,7 @@ def ensure_seed_materialized(repo_root: Path, problem: Problem, seed: int) -> Pa
     return sdir
 
 
-def _materialize_synthetic(problem: SyntheticProblem, seed: int, sdir: Path) -> None:
+def _materialize_synthetic(problem: SyntheticProblemConfig, seed: int, sdir: Path) -> None:
     from scripts.utils import resolve_adj_spec, random_adj_matrix, save_tensor
     from tensors.networks.cutensor_network import sim_tensor_from_adj
     import torch
@@ -138,7 +138,7 @@ def _materialize_synthetic(problem: SyntheticProblem, seed: int, sdir: Path) -> 
     save_tensor(sdir / "target_tensor.npz", target)
 
 
-def _materialize_real(problem: RealProblem, seed: int, sdir: Path) -> None:
+def _materialize_real(problem: RealProblemConfig, seed: int, sdir: Path) -> None:
     """Load the canonical source file, retensorize images if needed, then
     save a uniform target_tensor.npz (key='data') + a synthesized init adj."""
     from scripts.utils import (
@@ -166,13 +166,13 @@ def _materialize_real(problem: RealProblem, seed: int, sdir: Path) -> None:
 # Resolution helpers used by the runner
 # ---------------------------------------------------------------------------
 
-def adj_path_for(repo_root: Path, problem: Problem, seed: int) -> str:
+def adj_path_for(repo_root: Path, problem: ProblemConfig, seed: int) -> str:
     """Path to the materialized adjacency matrix for (problem, seed)."""
     ensure_seed_materialized(repo_root, problem, seed)
     return str(seed_dir(repo_root, problem.problem_id, seed) / "adj_matrix.npy")
 
 
-def target_path_for(repo_root: Path, problem: Problem, seed: int) -> str:
+def target_path_for(repo_root: Path, problem: ProblemConfig, seed: int) -> str:
     """Path to the materialized target tensor for (problem, seed)."""
     ensure_seed_materialized(repo_root, problem, seed)
     return str(seed_dir(repo_root, problem.problem_id, seed) / "target_tensor.npz")

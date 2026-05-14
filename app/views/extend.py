@@ -16,8 +16,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from app.constants.config import SidebarConfig
-from app.constants.problem import Problem, SyntheticProblem
+from app.config.sidebar_config import SidebarConfig
+from app.config.problem_config import ProblemConfig, SyntheticProblemConfig
 from app.problem_io import load_problem, seed_dir
 
 
@@ -57,7 +57,7 @@ def render_extend_preview(cfg: SidebarConfig, repo_root: Path) -> None:
 # Adjacency matrix display
 # ---------------------------------------------------------------------------
 
-def _render_adj_matrix(repo_root: Path, pid: str, seed: int, problem: Problem) -> None:
+def _render_adj_matrix(repo_root: Path, pid: str, seed: int, problem: ProblemConfig) -> None:
     sdir = seed_dir(repo_root, pid, seed)
     adj_path = sdir / "adj_matrix.npy"
     if not adj_path.exists():
@@ -73,7 +73,7 @@ def _render_adj_matrix(repo_root: Path, pid: str, seed: int, problem: Problem) -
     )
 
     cap = f"Adjacency (seed {seed})"
-    if isinstance(problem, SyntheticProblem) and not problem.fix_adj:
+    if isinstance(problem, SyntheticProblemConfig) and not problem.fix_adj:
         cap += " — adj varies per seed (showing first)"
     st.caption(cap)
     st.dataframe(df, use_container_width=True)
