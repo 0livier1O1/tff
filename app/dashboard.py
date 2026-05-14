@@ -12,6 +12,7 @@ import streamlit as st
 from app.sidebar import render_sidebar
 from app.runner import launch_run
 from app.jobs import render_job_status_panel
+from app.extend_view import render_extend_preview
 from app.utils import _artifact_fully_done
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,12 @@ if st.sidebar.button("Execute Tensor Evaluation", type="primary", use_container_
     st.rerun()
 
 # ---------------------------------------------------------------------------
+# Extend-mode main-page preview (problem + algorithm configs already in run)
+# ---------------------------------------------------------------------------
+
+render_extend_preview(cfg, ROOT)
+
+# ---------------------------------------------------------------------------
 # Restore active runs from disk after browser reconnect
 # ---------------------------------------------------------------------------
 
@@ -88,5 +95,5 @@ if "active_runs" not in st.session_state:
 
 render_job_status_panel(ROOT)
 
-if not st.session_state.get("active_runs"):
+if not st.session_state.get("active_runs") and not cfg.extend_mode:
     st.info("**Awaiting initialization.** Configure your problem and algorithm(s) in the sidebar, then click Execute.")
