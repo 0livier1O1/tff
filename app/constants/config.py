@@ -17,3 +17,6 @@ class SidebarConfig:
     use_tmux: bool = False
     tmux_session: str | None = None
     run_name: str = ""
+    # Extend mode — append new (seed, algo_config) pairs to an existing run
+    extend_mode: bool = False
+    extend_run: str | None = None

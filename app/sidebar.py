@@ -41,8 +41,11 @@ from app.constants.tooltips import (
     TNALE_LOCAL_OPT_ITER, TNALE_INIT_SPARSITY, TNALE_PHASE_CHANGE_RESET,
     TNALE_PERM_SAMPLES, TNALE_PERM_RADIUS,
 )
-from app.problem import render_problem_section
+from app.problem import render_problem_section, _render_problem_summary
+from app.constants.problem import problem_from_dict
 from app.utils import _list_tmux_sessions
+
+import json
 
 ENGINES = ["sgd", "adam", "pam", "als"]
 
@@ -51,8 +54,17 @@ def render_sidebar() -> SidebarConfig:
     """Render all sidebar widgets and return a fully populated SidebarConfig."""
     cfg = SidebarConfig()
 
-    st.sidebar.markdown("### Problem")
-    render_problem_section(cfg, ROOT)
+    cfg.extend_mode = st.sidebar.toggle(
+        "Extend existing run", value=False,
+        help="Add new algorithm configs (and optionally new seeds) to an existing run. "
+             "The run's problem is locked.",
+    )
+
+    if cfg.extend_mode:
+        _render_extend_header(cfg)
+    else:
+        st.sidebar.markdown("### Problem")
+        render_problem_section(cfg, ROOT)
 
     st.sidebar.markdown("### General Settings")
     _sc1, _sc2 = st.sidebar.columns(2)
@@ -60,16 +72,70 @@ def render_sidebar() -> SidebarConfig:
     cfg.cuda_device = _sc2.selectbox("CUDA Device", [0, 1], index=0, help=CUDA_DEVICE)
     _render_tmux(cfg)
 
-    cfg.run_name = st.sidebar.text_input(
-        "Run Name *", value="",
-        placeholder="Required — enter a name for this run",
-        help=RUN_NAME,
-    )
+    if not cfg.extend_mode:
+        cfg.run_name = st.sidebar.text_input(
+            "Run Name *", value="",
+            placeholder="Required — enter a name for this run",
+            help=RUN_NAME,
+        )
 
     st.sidebar.markdown("### Algorithms")
     _render_algo_configs(cfg)
 
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Extend mode header — pick a run, lock its problem
+# ---------------------------------------------------------------------------
+
+def _render_extend_header(cfg: SidebarConfig) -> None:
+    """Render the run picker for extend mode. Sets cfg.run_name, cfg.extend_run,
+    cfg.problem_id from the chosen run's config.json."""
+    runs_dir = ROOT / "artifacts" / "runs"
+    if not runs_dir.exists():
+        st.sidebar.error("No artifacts/runs/ directory yet — nothing to extend.")
+        st.stop()
+
+    runs = sorted(
+        [d.name for d in runs_dir.iterdir() if d.is_dir() and (d / "config.json").exists()],
+        reverse=True,
+    )
+    if not runs:
+        st.sidebar.warning("No runs found in artifacts/runs/.")
+        st.stop()
+
+    cfg.extend_run = st.sidebar.selectbox("Existing run", runs, key="extend_run_select")
+    cfg.run_name = cfg.extend_run
+
+    cfg_path = runs_dir / cfg.extend_run / "config.json"
+    with open(cfg_path) as f:
+        existing_cfg = json.load(f)
+
+    cfg.problem_id = existing_cfg.get("problem_id")
+    if not cfg.problem_id:
+        st.sidebar.error(f"`{cfg.extend_run}/config.json` is missing `problem_id`.")
+        st.stop()
+
+    st.sidebar.markdown("**Locked problem**")
+    try:
+        from app.problem_io import load_problem
+        p = load_problem(ROOT, cfg.problem_id)
+        _render_problem_summary(p)
+    except FileNotFoundError:
+        st.sidebar.warning(f"Problem `{cfg.problem_id}` referenced by this run was deleted.")
+
+    done_seeds = sorted([
+        int(d.name.replace("seed_", ""))
+        for d in (runs_dir / cfg.extend_run).iterdir()
+        if d.is_dir() and d.name.startswith("seed_")
+    ])
+    if done_seeds:
+        st.sidebar.caption(f"Existing seeds in run: {done_seeds}")
+
+    existing_labels = [c.get("label") for c in existing_cfg.get("algo_configs", [])]
+    if existing_labels:
+        st.sidebar.caption(f"Existing configs: {', '.join(existing_labels)}")
 
 
 # ---------------------------------------------------------------------------

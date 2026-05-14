@@ -198,9 +198,16 @@ def build_cmd(acfg: AlgoConfig, problem: Problem, seed: int, algo_dir: Path) -> 
 # ---------------------------------------------------------------------------
 
 def _resolve_problem(cfg: SidebarConfig, repo_root: Path) -> Problem:
-    """Resolve cfg → Problem, saving a pending new problem to disk if needed."""
+    """Resolve cfg → Problem, saving a pending new problem to disk if needed.
+
+    In extend mode the problem_id is locked by the existing run's config —
+    we always go through load_problem, never mint."""
     if cfg.problem_id:
         return load_problem(repo_root, cfg.problem_id)
+
+    if cfg.extend_mode:
+        st.sidebar.error("Extended run has no problem_id; check the run's config.json.")
+        st.stop()
 
     pending = st.session_state.get("pending_problem")
     if pending is None:
@@ -215,6 +222,12 @@ def _resolve_problem(cfg: SidebarConfig, repo_root: Path) -> Problem:
     st.session_state["pending_problem"] = None
     st.sidebar.success(f"Created problem `{pid}`.")
     return pending
+
+
+def _merge_algo_configs(existing: list[dict], new: list[dict]) -> list[dict]:
+    """Union by config_id — existing entries are preserved as-is, new ones appended."""
+    seen = {d["config_id"] for d in existing}
+    return existing + [d for d in new if d["config_id"] not in seen]
 
 
 # ---------------------------------------------------------------------------
@@ -258,11 +271,16 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
             existing_config = json.load(f)
     all_seeds = sorted(set(existing_config.get("seeds", [])) | set(seeds))
 
+    merged_algo_configs = _merge_algo_configs(
+        existing_config.get("algo_configs", []),
+        [i.to_dict() for i in cfg.algo_configs],
+    )
+
     config_dict = {
         "problem_id": problem.problem_id,
         "seeds": all_seeds,
-        "algo_configs": [i.to_dict() for i in cfg.algo_configs],
-        "created_at": time.time(),
+        "algo_configs": merged_algo_configs,
+        "created_at": existing_config.get("created_at", time.time()),
     }
     with open(cfg_path, "w") as f:
         json.dump(config_dict, f, indent=4)
