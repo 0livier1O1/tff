@@ -4,11 +4,11 @@ analyze.py — Analyze mode view.
 Sidebar widget (`render_analyze_sidebar`): multi-select of runs in
 artifacts/runs/. Populates `cfg.selected_runs`.
 
-Main pane (`render_analyze_main`): one merged table aggregating every
-algorithm config from the selected runs, with two leading columns
-('Run' and 'Problem') plus a checkbox column. Selected config_ids are
-persisted in `st.session_state["selected_config_ids"]` for downstream use
-(plot generation, comparison views, etc.).
+Main pane (`render_analyze_main`): one merged table, one row per algorithm
+config across the selected runs. Each row reports its 'Done seeds' (finished,
+plot-ready) and 'Failed seeds' (ran but never completed). A row is auto-checked
+only when it has at least one done seed; checked rows expand to seed-level keys
+in `st.session_state["selected_result_keys"]` for the plotting tabs.
 """
 from __future__ import annotations
 
@@ -20,9 +20,7 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.problem_io import load_problem
-from app.views.extend import (
-    order_columns, seeds_for_config, problem_caption, render_seed_view,
-)
+from app.views.extend import order_columns, problem_caption, render_seed_view
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +50,35 @@ def render_analyze_sidebar(cfg: SidebarConfig, repo_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Seed result classification
+# ---------------------------------------------------------------------------
+
+def _algo_subdir(config: dict) -> str:
+    return f"{config['config_id']}_{config['policy'].replace('-', '_')}"
+
+
+def _classify_seeds(run_dir: Path, config: dict, seeds: list[int]) -> tuple[list[int], list[int]]:
+    """Split a config's seeds into (done, failed).
+
+    done   — the seed finished (`.done`) and wrote `traces.csv`: plot-ready.
+    failed — the seed has an output dir but never completed.
+    Seeds never dispatched for this config land in neither list.
+    """
+    done, failed = [], []
+    for seed in seeds:
+        algo_dir = run_dir / f"seed_{seed}" / _algo_subdir(config)
+        if (algo_dir / ".done").exists() and (algo_dir / "traces.csv").exists():
+            done.append(seed)
+        elif algo_dir.exists():
+            failed.append(seed)
+    return done, failed
+
+
+def _parse_seeds(csv: object) -> list[int]:
+    return [int(p) for p in str(csv).split(",") if p.strip()]
+
+
+# ---------------------------------------------------------------------------
 # Main pane — merged algorithms table
 # ---------------------------------------------------------------------------
 
@@ -73,20 +100,25 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
             run_cfg = json.load(f)
         run_configs[run] = run_cfg
         problem_id = run_cfg.get("problem_id", "")
+        seeds = [int(s) for s in (run_cfg.get("seeds") or [1])]
         for ac in run_cfg.get("algo_configs", []):
-            seeds = seeds_for_config(runs_dir / run, ac)
+            done, failed = _classify_seeds(runs_dir / run, ac, seeds)
             records.append({
-                "selected": True, "Run": run, "Problem": problem_id,
-                "Seeds": ",".join(str(s) for s in seeds), **ac,
+                "selected": bool(done),
+                "Run": run,
+                "Problem": problem_id,
+                "Done seeds": ",".join(map(str, done)),
+                "Failed seeds": ",".join(map(str, failed)),
+                **ac,
             })
 
     if not records:
         st.info("Selected runs contain no algorithm configs.")
         return
 
+    meta = ["selected", "Run", "Problem", "Done seeds", "Failed seeds"]
     df = pd.DataFrame(records).fillna("")
-    rest = order_columns(df.drop(columns=["selected", "Run", "Problem"]))
-    df = df[["selected", "Run", "Problem"] + rest]
+    df = df[meta + order_columns(df.drop(columns=meta))]
 
     edited = st.data_editor(
         df,
@@ -96,17 +128,28 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
         hide_index=True,
         use_container_width=True,
         disabled=[c for c in df.columns if c != "selected"],
-        key="analyze_table",
+        key="analyze_results_table",
     )
 
     if "config_id" in edited.columns:
-        selected_keys: list[tuple[str, str]] = [
-            (row["Run"], row["config_id"])
-            for _, row in edited.loc[edited["selected"]].iterrows()
+        chosen = edited.loc[edited["selected"] & (edited["Done seeds"] != "")]
+        result_keys: list[tuple[str, int, str]] = [
+            (row["Run"], seed, row["config_id"])
+            for _, row in chosen.iterrows()
+            for seed in _parse_seeds(row["Done seeds"])
         ]
-        st.session_state["selected_config_ids"] = selected_keys
-        if selected_keys:
-            st.caption(f"{len(selected_keys)} algorithm config(s) selected.")
+        st.session_state["selected_result_keys"] = result_keys
+
+        if result_keys:
+            st.caption(
+                f"{len(chosen)} config(s) · {len(result_keys)} completed seed result(s) selected."
+            )
+        else:
+            st.caption("No completed seed results selected.")
+
+        skipped = int((edited["selected"] & (edited["Done seeds"] == "")).sum())
+        if skipped:
+            st.warning(f"{skipped} checked row(s) have no completed seeds — excluded from plots.")
 
     # -----------------------------------------------------------------------
     # Tabs: per-run problem description, results summary, per-seed results
