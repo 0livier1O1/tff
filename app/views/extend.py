@@ -46,18 +46,14 @@ def render_extend_preview(cfg: SidebarConfig, repo_root: Path) -> None:
     st.markdown("### Problem")
     for seed in seeds:
         with st.expander(f"Seed {seed}", expanded=False):
-            st.caption(_problem_caption(problem))
-            left, right = st.columns(2)
-            with left:
-                render_adj_matrix(repo_root, cfg.problem_id, seed, problem)
-            with right:
-                render_tn_graph(repo_root, cfg.problem_id, seed)
+            st.caption(problem_caption(problem))
+            render_seed_view(repo_root, problem, seed)
 
     st.markdown("### Existing algorithm configs")
     _render_configs_table(run_cfg.get("algo_configs", []), cfg_path.parent)
 
 
-def _problem_caption(problem: ProblemConfig) -> str:
+def problem_caption(problem: ProblemConfig) -> str:
     """One-line problem description: cores, max rank, and (synthetic) R range."""
     parts = [f"cores = {problem.n_cores}", f"max rank = {problem.max_rank}"]
     if isinstance(problem, SyntheticProblemConfig):
@@ -103,6 +99,31 @@ def render_tn_graph(repo_root: Path, pid: str, seed: int) -> None:
 
     st.caption(f"TN graph (seed {seed})")
     st.image(str(png_path), use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Per-seed view — target norm + adjacency + TN graph
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def target_norm(repo_root: Path, pid: str, seed: int) -> float:
+    """Frobenius norm of the materialized target tensor for (problem, seed).
+
+    Cached — problem targets are immutable once materialized.
+    """
+    data = np.load(seed_dir(repo_root, pid, seed) / "target_tensor.npz")["data"]
+    return float(np.linalg.norm(data))
+
+
+def render_seed_view(repo_root: Path, problem: ProblemConfig, seed: int) -> None:
+    """Target norm caption, then adjacency matrix (left) + TN graph (right)."""
+    norm = target_norm(repo_root, problem.problem_id, seed)
+    st.caption(f"Target Frobenius norm: {norm:.6g}")
+    left, right = st.columns(2)
+    with left:
+        render_adj_matrix(repo_root, problem.problem_id, seed, problem)
+    with right:
+        render_tn_graph(repo_root, problem.problem_id, seed)
 
 
 # ---------------------------------------------------------------------------

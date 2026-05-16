@@ -20,7 +20,9 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.problem_io import load_problem
-from app.views.extend import order_columns, render_adj_matrix, render_tn_graph, seeds_for_config
+from app.views.extend import (
+    order_columns, seeds_for_config, problem_caption, render_seed_view,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +126,7 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Problem-description tab — per-run adjacency + TN graph
+# Problem-description tab — one expander per run/problem, a seed tab strip inside
 # ---------------------------------------------------------------------------
 
 def _render_problem_descriptions(
@@ -141,17 +143,15 @@ def _render_problem_descriptions(
             st.warning(f"Run `{run}` has no problem_id.")
             continue
 
-        st.markdown(f"### `{run}` — problem `{problem_id}`")
         try:
             problem = load_problem(repo_root, problem_id)
         except FileNotFoundError:
             st.warning(f"Problem `{problem_id}` referenced by `{run}` no longer exists.")
             continue
 
-        preview_seed = (run_cfg.get("seeds") or [1])[0]
-        left, right = st.columns(2)
-        with left:
-            render_adj_matrix(repo_root, problem_id, preview_seed, problem)
-        with right:
-            render_tn_graph(repo_root, problem_id, preview_seed)
-        st.markdown("---")
+        seeds = run_cfg.get("seeds") or [1]
+        with st.expander(f"{run}  —  problem {problem_id}", expanded=True):
+            st.caption(problem_caption(problem))
+            for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
+                with tab:
+                    render_seed_view(repo_root, problem, seed)
