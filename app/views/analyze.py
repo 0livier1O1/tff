@@ -21,6 +21,7 @@ import streamlit as st
 from app.config.sidebar_config import SidebarConfig
 from app.problem_io import load_problem
 from app.views.extend import order_columns, problem_caption, render_seed_view
+from app.views.results_summary import render_results_summary
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +163,7 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
         _render_problem_descriptions(cfg.selected_runs, run_configs, repo_root)
 
     with tab_summary:
-        st.info("Results summary will live here — pending implementation.")
+        render_results_summary(repo_root)
 
     with tab_seed:
         st.info("Per-seed results will live here — pending implementation.")

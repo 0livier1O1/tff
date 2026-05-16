@@ -259,7 +259,7 @@ class BOSS:
 
         rse_list, cr_list, t_list = [], [], []
         for i, x in enumerate(X):
-            row = self._observe(x.unsqueeze(0), step=i, phase="init")
+            row = self._observe(x.unsqueeze(0), step=i, phase="sobol_init")
             rse_list.append(row["rse"])
             cr_list.append(row["cr"])
             t_list.append(row["eval_time_s"])

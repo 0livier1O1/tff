@@ -217,7 +217,8 @@ class TnALE:
 
         # Phase / sweep state needed both for Sobol evaluations (if any) and main loop
         self._interp_on = self.interp_on
-        self._in_init_phase = True  # Sobol/sparse init evaluations are 'init' regardless of interp_on
+        self._in_init_phase = True  # reset to interp_on below; True here spans _run_sobol_init
+        self._in_sobol_init = False  # True only inside _run_sobol_init — tags rows 'sobol_init'
         self._local_step = self.local_step_init if self._interp_on else self.local_step_main
         self._times_of_local_sampling = 1
         self._update_idx = -1  # placeholder for any pre-ALE evaluations
@@ -593,8 +594,8 @@ class TnALE:
 
         Bit-identical samples to BOSS when topology='full', same seed, same
         n_sobol_init, and same max_rank (both bounds are inclusive). Caller
-        must have already set self._fixed_permute and the _in_init_phase /
-        _last_row_time state used by _record.
+        must have already set self._fixed_permute and _last_row_time; these
+        evaluations are tagged phase='sobol_init' in the trace.
         """
         R = self.max_rank
         bounds = torch.stack([
@@ -607,6 +608,7 @@ class TnALE:
 
         best_obj = float("inf")
         best_ranks = samples[0].copy()
+        self._in_sobol_init = True
         for ranks in samples:
             s = Structure(ranks.copy(), self.phys_dims, self._fixed_permute, self._bonds)
             rse, cr, _ = self._eval_one(s, update_idx=None)
@@ -614,6 +616,7 @@ class TnALE:
             if obj < best_obj:
                 best_obj = obj
                 best_ranks = ranks.copy()
+        self._in_sobol_init = False
 
         if self.verbose:
             print(f"[TnALE Sobol init] best obj = {best_obj:.5f}  ranks = {best_ranks.tolist()}")
@@ -633,7 +636,11 @@ class TnALE:
                 "step": self.eval_count,
                 "ale_position": int(self._update_idx),
                 "ale_round": int(self._times_of_local_sampling),
-                "phase": "init" if self._in_init_phase else "main",
+                "phase": (
+                    "sobol_init" if self._in_sobol_init
+                    else "init" if self._in_init_phase
+                    else "main"
+                ),
                 "rse": rse,
                 "cr": cr,
                 "step_loss": rse,
