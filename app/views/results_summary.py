@@ -61,11 +61,11 @@ def render_results_summary(repo_root: Path) -> None:
     search_df = df[df["family"] != "mabss"]
 
     if not mabss_df.empty:
-        st.caption("**MABSS** — search objective (RSE) at each step.")
+        st.caption("**MABSS** — objective (RSE), with compression ratio dashed on the right axis.")
         st.plotly_chart(
             figures.objective_curves(
                 mabss_df, controls.max_evals, controls.max_runtime,
-                y_title="Objective (RSE)",
+                y_title="Objective (RSE)", show_cr=True,
             ),
             use_container_width=True,
         )
@@ -77,5 +77,12 @@ def render_results_summary(repo_root: Path) -> None:
                 search_df, controls.max_evals, controls.max_runtime,
                 y_title="Best objective (CR + λ·RSE)",
             ),
+            use_container_width=True,
+        )
+
+    if not search_df.empty:
+        st.caption("**BOSS / TnALE** — compression ratio & RSE of the best-objective structure so far.")
+        st.plotly_chart(
+            figures.incumbent_cr_rse(search_df, controls.max_evals, controls.max_runtime),
             use_container_width=True,
         )
