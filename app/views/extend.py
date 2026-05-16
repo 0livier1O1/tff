@@ -2,10 +2,11 @@
 extend_view.py — Main-page preview for extend-run mode.
 
 When the sidebar is in extend mode, the dashboard shows:
-  - Adjacency matrix (left) for one of the materialized seeds
-  - TN graph (right) rendered from that adjacency (cached as PNG)
-  - Table of every algorithm config already recorded in the run's config.json,
-    with all dataclass fields as columns (blank where not applicable).
+  - `### Problem` — one collapsed expander per seed in the run, each holding
+    the problem description (cores / rank / R range), the adjacency matrix,
+    and the TN graph (cached as PNG).
+  - `### Existing algorithm configs` — table of every algorithm config already
+    recorded in the run's config.json, all dataclass fields as columns.
 """
 from __future__ import annotations
 
@@ -39,18 +40,31 @@ def render_extend_preview(cfg: SidebarConfig, repo_root: Path) -> None:
         return
 
     seeds = run_cfg.get("seeds") or [1]
-    preview_seed = seeds[0]
 
     st.markdown(f"### Extending `{cfg.extend_run}` — problem `{cfg.problem_id}`")
 
-    left, right = st.columns(2)
-    with left:
-        render_adj_matrix(repo_root, cfg.problem_id, preview_seed, problem)
-    with right:
-        render_tn_graph(repo_root, cfg.problem_id, preview_seed)
+    st.markdown("### Problem")
+    for seed in seeds:
+        with st.expander(f"Seed {seed}", expanded=False):
+            st.caption(_problem_caption(problem))
+            left, right = st.columns(2)
+            with left:
+                render_adj_matrix(repo_root, cfg.problem_id, seed, problem)
+            with right:
+                render_tn_graph(repo_root, cfg.problem_id, seed)
 
-    st.markdown("#### Existing algorithm configs")
-    _render_configs_table(run_cfg.get("algo_configs", []))
+    st.markdown("### Existing algorithm configs")
+    _render_configs_table(run_cfg.get("algo_configs", []), cfg_path.parent)
+
+
+def _problem_caption(problem: ProblemConfig) -> str:
+    """One-line problem description: cores, max rank, and (synthetic) R range."""
+    parts = [f"cores = {problem.n_cores}", f"max rank = {problem.max_rank}"]
+    if isinstance(problem, SyntheticProblemConfig):
+        parts.append(f"R ∈ [{problem.adj_r_min}, {problem.adj_r_max}]")
+        parts.append(f"topology = {problem.topology}")
+        parts.append(f"fix_adj = {problem.fix_adj}")
+    return "  ·  ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -59,12 +73,7 @@ def render_extend_preview(cfg: SidebarConfig, repo_root: Path) -> None:
 
 def render_adj_matrix(repo_root: Path, pid: str, seed: int, problem: ProblemConfig) -> None:
     sdir = seed_dir(repo_root, pid, seed)
-    adj_path = sdir / "adj_matrix.npy"
-    if not adj_path.exists():
-        st.info(f"Adjacency for seed {seed} not yet materialized.")
-        return
-
-    adj = np.load(adj_path)
+    adj = np.load(sdir / "adj_matrix.npy")
     n = adj.shape[0]
     df = pd.DataFrame(
         adj,
@@ -74,7 +83,7 @@ def render_adj_matrix(repo_root: Path, pid: str, seed: int, problem: ProblemConf
 
     cap = f"Adjacency (seed {seed})"
     if isinstance(problem, SyntheticProblemConfig) and not problem.fix_adj:
-        cap += " — adj varies per seed (showing first)"
+        cap += " — adj varies per seed"
     st.caption(cap)
     st.dataframe(df, use_container_width=True)
 
@@ -88,12 +97,8 @@ def render_tn_graph(repo_root: Path, pid: str, seed: int) -> None:
     png_path = sdir / "tn_graph.png"
 
     if not png_path.exists():
-        adj_path = sdir / "adj_matrix.npy"
-        if not adj_path.exists():
-            st.info(f"Adjacency for seed {seed} not yet materialized.")
-            return
         from scripts.utils import draw_tn_graph
-        adj = np.load(adj_path)
+        adj = np.load(sdir / "adj_matrix.npy")
         draw_tn_graph(adj, png_path, title=f"TN graph — seed {seed}")
 
     st.caption(f"TN graph (seed {seed})")
@@ -105,7 +110,7 @@ def render_tn_graph(repo_root: Path, pid: str, seed: int) -> None:
 # ---------------------------------------------------------------------------
 
 # Column groups in display order. Within each group, alphabetical.
-_PREFERRED_HEAD = ["config_id", "label", "policy", "family"]
+_PREFERRED_HEAD = ["Seeds", "config_id", "label", "policy", "family"]
 _MABSS_LOOSE_FIELDS = {
     "beta", "kernel_name", "learn_noise", "fixed_noise",
     "exp3_gamma", "exp3_decay", "exp3_loss_bins", "exp3_cr_bins",
@@ -129,9 +134,27 @@ def order_columns(df: pd.DataFrame) -> list[str]:
     return head + decomp + mabss + boss + tnale + leftover
 
 
-def _render_configs_table(configs: list[dict]) -> None:
+def seeds_for_config(run_dir: Path, config: dict) -> list[int]:
+    """Seeds whose run directory holds this algo config's output subdir.
+
+    The output subdir is `<config_id>_<policy_underscored>` (AlgoConfig.algo_subdir);
+    its presence under seed_<k>/ means the config was run for that seed.
+    """
+    subdir = f"{config['config_id']}_{config['policy'].replace('-', '_')}"
+    seeds: list[int] = []
+    for d in run_dir.iterdir():
+        if d.is_dir() and d.name.startswith("seed_") and (d / subdir).is_dir():
+            seeds.append(int(d.name.replace("seed_", "")))
+    return sorted(seeds)
+
+
+def _render_configs_table(configs: list[dict], run_dir: Path) -> None:
     if not configs:
         st.info("No algorithm configs have been recorded for this run yet.")
         return
-    df = pd.DataFrame(configs).fillna("")
+    rows = [
+        {"Seeds": ",".join(str(s) for s in seeds_for_config(run_dir, c)), **c}
+        for c in configs
+    ]
+    df = pd.DataFrame(rows).fillna("")
     st.dataframe(df[order_columns(df)], use_container_width=True, hide_index=True)

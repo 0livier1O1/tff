@@ -190,13 +190,24 @@ def algo_config_from_dict(d: dict[str, Any]) -> AlgoConfig:
     return cls(**d)
 
 
-def duplicate_algo_config(orig: AlgoConfig) -> AlgoConfig:
-    """Return a clone of `orig` with a fresh config_id and a '_copy' label suffix.
+def _is_auto_label(acfg: AlgoConfig) -> bool:
+    """True if the config still carries its auto-generated default label."""
+    return acfg.label == _default_label(acfg.policy, acfg.config_id)
 
-    All other fields (decomp, family-specific) are preserved exactly so the user
-    can tweak a single parameter without re-entering everything.
+
+def duplicate_algo_config(orig: AlgoConfig) -> AlgoConfig:
+    """Return a clone of `orig` with a fresh config_id.
+
+    All params (decomp, family-specific) are preserved so the user can tweak a
+    single parameter without re-entering everything. The label is regenerated
+    for the new id if it was auto-generated; a customized label gets a '_copy'.
     """
-    return replace(orig, config_id=_short_id(), label=f"{orig.label}_copy")
+    new_cid = _short_id()
+    if _is_auto_label(orig):
+        new_label = _default_label(orig.policy, new_cid)
+    else:
+        new_label = f"{orig.label}_copy"
+    return replace(orig, config_id=new_cid, label=new_label)
 
 
 def replace_policy(old: AlgoConfig, new_policy: str) -> AlgoConfig:
@@ -205,16 +216,22 @@ def replace_policy(old: AlgoConfig, new_policy: str) -> AlgoConfig:
     Within-family: mutate in place, preserving all params.
     Cross-family: build a fresh config of the new family, copying only the
     shared fields (config_id, label, decomp_*).
+
+    An auto-generated label is regenerated to track the new policy; a
+    customized label is left untouched.
     """
     new_fam = policy_family(new_policy)
+    label = _default_label(new_policy, old.config_id) if _is_auto_label(old) else old.label
+
     if new_fam == old.family:
         old.policy = new_policy
+        old.label = label
         return old
 
     cls = _CONFIG_CLS[new_fam]
     fresh = cls(
         config_id=old.config_id,
-        label=old.label,
+        label=label,
         policy=new_policy,
         decomp_method=old.decomp_method,
         decomp_epochs=old.decomp_epochs,

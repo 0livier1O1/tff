@@ -77,7 +77,9 @@ def _ensure_default_configs() -> list[AlgoConfig]:
 def _render_one_config(acfg: AlgoConfig) -> None:
     cid = acfg.config_id
 
-    acfg.label = st.text_input("Label", value=acfg.label, key=f"label_{cid}")
+    # Key includes the policy so the field re-initialises (picking up `value=`)
+    # when replace_policy regenerates an auto label on a policy switch.
+    acfg.label = st.text_input("Label", value=acfg.label, key=f"label_{cid}_{acfg.policy}")
 
     _policy_idx = POLICY_OPTIONS.index(acfg.policy) if acfg.policy in POLICY_OPTIONS else 0
     selected_policy = st.selectbox(
@@ -86,14 +88,14 @@ def _render_one_config(acfg: AlgoConfig) -> None:
     if selected_policy != acfg.policy:
         new_acfg = replace_policy(acfg, selected_policy)
         if new_acfg is not acfg:
-            # Cross-family swap — substitute the config in session_state and rerun
+            # Cross-family swap — substitute the config in session_state
             configs = st.session_state["algo_configs"]
             for i, c in enumerate(configs):
                 if c.config_id == cid:
                     configs[i] = new_acfg
                     break
-            st.rerun()
-        # within-family: replace_policy mutated acfg.policy in place
+        # Rerun so the label field re-renders under its new policy-keyed id.
+        st.rerun()
 
     st.markdown("**Decomposition**")
     _render_decomp(acfg)

@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
+from app.config.algo_config import algo_config_from_dict
 from app.config.constants import SEEDS, CUDA_DEVICE, TMUX_SESSION, RUN_NAME
 from app.problem import render_problem_section, _render_problem_summary
 from app.algo_widgets import render_algo_configs
@@ -63,6 +64,11 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
     if cfg.extend_mode:
         _render_extend_header(cfg)
     else:
+        # Leaving extend mode → discard the run's loaded configs, restore a
+        # fresh default (recreated by _ensure_default_configs).
+        if st.session_state.get("algo_configs_source", "new") != "new":
+            st.session_state.pop("algo_configs", None)
+            st.session_state["algo_configs_source"] = "new"
         st.sidebar.markdown("### Problem")
         render_problem_section(cfg, ROOT)
 
@@ -110,6 +116,15 @@ def _render_extend_header(cfg: SidebarConfig) -> None:
     with open(cfg_path) as f:
         existing_cfg = json.load(f)
 
+    # Load the run's existing algorithm configs into the sidebar so they are
+    # ready to re-run. Reload only when the selected run changes — otherwise
+    # the user's edits/additions for this run get clobbered every rerun.
+    if st.session_state.get("algo_configs_source") != cfg.extend_run:
+        st.session_state["algo_configs"] = [
+            algo_config_from_dict(d) for d in existing_cfg.get("algo_configs", [])
+        ]
+        st.session_state["algo_configs_source"] = cfg.extend_run
+
     cfg.problem_id = existing_cfg.get("problem_id")
     if not cfg.problem_id:
         st.sidebar.error(f"`{cfg.extend_run}/config.json` is missing `problem_id`.")
@@ -130,10 +145,6 @@ def _render_extend_header(cfg: SidebarConfig) -> None:
     ])
     if done_seeds:
         st.sidebar.caption(f"Existing seeds in run: {done_seeds}")
-
-    existing_labels = [c.get("label") for c in existing_cfg.get("algo_configs", [])]
-    if existing_labels:
-        st.sidebar.caption(f"Existing configs: {', '.join(existing_labels)}")
 
 
 # ---------------------------------------------------------------------------

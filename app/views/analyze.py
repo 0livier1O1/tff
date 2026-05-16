@@ -20,7 +20,7 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.problem_io import load_problem
-from app.views.extend import order_columns, render_adj_matrix, render_tn_graph
+from app.views.extend import order_columns, render_adj_matrix, render_tn_graph, seeds_for_config
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +72,11 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
         run_configs[run] = run_cfg
         problem_id = run_cfg.get("problem_id", "")
         for ac in run_cfg.get("algo_configs", []):
-            records.append({"selected": False, "Run": run, "Problem": problem_id, **ac})
+            seeds = seeds_for_config(runs_dir / run, ac)
+            records.append({
+                "selected": True, "Run": run, "Problem": problem_id,
+                "Seeds": ",".join(str(s) for s in seeds), **ac,
+            })
 
     if not records:
         st.info("Selected runs contain no algorithm configs.")
@@ -85,7 +89,7 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
     edited = st.data_editor(
         df,
         column_config={
-            "selected": st.column_config.CheckboxColumn("✓", default=False, width="small"),
+            "selected": st.column_config.CheckboxColumn("✓", default=True, width="small"),
         },
         hide_index=True,
         use_container_width=True,
