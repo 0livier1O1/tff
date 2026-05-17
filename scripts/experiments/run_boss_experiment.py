@@ -45,14 +45,7 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tensors") not in sys.path:
     sys.path.insert(0, str(ROOT / "tensors"))
 
-from scripts.utils import (
-    make_problem,
-    save_tensor,
-    save_image,
-    draw_tn_graph,
-    eval_generating_structure,
-    POLICY_COLORS,
-)
+from scripts.utils import load_problem_artifacts
 from tnss.algo.boss.boss import BOSS
 
 
@@ -110,44 +103,13 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Heuristic: If out_dir is a policy subdirectory, save shared target artifacts one level up
-    seed_dir = out_dir.parent if out_dir.name.startswith("boss_") else out_dir
-
     progress_file = out_dir / "progress.json"
 
     _seed_all(args.seed)
 
     print(f"--- BOSS Experiment [Seed {args.seed}] ---")
-    init_adj, target_cp = make_problem(args)
-    target = torch.from_numpy(cp.asnumpy(target_cp)).to(torch.double)
-
-    _adj_np = cp.asnumpy(cp.asarray(init_adj)).astype(np.float64)
-    target_cr = float(np.prod(np.diag(_adj_np)) / np.sum(np.prod(_adj_np, axis=1)))
-
-    # Refresh shared target artifacts from this seeded subprocess.  The
-    # dashboard may have an older imported problem factory in memory, so the
-    # CLI process is the source of truth for the target used by the algorithm.
-    np.save(seed_dir / "target_adj.npy", cp.asnumpy(cp.asarray(init_adj)))
-    save_tensor(seed_dir / "target_tensor.npz", target)
-    if args.target_path:
-        save_image(seed_dir / "target_image.png", target)
-
-    if not args.target_path:  # Synthetic only — ground truth structure is known
-        eval_generating_structure(
-            init_adj, target_cp,
-            max_epochs=args.maxiter_tn,
-            decomp_method=args.decomp_method,
-            out_path=seed_dir / "generating_rse.json",
-            dtype=args.dtype,
-        )
-
-    if not (seed_dir / "target_graph.png").exists():
-        draw_tn_graph(
-            init_adj,
-            seed_dir / "target_graph.png",
-            title="Target Structure",
-        )
+    adj_np, target_np = load_problem_artifacts(args.target_path, args.adj_path)
+    target = torch.from_numpy(target_np).to(torch.double)
 
     boss = BOSS(
         target,
@@ -165,6 +127,7 @@ def main():
         momentum=args.momentum,
         loss_patience=args.loss_patience,
         lr_patience=args.lr_patience,
+        seed=args.seed,
         verbose=True,
     )
 
@@ -177,33 +140,18 @@ def main():
     summary, rows = boss.run(progress_file=progress_file)
 
     best_x_int = summary["best_x_int"]
-    best_adj = summary["best_adj"]
     np.save(out_dir / "best_x_int.npy", best_x_int.numpy())
-
-    _, _, _, best_recon = boss._evaluate(best_adj)
-    if best_recon is not None:
-        save_tensor(out_dir / "reconstruction.npz", best_recon)
-        if args.target_path:  # Image experiment
-            save_image(out_dir / "reconstruction.png", best_recon)
 
     # Persist traces
     df = pd.DataFrame(rows)
-    df["efficiency"] = df["cr"] / target_cr if target_cr else float("nan")
-    df["Policy"] = f"boss-{args.acqf}"
+    df["Algo"] = f"boss-{args.acqf}"
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
-
-    draw_tn_graph(
-        best_adj,
-        out_dir / f"tn_graph_{args.acqf}.png",
-        title=f"[{args.acqf.upper()}] Post-Search Topology",
-        node_color=POLICY_COLORS.get(f"boss-{args.acqf}", "#888888"),
-    )
 
     res = boss.get_results()
     np.savez(
         out_dir / "boss_results.npz",
-        X_int=res["X_int"].numpy(),
+        X_std=res["X_std"].numpy(),
         Y_rse=res["Y_rse"].numpy(),
         Y_cr=res["Y_cr"].numpy(),
         Y_objective=res["Y_objective"].numpy(),

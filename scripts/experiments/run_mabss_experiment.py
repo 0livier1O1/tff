@@ -91,15 +91,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.utils import (
-    random_adj_matrix,
-    make_problem,
-    save_tensor,
-    save_image,
-    draw_tn_graph,
-    eval_generating_structure,
-    POLICY_COLORS,
-)
+from scripts.utils import random_adj_matrix, load_problem_artifacts
 from tnss.algo.mabs.env import TNSearchEnv
 from tnss.algo.mabs.encoders import LocalEncoder
 from tnss.algo.mabs.policies import (
@@ -215,7 +207,6 @@ def run_policy(
     args: argparse.Namespace,
     target,
     policy_str: str,
-    target_cr: float = 1.0,
     ui_bar=None,
     mem_ui=None,
     mem_history=None,
@@ -369,6 +360,25 @@ def run_policy(
             "gp_ucb":   _to_list(gp_scores["ucb"])  if "ucb"  in gp_scores else None,
             "gp_std":   _to_list(gp_scores["std"])  if "std"  in gp_scores else None,
             "expert_weights": p_info.get("expert_weights"),  # EXP4 only, else None
+            "exp3_log_weights": (
+                _to_list(policy.log_weights) if policy_str == "exp3" else None
+            ),
+            "exp3_probs": (
+                _to_list(policy.last_probs)
+                if policy_str == "exp3" and policy.last_probs is not None else None
+            ),
+            "exp4_ctx": (
+                list(policy.last_ctx)
+                if policy_str == "exp4" and getattr(policy, "last_ctx", None) is not None else None
+            ),
+            "exp4_probs": (
+                _to_list(policy.last_probs)
+                if policy_str == "exp4" and policy.last_probs is not None else None
+            ),
+            "exp4_expert_dists": (
+                policy.last_expert_dists.tolist()
+                if policy_str == "exp4" and policy.last_expert_dists is not None else None
+            ),
         }
         diagnostics.append(diag)
 
@@ -406,6 +416,8 @@ def run_policy(
 
         # Logging
         _current_cr = float(info["current_cr"].item())
+        _adj_np = cp.asnumpy(env.adj).astype(int)
+        _triu_i, _triu_j = np.triu_indices(_adj_np.shape[0], k=1)
         row = {
             "step": step + 1,
             "par_loss": float(par_loss.item()),
@@ -415,7 +427,7 @@ def run_policy(
             "cr": _current_cr,
             "objective": float(step_loss),
             "objective_name": "RSE",
-            "efficiency": _current_cr / target_cr if target_cr else float("nan"),
+            "adj_triu": "-".join(str(int(v)) for v in _adj_np[_triu_i, _triu_j]),
             "selected_arm": int(action),
             "oracle_best_arm": int(oracle_best_arm.item()),
             "oracle_arm_rank": chosen_arm_rank,
@@ -580,37 +592,9 @@ def main() -> None:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Heuristic: If out_dir is a policy subdirectory, save shared target artifacts one level up
-    seed_dir = out_dir.parent if out_dir.name.startswith("mabss_") else out_dir
-
     _seed_all(args.seed)
-    init_adj, target = make_problem(args)
-
-    # Refresh shared target artifacts from this seeded subprocess.  The
-    # dashboard may have an older imported problem factory in memory, so the
-    # CLI process is the source of truth for the target used by the algorithm.
-    _adj_np = cp.asnumpy(cp.asarray(init_adj))
-    np.save(seed_dir / "target_adj.npy", _adj_np)
-    _a = _adj_np.astype(np.float64)
-    target_cr = float(np.prod(np.diag(_a)) / np.sum(np.prod(_a, axis=1)))
-    save_tensor(seed_dir / "target_tensor.npz", target)
-    if args.target_path:
-        save_image(seed_dir / "target_image.png", target)
-
-    if not args.target_path:  # Synthetic only — ground truth structure is known
-        eval_generating_structure(
-            init_adj, target,
-            max_epochs=args.warm_start_epochs,
-            decomp_method=getattr(args, "decomp_method", "sgd"),
-            out_path=seed_dir / "generating_rse.json",
-            dtype=args.dtype,
-        )
-    if not (seed_dir / "target_graph.png").exists():
-        draw_tn_graph(
-            init_adj,
-            seed_dir / "target_graph.png",
-            title="Target Structure",
-        )
+    adj_np, target_np = load_problem_artifacts(args.target_path, args.adj_path)
+    target = cp.asarray(target_np)  # TNSearchEnv expects cupy
 
     import pandas as pd
 
@@ -622,26 +606,14 @@ def main() -> None:
             {"policy": p, "step": 0, "budget": args.budget, "started_at": time.time()}
         ))
         summary, rows, best_recon, decomp_histories, diagnostics = run_policy(
-            args, target, policy_str=p, target_cr=target_cr, progress_file=progress_file
+            args, target, policy_str=p, progress_file=progress_file
         )
-
-        # Save reconstruction
-        save_tensor(out_dir / "reconstruction.npz", best_recon)
-        if args.target_path:  # Image experiment
-            save_image(out_dir / "reconstruction.png", best_recon)
 
         for r in rows:
             r["Policy"] = p
             r["Seed"] = args.seed
         summary["policy"] = p
         summary["Seed"] = args.seed
-
-        draw_tn_graph(
-            summary["A"],
-            out_dir / f"tn_graph_{p}.png",
-            title=f"[{p.upper()}] Post-Search Topology",
-            node_color=POLICY_COLORS.get(f"mabss-{p}", "#888888"),
-        )
 
         # Each policy call in this script now saves its own local results file
         # to prevent overwriting when multiple subprocess calls target the same seed folder.

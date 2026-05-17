@@ -94,6 +94,7 @@ class BOSS:
         lr_patience: int = 250,
         raw_samples: int = 256,
         num_restarts: int = 10,
+        seed: int | None = None,
         verbose: bool = True,
     ):
         self.target = target
@@ -118,6 +119,7 @@ class BOSS:
         self.budget = budget
         self.raw_samples = raw_samples
         self.num_restarts = num_restarts
+        self.seed = seed
         self.verbose = verbose
         
         # Search space: [1, max_rank]^D normalized to [0, 1]^D
@@ -188,10 +190,11 @@ class BOSS:
         return self._summarize(), self.rows
 
     def get_results(self) -> dict:
-        """Return raw training data in original (integer) rank space."""
-        x_int = self._to_int(self.train_X_std)
+        """Raw training data. `X_std` is the GP's normalized input ([0,1]^D) —
+        what the surrogate was actually fit on; map it through `_to_int` for the
+        integer rank vectors (lossy, since `_to_int` rounds)."""
         return {
-            "X_int": x_int,
+            "X_std": self.train_X_std,
             "Y_rse": self.train_Y_rse,
             "Y_cr": self.train_Y_cr,
             "Y_objective": self._get_objective(self.train_Y_rse, self.train_Y_cr),
@@ -250,12 +253,14 @@ class BOSS:
         )
 
     def _sobol_init(self, progress_file):
-        raw = draw_sobol_samples(bounds=self.std_bounds, n=self.n_init, q=1).squeeze(1)
+        raw = draw_sobol_samples(
+            bounds=self.std_bounds, n=self.n_init, q=1, seed=self.seed,
+        ).squeeze(1)
         X = raw.to(torch.double)
 
         rse_list, cr_list, t_list = [], [], []
         for i, x in enumerate(X):
-            row = self._observe(x.unsqueeze(0), step=i, phase="init")
+            row = self._observe(x.unsqueeze(0), step=i, phase="sobol_init")
             rse_list.append(row["rse"])
             cr_list.append(row["cr"])
             t_list.append(row["eval_time_s"])
