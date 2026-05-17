@@ -207,7 +207,6 @@ def run_policy(
     args: argparse.Namespace,
     target,
     policy_str: str,
-    target_cr: float = 1.0,
     ui_bar=None,
     mem_ui=None,
     mem_history=None,
@@ -428,7 +427,6 @@ def run_policy(
             "cr": _current_cr,
             "objective": float(step_loss),
             "objective_name": "RSE",
-            "efficiency": _current_cr / target_cr if target_cr else float("nan"),
             "adj_triu": "-".join(str(int(v)) for v in _adj_np[_triu_i, _triu_j]),
             "selected_arm": int(action),
             "oracle_best_arm": int(oracle_best_arm.item()),
@@ -598,9 +596,6 @@ def main() -> None:
     adj_np, target_np = load_problem_artifacts(args.target_path, args.adj_path)
     target = cp.asarray(target_np)  # TNSearchEnv expects cupy
 
-    _adj_np = adj_np.astype(np.float64)
-    target_cr = float(np.prod(np.diag(_adj_np)) / np.sum(np.prod(_adj_np, axis=1)))
-
     import pandas as pd
 
     progress_file = out_dir / "progress.json"
@@ -611,7 +606,7 @@ def main() -> None:
             {"policy": p, "step": 0, "budget": args.budget, "started_at": time.time()}
         ))
         summary, rows, best_recon, decomp_histories, diagnostics = run_policy(
-            args, target, policy_str=p, target_cr=target_cr, progress_file=progress_file
+            args, target, policy_str=p, progress_file=progress_file
         )
 
         for r in rows:

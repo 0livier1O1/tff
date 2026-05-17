@@ -111,9 +111,6 @@ def main():
     adj_np, target_np = load_problem_artifacts(args.target_path, args.adj_path)
     target = torch.from_numpy(target_np).to(torch.double)
 
-    _adj_np = adj_np.astype(np.float64)
-    target_cr = float(np.prod(np.diag(_adj_np)) / np.sum(np.prod(_adj_np, axis=1)))
-
     boss = BOSS(
         target,
         budget=args.budget,
@@ -147,7 +144,6 @@ def main():
 
     # Persist traces
     df = pd.DataFrame(rows)
-    df["efficiency"] = df["cr"] / target_cr if target_cr else float("nan")
     df["Algo"] = f"boss-{args.acqf}"
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
