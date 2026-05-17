@@ -49,8 +49,24 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
     configs: list[AlgoConfig] = _ensure_default_configs()
 
     for acfg in configs:
-        with st.sidebar.expander(f"**{acfg.label}**  ·  `{acfg.policy}`", expanded=False):
+        cid = acfg.config_id
+        # Expander + delete/duplicate on one row, so a config can be removed or
+        # cloned without opening it.
+        exp_col, del_col, dup_col = st.sidebar.columns([6, 1, 1])
+        with exp_col.expander(f"**{acfg.label}**  ·  `{acfg.policy}`", expanded=False):
             _render_one_config(acfg)
+        if del_col.button(":material/delete:", key=f"remove_{cid}",
+                          use_container_width=True, type="primary",
+                          help="Remove this algorithm config"):
+            st.session_state["algo_configs"] = [
+                c for c in st.session_state["algo_configs"] if c.config_id != cid
+            ]
+            st.rerun()
+        if dup_col.button(":material/content_copy:", key=f"duplicate_{cid}",
+                          use_container_width=True,
+                          help="Duplicate this algorithm config (same params, new id)"):
+            st.session_state["algo_configs"].append(duplicate_algo_config(acfg))
+            st.rerun()
 
     add_col1, add_col2 = st.sidebar.columns([2, 3])
     new_policy = add_col1.selectbox(
@@ -107,19 +123,6 @@ def _render_one_config(acfg: AlgoConfig) -> None:
         _render_boss(acfg)
     elif isinstance(acfg, TnALEConfig):
         _render_tnale(acfg)
-
-    rm_col, dup_col = st.columns(2)
-    if rm_col.button(":material/delete:", key=f"remove_{cid}", use_container_width=True,
-                     type="primary",
-                     help="Remove this algorithm config"):
-        st.session_state["algo_configs"] = [
-            c for c in st.session_state["algo_configs"] if c.config_id != cid
-        ]
-        st.rerun()
-    if dup_col.button(":material/content_copy:", key=f"duplicate_{cid}", use_container_width=True,
-                      help="Duplicate this algorithm config (same params, new id)"):
-        st.session_state["algo_configs"].append(duplicate_algo_config(acfg))
-        st.rerun()
 
 
 # ---------------------------------------------------------------------------
