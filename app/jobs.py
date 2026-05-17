@@ -26,7 +26,7 @@ def render_job_status_panel(ROOT: Path) -> None:
 
     _hdr, _btn = st.columns([5, 1])
     _hdr.markdown("#### Active Runs")
-    if _btn.button("Refresh", use_container_width=True):
+    if _btn.button("Refresh", width="stretch"):
         st.rerun()
 
     def _fmt_ts(ts):
@@ -77,7 +77,7 @@ def render_job_status_panel(ROOT: Path) -> None:
                 "Completed": _fmt_ts(completed_at),
             })
 
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
         if all_done:
             (out_dir / "session_state.json").unlink(missing_ok=True)

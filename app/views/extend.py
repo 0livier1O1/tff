@@ -81,7 +81,7 @@ def render_adj_matrix(repo_root: Path, pid: str, seed: int, problem: ProblemConf
     if isinstance(problem, SyntheticProblemConfig) and not problem.fix_adj:
         cap += " — adj varies per seed"
     st.caption(cap)
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ def render_tn_graph(repo_root: Path, pid: str, seed: int) -> None:
         draw_tn_graph(adj, png_path, title=f"TN graph — seed {seed}")
 
     st.caption(f"TN graph (seed {seed})")
-    st.image(str(png_path), use_container_width=True)
+    st.image(str(png_path), width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -177,5 +177,7 @@ def _render_configs_table(configs: list[dict], run_dir: Path) -> None:
         {"Seeds": ",".join(str(s) for s in seeds_for_config(run_dir, c)), **c}
         for c in configs
     ]
-    df = pd.DataFrame(rows).fillna("")
-    st.dataframe(df[order_columns(df)], use_container_width=True, hide_index=True)
+    # convert_dtypes → nullable columns: a field absent for some families stays
+    # null (blank cell) without poisoning numeric columns with "" (Arrow fails).
+    df = pd.DataFrame(rows).convert_dtypes()
+    st.dataframe(df[order_columns(df)], width="stretch", hide_index=True)

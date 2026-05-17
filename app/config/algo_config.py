@@ -1,7 +1,7 @@
 """
 algo_config.py — One configured run of a search policy.
 
-Three subclasses cover the three policy families. A config's *type* matches
+Four subclasses cover the four policy families. A config's *type* matches
 its family — a MABSSConfig cannot be a boss-ei. Switching policy across
 families therefore replaces the config object entirely (see sidebar.py);
 the runner only passes CLI flags that are defined on the active subclass,
@@ -24,8 +24,9 @@ from typing import Any
 MABSS_POLICIES = ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4"]
 BOSS_POLICIES  = ["boss-ei", "boss-ucb"]
 TNALE_POLICIES = ["tnale"]
+RANDOM_POLICIES = ["random"]
 
-POLICY_OPTIONS: list[str] = MABSS_POLICIES + BOSS_POLICIES + TNALE_POLICIES
+POLICY_OPTIONS: list[str] = MABSS_POLICIES + BOSS_POLICIES + TNALE_POLICIES + RANDOM_POLICIES
 
 
 def policy_family(policy: str) -> str:
@@ -35,6 +36,8 @@ def policy_family(policy: str) -> str:
         return "boss"
     if policy in TNALE_POLICIES:
         return "tnale"
+    if policy in RANDOM_POLICIES:
+        return "random"
     raise ValueError(f"Unknown policy: {policy!r}")
 
 
@@ -47,7 +50,7 @@ class AlgoConfig:
     config_id: str
     label: str
     policy: str
-    family: str  # "mabss" | "boss" | "tnale" — discriminator for JSON
+    family: str  # "mabss" | "boss" | "tnale" | "random" — discriminator for JSON
 
     # Decomposition (every family runs a TN decomposition under the hood)
     decomp_method: str = "adam"
@@ -152,6 +155,21 @@ class TnALEConfig(AlgoConfig):
     tnale_init_method: str = "sobol"
     tnale_n_sobol_init: int = 10
 
+
+# ---------------------------------------------------------------------------
+# Random search
+# ---------------------------------------------------------------------------
+
+@dataclass(kw_only=True)
+class RandomSearchConfig(AlgoConfig):
+    family: str = "random"
+
+    random_budget: int = 200
+    random_max_bond: int = 10
+    random_n_runs: int = 1
+    random_min_rse: float = 1e-2
+    random_lambda_fitness: float = 10.0
+
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
@@ -160,6 +178,7 @@ _CONFIG_CLS = {
     "mabss": MABSSConfig,
     "boss":  BOSSConfig,
     "tnale": TnALEConfig,
+    "random": RandomSearchConfig,
 }
 
 

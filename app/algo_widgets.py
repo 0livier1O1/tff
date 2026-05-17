@@ -5,9 +5,9 @@ algo_widgets.py — Sidebar widgets for the per-AlgoConfig sections.
 config expanders (one per algorithm config), the Add button, and persists
 the list to `cfg.algo_configs` + `st.session_state["algo_configs"]`.
 
-The per-family helpers (_render_mabss / _render_boss / _render_tnale) are
-typed against their concrete subclass — IDE catches accidental cross-family
-field access.
+The per-family helpers (_render_mabss / _render_boss / _render_tnale /
+_render_random) are typed against their concrete subclass — IDE catches
+accidental cross-family field access.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import (
-    AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig,
+    AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig, RandomSearchConfig,
     POLICY_OPTIONS, new_algo_config, replace_policy, duplicate_algo_config,
 )
 from app.config.constants import (
@@ -31,6 +31,8 @@ from app.config.constants import (
     MABSS_STOPPING_THRESHOLD, MABSS_EXP3_REWARD_SCALE,
     MABSS_EXP3_LOSS_CAP, MABSS_EXP3_LOG_CR_CAP, MABSS_DTYPE,
     BOSS_BUDGET, BOSS_MAX_BOND, BOSS_N_INIT, BOSS_LAMBDA_FITNESS, BOSS_UCB_BETA,
+    RANDOM_BUDGET, RANDOM_MAX_BOND, RANDOM_N_RUNS, RANDOM_MIN_RSE_DECOMP,
+    RANDOM_LAMBDA_FITNESS,
     TNALE_BUDGET, TNALE_MAX_RANK, TNALE_TOPOLOGY, TNALE_LAMBDA_FITNESS,
     TNALE_LOCAL_STEP_INIT, TNALE_LOCAL_STEP_MAIN, TNALE_INTERP_ON, TNALE_INTERP_ITERS,
     TNALE_LOCAL_OPT_ITER, TNALE_INIT_SPARSITY, TNALE_PHASE_CHANGE_RESET,
@@ -56,14 +58,14 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
         with exp_col.expander(f"**{acfg.label}**  ·  `{acfg.policy}`", expanded=False):
             _render_one_config(acfg)
         if del_col.button(":material/delete:", key=f"remove_{cid}",
-                          use_container_width=True, type="primary",
+                          width="stretch", type="primary",
                           help="Remove this algorithm config"):
             st.session_state["algo_configs"] = [
                 c for c in st.session_state["algo_configs"] if c.config_id != cid
             ]
             st.rerun()
         if dup_col.button(":material/content_copy:", key=f"duplicate_{cid}",
-                          use_container_width=True,
+                          width="stretch",
                           help="Duplicate this algorithm config (same params, new id)"):
             st.session_state["algo_configs"].append(duplicate_algo_config(acfg))
             st.rerun()
@@ -72,7 +74,7 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
     new_policy = add_col1.selectbox(
         "New policy", POLICY_OPTIONS, label_visibility="collapsed", key="new_algo_policy",
     )
-    if add_col2.button("+ Add algorithm", use_container_width=True):
+    if add_col2.button("+ Add algorithm", width="stretch"):
         st.session_state["algo_configs"].append(new_algo_config(new_policy))
         st.rerun()
 
@@ -123,6 +125,8 @@ def _render_one_config(acfg: AlgoConfig) -> None:
         _render_boss(acfg)
     elif isinstance(acfg, TnALEConfig):
         _render_tnale(acfg)
+    elif isinstance(acfg, RandomSearchConfig):
+        _render_random(acfg)
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +323,32 @@ def _render_boss(acfg: BOSSConfig) -> None:
     acfg.boss_min_rse = c6.number_input(
         "Min RSE", value=acfg.boss_min_rse, format="%e",
         key=f"boss_min_rse_{cid}", help=BOSS_MIN_RSE_DECOMP,
+    )
+
+
+def _render_random(acfg: RandomSearchConfig) -> None:
+    cid = acfg.config_id
+    c1, c2 = st.columns(2)
+    acfg.random_budget = c1.number_input(
+        "Budget", min_value=1, max_value=10000, value=acfg.random_budget,
+        key=f"random_budget_{cid}", help=RANDOM_BUDGET,
+    )
+    acfg.random_max_bond = c2.number_input(
+        "Max Bond Rank", min_value=1, max_value=100, value=acfg.random_max_bond,
+        key=f"random_max_bond_{cid}", help=RANDOM_MAX_BOND,
+    )
+    c3, c4 = st.columns(2)
+    acfg.random_lambda_fitness = c3.number_input(
+        "λ fitness", value=acfg.random_lambda_fitness, min_value=0.0, format="%f",
+        key=f"random_lambda_{cid}", help=RANDOM_LAMBDA_FITNESS,
+    )
+    acfg.random_n_runs = c4.number_input(
+        "N runs", min_value=1, max_value=10, value=acfg.random_n_runs,
+        key=f"random_n_runs_{cid}", help=RANDOM_N_RUNS,
+    )
+    acfg.random_min_rse = st.number_input(
+        "Min RSE", value=acfg.random_min_rse, format="%e",
+        key=f"random_min_rse_{cid}", help=RANDOM_MIN_RSE_DECOMP,
     )
 
 

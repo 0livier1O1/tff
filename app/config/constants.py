@@ -31,7 +31,8 @@ SELECTED_ALGORITHMS = (
     "Algorithms to run for each seed. "
     "`mabss-*` are sequential bandit rank-increment strategies that choose one bond to increment per step. "
     "`boss-*` are global Bayesian Optimization methods that search the full bond-rank vector at once. "
-    "`tnale` is Alternating Local Enumeration, a local search over individual bond positions with optional permutation."
+    "`tnale` is Alternating Local Enumeration, a local search over individual bond positions with optional permutation. "
+    "`random` samples full bond-rank vectors uniformly and evaluates them directly."
 )
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,19 @@ TNALE_N_RUNS = (
 TNALE_MIN_RSE_DECOMP = (
     "Per-evaluation early stop: terminate the decomposition once RSE falls below this threshold. "
     "Use a tighter value than BOSS since TnALE's local decisions are sensitive to RSE accuracy."
+)
+
+# ---------------------------------------------------------------------------
+# Decomposition — random-search-specific
+# ---------------------------------------------------------------------------
+
+RANDOM_N_RUNS = (
+    "Decomposition restarts per randomly sampled candidate. "
+    "Use the same value as BOSS/TnALE for a fair per-evaluation comparison."
+)
+
+RANDOM_MIN_RSE_DECOMP = (
+    "Per-evaluation early stop: terminate the decomposition as soon as RSE drops below this value."
 )
 
 # ---------------------------------------------------------------------------
@@ -242,6 +256,25 @@ BOSS_LAMBDA_FITNESS = (
 BOSS_UCB_BETA = (
     "Exploration weight β for BOSS-UCB acquisition: select x minimizing -(μ(x) - β·σ(x)). "
     "Higher β → more exploration of uncertain structures; lower β → exploit the surrogate mean."
+)
+
+# ---------------------------------------------------------------------------
+# Random Search Advanced
+# ---------------------------------------------------------------------------
+
+RANDOM_BUDGET = (
+    "Number of random candidate structures to evaluate. "
+    "One full tensor-network decomposition is run per candidate."
+)
+
+RANDOM_MAX_BOND = (
+    "Upper bound on each off-diagonal bond rank in the random search space. "
+    "Each bond is sampled uniformly from 1..max_bond."
+)
+
+RANDOM_LAMBDA_FITNESS = (
+    "Trade-off weight λ in the random-search objective: minimize CR + λ·RSE. "
+    "Use the same value as BOSS/TnALE when comparing best-objective curves."
 )
 
 # ---------------------------------------------------------------------------

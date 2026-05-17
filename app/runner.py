@@ -18,7 +18,9 @@ from pathlib import Path
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
-from app.config.algo_config import AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig
+from app.config.algo_config import (
+    AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig, RandomSearchConfig,
+)
 from app.config.problem_config import ProblemConfig, mint_problem_id, now_iso
 from app.problem_io import load_problem, save_problem, runs_root, target_path_for, adj_path_for
 from app.utils import _write_run_script, _script_alive
@@ -182,6 +184,25 @@ def tnale_cmd(acfg: TnALEConfig, problem: ProblemConfig, seed: int, algo_dir: Pa
     return cmd
 
 
+def random_cmd(acfg: RandomSearchConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
+    cmd = [
+        "conda", "run", "-n", "tensors",
+        "python", "scripts/experiments/run_random_experiment.py",
+        "--n-cores",    str(problem.n_cores),
+        "--max-rank",   str(problem.max_rank),
+        "--seed",       str(seed),
+        "--budget",     str(acfg.random_budget),
+        "--max-bond",   str(acfg.random_max_bond),
+        "--n-runs",     str(acfg.random_n_runs),
+        "--min-rse",    str(acfg.random_min_rse),
+        "--maxiter-tn", str(acfg.decomp_epochs),
+        "--lamda",      str(acfg.random_lambda_fitness),
+        "--out-dir",    str(algo_dir),
+    ]
+    cmd += _decomp_flags(acfg)
+    return cmd
+
+
 def build_cmd(acfg: AlgoConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
     """Dispatch on the concrete subclass. A wrong-family config raises here
     instead of silently using defaults from another family."""
@@ -191,6 +212,8 @@ def build_cmd(acfg: AlgoConfig, problem: ProblemConfig, seed: int, algo_dir: Pat
         return boss_cmd(acfg, problem, seed, algo_dir)
     if isinstance(acfg, TnALEConfig):
         return tnale_cmd(acfg, problem, seed, algo_dir)
+    if isinstance(acfg, RandomSearchConfig):
+        return random_cmd(acfg, problem, seed, algo_dir)
     raise TypeError(f"Unknown AlgoConfig subclass: {type(acfg).__name__}")
 
 

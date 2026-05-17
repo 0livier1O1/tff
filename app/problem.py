@@ -297,7 +297,7 @@ def _build_image() -> RealProblemConfig | None:
         shape = tuple(int(s) for s in target_display.shape)
         st.sidebar.markdown(f"**Shape**: `{shape}`")
         with st.sidebar.expander("Show Preview", expanded=False):
-            st.image(utils.reconstruct_image(target_cp), use_container_width=True)
+            st.image(utils.reconstruct_image(target_cp), width="stretch")
     except Exception as e:
         st.sidebar.warning(f"Could not preview image: {e}")
 
@@ -374,7 +374,7 @@ def _build_lightfield() -> RealProblemConfig | None:
             n_ang = X.shape[3]
             mid = n_ang // 2
             view = X[:, :, :, mid, mid]
-            st.image(view, use_container_width=True, caption=f"Angular view [{mid},{mid}]")
+            st.image(view, width="stretch", caption=f"Angular view [{mid},{mid}]")
         except Exception as e:
             st.sidebar.warning(f"Preview failed: {e}")
 

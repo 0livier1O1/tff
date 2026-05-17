@@ -73,7 +73,7 @@ def render_results_summary(repo_root: Path) -> None:
     controls = _render_controls(df)
     cr_word = "efficiency" if controls.use_efficiency else "compression ratio"
 
-    # MABSS and BOSS/TnALE optimise different objectives — RSE vs. CR + λ·RSE —
+    # MABSS and global/local search baselines optimise different objectives — RSE vs. CR + λ·RSE —
     # so each family group gets its own chart.
     mabss_df = df[df["family"] == "mabss"]
     search_df = df[df["family"] != "mabss"]
@@ -85,25 +85,25 @@ def render_results_summary(repo_root: Path) -> None:
                 mabss_df, y_title="Objective (RSE)", show_cr=True,
                 use_efficiency=controls.use_efficiency,
             ),
-            use_container_width=True,
+            width="stretch",
         )
 
     if not search_df.empty:
-        st.caption("**BOSS / TnALE** — best objective (CR + λ·RSE) so far; init excluded.")
+        st.caption("**BOSS / TnALE / Random** — best objective (CR + λ·RSE) so far; Sobol init excluded where present.")
         st.plotly_chart(
             figures.objective_curves(
                 search_df, y_title="Best objective (CR + λ·RSE)",
             ),
-            use_container_width=True,
+            width="stretch",
         )
 
     if not search_df.empty:
-        st.caption(f"**BOSS / TnALE** — {cr_word} & RSE of the best-objective structure so far.")
+        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & RSE of the best-objective structure so far.")
         st.plotly_chart(
             figures.incumbent_cr_rse(
                 search_df, use_efficiency=controls.use_efficiency,
             ),
-            use_container_width=True,
+            width="stretch",
         )
 
     scatter_caption = (
@@ -117,19 +117,19 @@ def render_results_summary(repo_root: Path) -> None:
         threshold_mode=controls.threshold_mode,
     )
 
-    # The generating-CR plot needs the ground-truth CR — synthetic, BOSS/TnALE only.
+    # The generating-CR plot needs the ground-truth CR — synthetic, non-MABSS methods only.
     show_gen = not search_df.empty and bool(search_df["target_cr"].notna().all())
     if show_gen:
         col_a, col_b = st.columns(2)
         with col_a:
             st.caption(scatter_caption)
-            st.plotly_chart(scatter_fig, use_container_width=True)
+            st.plotly_chart(scatter_fig, width="stretch")
         with col_b:
-            st.caption("**BOSS / TnALE** — best CR found vs. generating-structure CR.")
+            st.caption("**BOSS / TnALE / Random** — best CR found vs. generating-structure CR.")
             st.plotly_chart(
                 figures.incumbent_vs_generating_cr(search_df),
-                use_container_width=True,
+                width="stretch",
             )
     else:
         st.caption(scatter_caption)
-        st.plotly_chart(scatter_fig, use_container_width=True)
+        st.plotly_chart(scatter_fig, width="stretch")

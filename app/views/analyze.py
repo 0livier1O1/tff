@@ -118,7 +118,9 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
         return
 
     meta = ["selected", "Run", "Problem", "Done seeds", "Failed seeds"]
-    df = pd.DataFrame(records).fillna("")
+    # convert_dtypes → nullable columns: a field absent for some families stays
+    # null (blank cell) without poisoning numeric columns with "" (Arrow fails).
+    df = pd.DataFrame(records).convert_dtypes()
     df = df[meta + order_columns(df.drop(columns=meta))]
 
     edited = st.data_editor(
@@ -127,7 +129,7 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
             "selected": st.column_config.CheckboxColumn("✓", default=True, width="small"),
         },
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         disabled=[c for c in df.columns if c != "selected"],
         key="analyze_results_table",
     )

@@ -69,7 +69,7 @@ st.markdown(
     "Configure problems, launch search runs, and monitor jobs."
 )
 
-if st.sidebar.button("Execute Tensor Evaluation", type="primary", use_container_width=True):
+if st.sidebar.button("Execute Tensor Evaluation", type="primary", width="stretch"):
     launch_run(cfg, ROOT)
     st.rerun()
 
