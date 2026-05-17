@@ -151,7 +151,7 @@ def main():
     res = boss.get_results()
     np.savez(
         out_dir / "boss_results.npz",
-        X_int=res["X_int"].numpy(),
+        X_std=res["X_std"].numpy(),
         Y_rse=res["Y_rse"].numpy(),
         Y_cr=res["Y_cr"].numpy(),
         Y_objective=res["Y_objective"].numpy(),

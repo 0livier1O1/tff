@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -293,8 +294,13 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
 
         for acfg in cfg.algo_configs:
             algo_dir = out_dir / f"seed_{seed}" / acfg.algo_subdir
-            if algo_dir.exists() and (algo_dir / ".done").exists():
+            is_done = algo_dir.exists() and (algo_dir / ".done").exists()
+            if is_done and not cfg.overwrite:
                 continue
+            if is_done:
+                # Overwrite — wipe the completed run so a crashed re-run can't
+                # leave the stale .done (and stale outputs) behind.
+                shutil.rmtree(algo_dir)
             algo_dir.mkdir(parents=True, exist_ok=True)
             (algo_dir / "progress.json").unlink(missing_ok=True)
 

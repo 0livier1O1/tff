@@ -190,10 +190,11 @@ class BOSS:
         return self._summarize(), self.rows
 
     def get_results(self) -> dict:
-        """Return raw training data in original (integer) rank space."""
-        x_int = self._to_int(self.train_X_std)
+        """Raw training data. `X_std` is the GP's normalized input ([0,1]^D) —
+        what the surrogate was actually fit on; map it through `_to_int` for the
+        integer rank vectors (lossy, since `_to_int` rounds)."""
         return {
-            "X_int": x_int,
+            "X_std": self.train_X_std,
             "Y_rse": self.train_Y_rse,
             "Y_cr": self.train_Y_cr,
             "Y_objective": self._get_objective(self.train_Y_rse, self.train_Y_cr),

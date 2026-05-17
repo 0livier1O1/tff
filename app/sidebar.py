@@ -76,6 +76,13 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
     _sc1, _sc2 = st.sidebar.columns(2)
     cfg.seeds_str = _sc1.text_input("Random Seeds (csv)", "1", help=SEEDS)
     cfg.cuda_device = _sc2.selectbox("CUDA Device", [0, 1], index=0, help=CUDA_DEVICE)
+    if cfg.extend_mode:
+        cfg.overwrite = st.sidebar.toggle(
+            "Overwrite existing seeds", value=False,
+            help="Re-run seed/config combinations that already completed, "
+                 "replacing their artifacts. By default completed combos are "
+                 "skipped. Affects only the seeds listed above.",
+        )
     _render_tmux(cfg)
 
     if not cfg.extend_mode:

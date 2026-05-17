@@ -22,5 +22,7 @@ class SidebarConfig:
     # Extend mode — append new (seed, algo_config) pairs to an existing run
     extend_mode: bool = False
     extend_run: str | None = None
+    # Re-run and overwrite seed/config combos that already completed (extend mode)
+    overwrite: bool = False
     # Analyze mode — list of selected runs to merge into the algorithms table
     selected_runs: list[str] = field(default_factory=list)
