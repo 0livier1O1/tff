@@ -20,7 +20,7 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.problem_io import load_problem
-from app.views.extend import order_columns, problem_caption, render_seed_view
+from app.views.extend import order_columns, render_problem_seed_tabs
 from app.views.results_summary import render_results_summary
 
 
@@ -197,7 +197,4 @@ def _render_problem_descriptions(
 
         seeds = run_cfg.get("seeds") or [1]
         with st.expander(f"{run}  —  problem {problem_id}", expanded=True):
-            st.caption(problem_caption(problem))
-            for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
-                with tab:
-                    render_seed_view(repo_root, problem, seed)
+            render_problem_seed_tabs(repo_root, problem, seeds)

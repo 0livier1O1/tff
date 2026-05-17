@@ -1,12 +1,13 @@
 """
-extend_view.py — Main-page preview for extend-run mode.
+extend.py — Main-page preview for extend-run mode.
 
-When the sidebar is in extend mode, the dashboard shows:
-  - `### Problem` — one collapsed expander per seed in the run, each holding
-    the problem description (cores / rank / R range), the adjacency matrix,
-    and the TN graph (cached as PNG).
-  - `### Existing algorithm configs` — table of every algorithm config already
-    recorded in the run's config.json, all dataclass fields as columns.
+When the sidebar is in extend mode, the dashboard shows two tabs:
+  - `Problem` — the problem description (cores / rank / R range) plus one tab
+    per seed holding the adjacency matrix and TN graph (cached as PNG). The
+    `render_problem_seed_tabs` helper is shared with the Analyze
+    'Problem Description' tab.
+  - `Existing algo configs` — table of every algorithm config already recorded
+    in the run's config.json, all dataclass fields as columns.
 """
 from __future__ import annotations
 
@@ -43,14 +44,11 @@ def render_extend_preview(cfg: SidebarConfig, repo_root: Path) -> None:
 
     st.markdown(f"### Extending `{cfg.extend_run}` — problem `{cfg.problem_id}`")
 
-    st.markdown("### Problem")
-    for seed in seeds:
-        with st.expander(f"Seed {seed}", expanded=False):
-            st.caption(problem_caption(problem))
-            render_seed_view(repo_root, problem, seed)
-
-    st.markdown("### Existing algorithm configs")
-    _render_configs_table(run_cfg.get("algo_configs", []), cfg_path.parent)
+    tab_problem, tab_configs = st.tabs(["Problem", "Existing algo configs"])
+    with tab_problem:
+        render_problem_seed_tabs(repo_root, problem, seeds)
+    with tab_configs:
+        _render_configs_table(run_cfg.get("algo_configs", []), cfg_path.parent)
 
 
 def problem_caption(problem: ProblemConfig) -> str:
@@ -124,6 +122,17 @@ def render_seed_view(repo_root: Path, problem: ProblemConfig, seed: int) -> None
         render_adj_matrix(repo_root, problem.problem_id, seed, problem)
     with right:
         render_tn_graph(repo_root, problem.problem_id, seed)
+
+
+def render_problem_seed_tabs(repo_root: Path, problem: ProblemConfig, seeds: list[int]) -> None:
+    """Problem caption, then one tab per seed showing its adjacency + TN graph.
+
+    Shared by the extend-run preview and the Analyze 'Problem Description' tab.
+    """
+    st.caption(problem_caption(problem))
+    for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
+        with tab:
+            render_seed_view(repo_root, problem, seed)
 
 
 # ---------------------------------------------------------------------------

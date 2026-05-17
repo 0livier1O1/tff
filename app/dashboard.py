@@ -73,9 +73,6 @@ if st.sidebar.button("Execute Tensor Evaluation", type="primary", width="stretch
     launch_run(cfg, ROOT)
     st.rerun()
 
-# Extend-mode main-page preview (problem + algorithm configs already in run)
-render_extend_preview(cfg, ROOT)
-
 # Restore active runs from disk after browser reconnect
 if "active_runs" not in st.session_state:
     _runs_dir = ROOT / "artifacts" / "runs"
@@ -92,7 +89,11 @@ if "active_runs" not in st.session_state:
     if _restored:
         st.session_state["active_runs"] = _restored
 
+# Active Runs panel sits at the top, above the extend-mode preview.
 render_job_status_panel(ROOT)
+
+# Extend-mode main-page preview: Problem / Existing algo configs tabs.
+render_extend_preview(cfg, ROOT)
 
 if not st.session_state.get("active_runs") and not cfg.extend_mode:
     st.info("**Awaiting initialization.** Configure your problem and algorithm(s) in the sidebar, then click Execute.")
