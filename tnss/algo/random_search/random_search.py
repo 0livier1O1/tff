@@ -11,7 +11,7 @@ from torch import Tensor
 
 import cupy as cp
 
-from tensors.networks.cutensor_network import cuTensorNetwork
+from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
 from tnss.utils import triu_to_adj_matrix
 
 
@@ -23,7 +23,13 @@ def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
 def _eval_tn(target, adj, maxiter, n_runs, min_rse, *, method="pam",
              backend="cupy", dtype="float32",
              init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
-    """Evaluate one candidate with cuTensorNetwork decomposition."""
+    """Evaluate one candidate with cuTensorNetwork decomposition.
+
+    Returns ``(cr, best_rse, elapsed, best_losses, contraction_stats)`` where
+    ``best_losses`` is the loss trajectory of the restart that achieved the
+    best RSE and ``contraction_stats`` is the cuTensorNet path/autotune cost
+    dict (identical across restarts — topology is fixed).
+    """
     t0 = time.time()
     tgt_np = target.numpy() if hasattr(target, "numpy") else target
     target_cp = cp.asarray(tgt_np)
@@ -32,6 +38,7 @@ def _eval_tn(target, adj, maxiter, n_runs, min_rse, *, method="pam",
     cr = float(net.network_size()) / float(net.target_size())
 
     best_rse = float("inf")
+    best_losses: list[float] = []
     for _ in range(n_runs):
         losses = net.decompose(
             target_cp,
@@ -43,15 +50,18 @@ def _eval_tn(target, adj, maxiter, n_runs, min_rse, *, method="pam",
             lr_patience=lr_patience,
         )
         rse = float(losses[-1]) if losses else float("inf")
-        best_rse = min(best_rse, rse)
+        if rse < best_rse:
+            best_rse = rse
+            best_losses = [float(x) for x in losses]
         if best_rse < min_rse:
             break
 
     elapsed = time.time() - t0
+    contraction_stats = net.contraction_stats
     del net, adj_cp, target_cp
     if cp.get_default_memory_pool() is not None:
         cp.get_default_memory_pool().free_all_blocks()
-    return cr, best_rse, elapsed
+    return cr, best_rse, elapsed, best_losses, contraction_stats
 
 
 class RandomSearch:
@@ -107,6 +117,11 @@ class RandomSearch:
 
         self.rng = np.random.default_rng(seed)
         self.rows: list[dict] = []
+        # Per-step decomposition loss trajectories and cuTensorNet contraction
+        # cost, written alongside traces.csv as decomp_traces.json /
+        # contraction_traces.json.
+        self.decomp_traces: list[dict] = []
+        self.contraction_traces: list[dict] = []
         self.train_X_int: list[Tensor] = []
         self.train_Y_rse: list[float] = []
         self.train_Y_cr: list[float] = []
@@ -190,7 +205,7 @@ class RandomSearch:
         sample_time = time.time() - t0
         adj = _triu_to_full(x_int_flat, self.t_shape).int()
 
-        cr, rse, eval_time = _eval_tn(
+        cr, rse, eval_time, losses, ctn_stats = _eval_tn(
             self.target,
             adj,
             self.maxiter_tn,
@@ -219,8 +234,13 @@ class RandomSearch:
             "sample_time_s": sample_time,
             "suggest_time_s": sample_time,
             "step_time_s": sample_time + eval_time,
+            **contraction_scalar_row(ctn_stats),
         }
         self.rows.append(row)
+        self.decomp_traces.append({"step": step, "phase": phase, "losses": losses})
+        self.contraction_traces.append(
+            {"step": step, "phase": phase, **(ctn_stats or {})}
+        )
         self.train_X_int.append(x_int_flat)
         self.train_Y_rse.append(rse)
         self.train_Y_cr.append(cr)

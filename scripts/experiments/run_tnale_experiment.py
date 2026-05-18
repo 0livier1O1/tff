@@ -154,6 +154,11 @@ def main() -> None:
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
 
+    with open(out_dir / "decomp_traces.json", "w") as f:
+        json.dump(algo.decomp_traces, f)
+    with open(out_dir / "contraction_traces.json", "w") as f:
+        json.dump(algo.contraction_traces, f)
+
     clean_summary = {
         "algo": "tnale",
         "Seed": args.seed,

@@ -148,6 +148,11 @@ def main():
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
 
+    with open(out_dir / "decomp_traces.json", "w") as f:
+        json.dump(boss.decomp_traces, f)
+    with open(out_dir / "contraction_traces.json", "w") as f:
+        json.dump(boss.contraction_traces, f)
+
     res = boss.get_results()
     np.savez(
         out_dir / "boss_results.npz",

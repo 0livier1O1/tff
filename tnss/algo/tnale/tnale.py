@@ -12,7 +12,7 @@ import torch
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize
 
-from tensors.networks.cutensor_network import cuTensorNetwork
+from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
 from tnss.algo.tnale.structure import Structure
 from tnss.algo.tnale.neighborhood import (
     make_grid,
@@ -158,6 +158,11 @@ class TnALE:
         self.verbose = verbose
 
         self.rows: list[dict] = []
+        # Per-step decomposition loss trajectories and cuTensorNet contraction
+        # cost, written alongside traces.csv as decomp_traces.json /
+        # contraction_traces.json.
+        self.decomp_traces: list[dict] = []
+        self.contraction_traces: list[dict] = []
         self.eval_count = 0
         self.best_rse = float("inf")
         self.best_cr = float("inf")
@@ -447,6 +452,7 @@ class TnALE:
         cr = float(net.network_size()) / float(net.target_size())
 
         best_rse = float("inf")
+        best_losses: list[float] = []
         for _ in range(self.n_runs):
             losses = net.decompose(
                 self._target_cp,
@@ -459,17 +465,20 @@ class TnALE:
                 verbose=False
             )
             rse = float(losses[-1]) if losses else float("inf")
-            best_rse = min(best_rse, rse)
+            if rse < best_rse:
+                best_rse = rse
+                best_losses = [float(x) for x in losses]
             if best_rse < self.min_rse:
                 break
 
         elapsed = time.time() - t0
+        contraction_stats = net.contraction_stats
 
         if best_rse < self.best_rse:
             self.best_rse = best_rse
             self.best_cr = cr
 
-        self._record(s, best_rse, cr, elapsed)
+        self._record(s, best_rse, cr, elapsed, best_losses, contraction_stats)
 
         del net, A
         gc.collect()
@@ -626,21 +635,30 @@ class TnALE:
     # Row recording and output
     # ------------------------------------------------------------------
 
-    def _record(self, s: Structure, rse: float, cr: float, elapsed: float) -> None:
+    def _record(
+        self,
+        s: Structure,
+        rse: float,
+        cr: float,
+        elapsed: float,
+        losses: list[float] | None = None,
+        contraction_stats: dict | None = None,
+    ) -> None:
         self.eval_count += 1
         now = time.time()
         step_time = now - self._last_row_time
         self._last_row_time = now
+        phase = (
+            "sobol_init" if self._in_sobol_init
+            else "init" if self._in_init_phase
+            else "main"
+        )
         self.rows.append(
             {
                 "step": self.eval_count,
                 "ale_position": int(self._update_idx),
                 "ale_round": int(self._times_of_local_sampling),
-                "phase": (
-                    "sobol_init" if self._in_sobol_init
-                    else "init" if self._in_init_phase
-                    else "main"
-                ),
+                "phase": phase,
                 "rse": rse,
                 "cr": cr,
                 "step_loss": rse,
@@ -651,7 +669,14 @@ class TnALE:
                 "objective": cr + self.lambda_fitness * rse,
                 "decomp_time": elapsed,
                 "step_time_s": step_time,
+                **contraction_scalar_row(contraction_stats),
             }
+        )
+        self.decomp_traces.append(
+            {"step": self.eval_count, "phase": phase, "losses": losses or []}
+        )
+        self.contraction_traces.append(
+            {"step": self.eval_count, "phase": phase, **(contraction_stats or {})}
         )
 
     def _summarize(self) -> dict:

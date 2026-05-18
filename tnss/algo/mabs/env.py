@@ -53,6 +53,8 @@ class TNSearchEnv:
         self.cores = None
         self.arms = [(i, j) for i in range(k) for j in range(i + 1, k)]
         self.K = len(self.arms)
+        # cuTensorNet contraction cost of the most recent evaluate_arm() call.
+        self.last_contraction_stats = None
         self._set_seed(self.seed)
 
         self.cur_loss = self._eval_current_loss()
@@ -143,6 +145,7 @@ class TNSearchEnv:
             loss_patience=self.loss_patience,
             lr_patience=self.lr_patience,
         )
+        self.last_contraction_stats = ntwrk.contraction_stats
         losses = torch.tensor(decomp_losses, dtype=torch.double).cpu()
 
         if inplace:
@@ -173,6 +176,7 @@ class TNSearchEnv:
             "parent_cr": parent_cr,
             "current_cr": self.current_cr(),
             "adj": A_next,
+            "contraction_stats": self.last_contraction_stats,
         }
         return {"adj": A_next, "cores": cores_next}, reward, done, info
 

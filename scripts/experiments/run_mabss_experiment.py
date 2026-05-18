@@ -92,6 +92,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.utils import random_adj_matrix, load_problem_artifacts
+from tensors.networks.cutensor_network import contraction_scalar_row
 from tnss.algo.mabs.env import TNSearchEnv
 from tnss.algo.mabs.encoders import LocalEncoder
 from tnss.algo.mabs.policies import (
@@ -211,7 +212,7 @@ def run_policy(
     mem_ui=None,
     mem_history=None,
     progress_file=None,
-) -> tuple[dict, list[dict], cp.ndarray]:
+) -> tuple[dict, list[dict], cp.ndarray, list[dict], list[dict], list[dict]]:
     _seed_all(args.seed)
     env = TNSearchEnv(
         target=target,
@@ -279,6 +280,7 @@ def run_policy(
 
     rows = []
     decomp_histories = []
+    contraction_histories = []
     diagnostics = []
     stop_reason = "budget_exhausted"
 
@@ -393,6 +395,11 @@ def run_policy(
             "arm": int(action),
             "losses": info["losses"].tolist(),
         })
+        contraction_histories.append({
+            "step": step + 1,
+            "arm": int(action),
+            **(info.get("contraction_stats") or {}),
+        })
 
         # GP fitting — policy.update() refits the surrogate on new observations
         gp_fit_t0 = time.time()
@@ -442,6 +449,7 @@ def run_policy(
             "gp_fit_time_s": gp_fit_time,
             "oracle_time_s": oracle_time,
             "step_time_s": step_time,
+            **contraction_scalar_row(info.get("contraction_stats")),
         }
         rows.append(row)
 
@@ -463,7 +471,7 @@ def run_policy(
     )
     best_recon = ntwrk.contract()
 
-    return summary, rows, best_recon, decomp_histories, diagnostics
+    return summary, rows, best_recon, decomp_histories, contraction_histories, diagnostics
 
 
 def _summarize_policy(rows: list[dict], n_arms: int, budget: int, policy: str) -> dict:
@@ -605,7 +613,7 @@ def main() -> None:
         progress_file.write_text(json.dumps(
             {"policy": p, "step": 0, "budget": args.budget, "started_at": time.time()}
         ))
-        summary, rows, best_recon, decomp_histories, diagnostics = run_policy(
+        summary, rows, best_recon, decomp_histories, contraction_histories, diagnostics = run_policy(
             args, target, policy_str=p, progress_file=progress_file
         )
 
@@ -628,6 +636,9 @@ def main() -> None:
 
         with open(out_dir / "decomp_traces.json", "w") as f:
             json.dump(decomp_histories, f)
+
+        with open(out_dir / "contraction_traces.json", "w") as f:
+            json.dump(contraction_histories, f)
 
         with open(out_dir / "policy_diagnostics.json", "w") as f:
             json.dump(diagnostics, f)

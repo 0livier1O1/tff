@@ -18,7 +18,7 @@ from botorch.utils.transforms import unnormalize
 from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
-from tensors.networks.cutensor_network import cuTensorNetwork
+from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
 from tnss.utils import triu_to_adj_matrix
 
 
@@ -30,7 +30,12 @@ def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
 def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
              backend="cupy", dtype="float32",
              init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
-    """Eval using cuTensorNetwork decompose (supports sgd, pam, als)."""
+    """Eval using cuTensorNetwork decompose (supports sgd, pam, als).
+
+    Returns ``(cr, best_rse, eval_time, recon, best_losses, contraction_stats)``
+    where ``best_losses`` is the loss trajectory of the best restart and
+    ``contraction_stats`` is the cuTensorNet path/autotune cost dict.
+    """
     t0 = time.time()
     tgt_np = target.numpy() if hasattr(target, 'numpy') else target
     tgt_cp = cp.asarray(tgt_np)
@@ -39,6 +44,7 @@ def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
     cr = float(ntwrk.network_size()) / float(ntwrk.target_size())
 
     best_rse = float("inf")
+    best_losses: list[float] = []
     for _ in range(n_runs):
         losses = ntwrk.decompose(
             tgt_cp, max_epochs=maxiter, method=method,
@@ -46,11 +52,13 @@ def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
             loss_patience=loss_patience, lr_patience=lr_patience,
         )
         val = float(losses[-1]) if losses else float("inf")
-        best_rse = min(best_rse, val)
+        if val < best_rse:
+            best_rse = val
+            best_losses = [float(x) for x in losses]
         if best_rse < min_rse:
             break
     eval_time = time.time() - t0
-    return cr, best_rse, eval_time, ntwrk.contract()
+    return cr, best_rse, eval_time, ntwrk.contract(), best_losses, ntwrk.contraction_stats
 
 
 class BOSS:
@@ -135,6 +143,11 @@ class BOSS:
 
         # Results
         self.rows: list[dict] = []
+        # Per-step decomposition loss trajectories and cuTensorNet contraction
+        # cost, written alongside traces.csv as decomp_traces.json /
+        # contraction_traces.json.
+        self.decomp_traces: list[dict] = []
+        self.contraction_traces: list[dict] = []
         self._gp_state = None
 
     # ------------------------------------------------------------------
@@ -220,7 +233,7 @@ class BOSS:
     ) -> dict:
         x_int_flat = self._to_int(x_std).squeeze(0)
         A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-        cr, rse, eval_time, _ = self._evaluate(A_int)
+        cr, rse, eval_time, _, losses, ctn_stats = self._evaluate(A_int)
         objective = float(cr + self.lamda * rse)
 
         row = {
@@ -236,8 +249,13 @@ class BOSS:
             "gp_fit_time_s": gp_fit_time,
             "suggest_time_s": suggest_time,
             "step_time_s": gp_fit_time + suggest_time + eval_time,
+            **contraction_scalar_row(ctn_stats),
         }
         self.rows.append(row)
+        self.decomp_traces.append({"step": step, "phase": phase, "losses": losses})
+        self.contraction_traces.append(
+            {"step": step, "phase": phase, **(ctn_stats or {})}
+        )
         return row
 
     def _evaluate(self, A_int: Tensor):
