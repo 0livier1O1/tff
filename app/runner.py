@@ -197,6 +197,8 @@ def random_cmd(acfg: RandomSearchConfig, problem: ProblemConfig, seed: int, algo
         "--min-rse",    str(acfg.random_min_rse),
         "--maxiter-tn", str(acfg.decomp_epochs),
         "--lamda",      str(acfg.random_lambda_fitness),
+        "--init-method", acfg.random_init_method,
+        "--n-sobol-init", str(acfg.random_n_sobol_init),
         "--out-dir",    str(algo_dir),
     ]
     cmd += _decomp_flags(acfg)

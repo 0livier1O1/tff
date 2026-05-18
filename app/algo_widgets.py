@@ -32,7 +32,7 @@ from app.config.constants import (
     MABSS_EXP3_LOSS_CAP, MABSS_EXP3_LOG_CR_CAP, MABSS_DTYPE,
     BOSS_BUDGET, BOSS_MAX_BOND, BOSS_N_INIT, BOSS_LAMBDA_FITNESS, BOSS_UCB_BETA,
     RANDOM_BUDGET, RANDOM_MAX_BOND, RANDOM_N_RUNS, RANDOM_MIN_RSE_DECOMP,
-    RANDOM_LAMBDA_FITNESS,
+    RANDOM_LAMBDA_FITNESS, RANDOM_INIT_METHOD, RANDOM_N_SOBOL_INIT,
     TNALE_BUDGET, TNALE_MAX_RANK, TNALE_TOPOLOGY, TNALE_LAMBDA_FITNESS,
     TNALE_LOCAL_STEP_INIT, TNALE_LOCAL_STEP_MAIN, TNALE_INTERP_ON, TNALE_INTERP_ITERS,
     TNALE_LOCAL_OPT_ITER, TNALE_INIT_SPARSITY, TNALE_PHASE_CHANGE_RESET,
@@ -349,6 +349,20 @@ def _render_random(acfg: RandomSearchConfig) -> None:
     acfg.random_min_rse = st.number_input(
         "Min RSE", value=acfg.random_min_rse, format="%e",
         key=f"random_min_rse_{cid}", help=RANDOM_MIN_RSE_DECOMP,
+    )
+    c5, c6 = st.columns(2)
+    _init_opts = ["random", "sobol"]
+    acfg.random_init_method = c5.selectbox(
+        "Init Method",
+        _init_opts,
+        index=_init_opts.index(acfg.random_init_method)
+        if acfg.random_init_method in _init_opts else 0,
+        key=f"random_init_method_{cid}",
+        help=RANDOM_INIT_METHOD,
+    )
+    acfg.random_n_sobol_init = c6.number_input(
+        "Sobol Init Samples", value=acfg.random_n_sobol_init, min_value=1, step=1,
+        key=f"random_n_sobol_init_{cid}", help=RANDOM_N_SOBOL_INIT,
     )
 
 

@@ -169,6 +169,8 @@ class RandomSearchConfig(AlgoConfig):
     random_n_runs: int = 1
     random_min_rse: float = 1e-2
     random_lambda_fitness: float = 10.0
+    random_init_method: str = "random"
+    random_n_sobol_init: int = 10
 
 # ---------------------------------------------------------------------------
 # Factories

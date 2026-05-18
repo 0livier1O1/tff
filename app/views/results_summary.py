@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from app.plotting import figures
-from app.plotting.traces import load_traces
+from app.plotting.traces import derive_trace_metrics, load_traces
 
 
 @dataclass
@@ -23,6 +23,27 @@ class SummaryControls:
     use_efficiency: bool = False
     loss_threshold: float = float("inf")
     threshold_mode: str = "fade"
+
+
+def _phase_options(phases: pd.Series) -> list[str]:
+    preferred = ["sobol_init", "init", "bo", "main", "random"]
+    present = set(phases.dropna().astype(str))
+    ordered = [p for p in preferred if p in present]
+    ordered.extend(sorted(present - set(ordered)))
+    return ordered
+
+
+def _render_phase_filter(df: pd.DataFrame) -> list[str]:
+    options = _phase_options(df["phase"])
+    default = [p for p in options if p != "sobol_init"] or options
+    st.sidebar.markdown("### Trace phases")
+    selected = st.sidebar.multiselect(
+        "Include phases",
+        options,
+        default=default,
+        help="Filter trace rows before recomputing best-so-far curves and incumbent statistics.",
+    )
+    return selected
 
 
 def _render_controls(df: pd.DataFrame) -> SummaryControls:
@@ -65,9 +86,20 @@ def render_results_summary(repo_root: Path) -> None:
         st.info("Select one or more completed results in the table above.")
         return
 
-    df = load_traces(repo_root, keys)
-    if df.empty:
+    raw_df = load_traces(repo_root, keys, derive=False)
+    if raw_df.empty:
         st.info("No trace data found for the selected results.")
+        return
+
+    selected_phases = _render_phase_filter(raw_df)
+    raw_df = raw_df[raw_df["phase"].isin(selected_phases)].copy()
+    if raw_df.empty:
+        st.info("No trace rows match the selected phase filter.")
+        return
+
+    df = derive_trace_metrics(raw_df)
+    if df.empty:
+        st.info("No trace data found for the selected phase filter.")
         return
 
     controls = _render_controls(df)
@@ -89,7 +121,7 @@ def render_results_summary(repo_root: Path) -> None:
         )
 
     if not search_df.empty:
-        st.caption("**BOSS / TnALE / Random** — best objective (CR + λ·RSE) so far; Sobol init excluded where present.")
+        st.caption("**BOSS / TnALE / Random** — best objective (CR + λ·RSE) so far for selected phases.")
         st.plotly_chart(
             figures.objective_curves(
                 search_df, y_title="Best objective (CR + λ·RSE)",

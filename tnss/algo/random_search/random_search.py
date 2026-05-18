@@ -77,6 +77,8 @@ class RandomSearch:
         momentum: float = 0.5,
         loss_patience: int = 2500,
         lr_patience: int = 250,
+        init_method: str = "random",
+        n_sobol_init: int = 10,
         seed: int | None = None,
         verbose: bool = True,
     ) -> None:
@@ -96,6 +98,10 @@ class RandomSearch:
         self.momentum = momentum
         self.loss_patience = loss_patience
         self.lr_patience = lr_patience
+        if init_method not in ("random", "sobol"):
+            raise ValueError(f"init_method must be 'random' or 'sobol', got {init_method!r}")
+        self.init_method = init_method
+        self.n_sobol_init = n_sobol_init
         self.seed = seed
         self.verbose = verbose
 
@@ -107,8 +113,12 @@ class RandomSearch:
         self.train_t: list[float] = []
 
     def run(self, progress_file: Path | None = None) -> tuple[dict, list[dict]]:
+        if self.init_method == "sobol":
+            self._sobol_init(progress_file)
+
+        step_offset = len(self.rows)
         for step in range(self.budget):
-            row = self._observe(step=step)
+            row = self._observe(step=step_offset + step, phase="random")
             self._atomic_write(
                 progress_file,
                 {"phase": "random", "step": step + 1, "budget": self.budget},
@@ -146,9 +156,37 @@ class RandomSearch:
         vals = self.rng.integers(1, self.max_rank + 1, size=self.D, dtype=np.int64)
         return torch.tensor(vals, dtype=torch.int)
 
-    def _observe(self, *, step: int) -> dict:
+    def _sobol_init(self, progress_file: Path | None) -> None:
+        from botorch.utils.sampling import draw_sobol_samples
+        from botorch.utils.transforms import unnormalize
+
+        bounds = torch.stack([
+            torch.ones(self.D, dtype=torch.double),
+            torch.full((self.D,), float(self.max_rank), dtype=torch.double),
+        ])
+        std_bounds = torch.zeros_like(bounds)
+        std_bounds[1] = 1.0
+        sobol = draw_sobol_samples(
+            bounds=std_bounds, n=self.n_sobol_init, q=1, seed=self.seed,
+        ).squeeze(1)
+        samples = unnormalize(sobol, bounds).round().clamp(1, self.max_rank).to(torch.int)
+
+        for i, x_int_flat in enumerate(samples):
+            row = self._observe(step=i, phase="sobol_init", x_int_flat=x_int_flat)
+            if self.verbose:
+                print(
+                    f"[Random Sobol init {i + 1}/{self.n_sobol_init}] "
+                    f"obj={row['objective']:.5f}  RSE={row['rse']:.5f}  CR={row['cr']:.5f}"
+                )
+            self._atomic_write(
+                progress_file,
+                {"phase": "sobol_init", "step": i + 1, "budget": self.n_sobol_init},
+            )
+
+    def _observe(self, *, step: int, phase: str, x_int_flat: Tensor | None = None) -> dict:
         t0 = time.time()
-        x_int_flat = self._sample_x_int()
+        if x_int_flat is None:
+            x_int_flat = self._sample_x_int()
         sample_time = time.time() - t0
         adj = _triu_to_full(x_int_flat, self.t_shape).int()
 
@@ -169,7 +207,7 @@ class RandomSearch:
 
         row = {
             "step": step,
-            "phase": "random",
+            "phase": phase,
             "cr": cr,
             "rse": rse,
             "step_loss": rse,

@@ -277,6 +277,17 @@ RANDOM_LAMBDA_FITNESS = (
     "Use the same value as BOSS/TnALE when comparing best-objective curves."
 )
 
+RANDOM_INIT_METHOD = (
+    "Initialization strategy before random search. "
+    "random = start directly with independent random samples. "
+    "sobol = first evaluate the same BOSS-style Sobol candidates and tag them as sobol_init."
+)
+
+RANDOM_N_SOBOL_INIT = (
+    "Number of Sobol initialization candidates to evaluate when Init Method = sobol. "
+    "Set this equal to BOSS n_init and TnALE Sobol Init Samples for a shared initialization."
+)
+
 # ---------------------------------------------------------------------------
 # TnALE Advanced
 # ---------------------------------------------------------------------------
