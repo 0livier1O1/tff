@@ -33,17 +33,48 @@ def _phase_options(phases: pd.Series) -> list[str]:
     return ordered
 
 
+# Only Sobol initialization is pre-search setup. TnALE's "init" phase is the
+# initial-radius ALE search and is kept visible.
+_INIT_PHASES = ("sobol_init",)
+
+
 def _render_phase_filter(df: pd.DataFrame) -> list[str]:
     options = _phase_options(df["phase"])
-    default = [p for p in options if p != "sobol_init"] or options
+    # Hide the Sobol init by default — it explores random high-objective
+    # structures that blow up the y-axis. This is a *display* filter only:
+    # best-so-far and incumbent metrics are derived over the full run before
+    # this filter is applied, so hiding init never changes the curves' values.
+    default = [p for p in options if p not in _INIT_PHASES] or options
     st.sidebar.markdown("### Trace phases")
     selected = st.sidebar.multiselect(
         "Include phases",
         options,
         default=default,
-        help="Filter trace rows before recomputing best-so-far curves and incumbent statistics.",
+        help="Display filter only — best-so-far and incumbent statistics are "
+             "always computed over the full run, including init. When the "
+             "Sobol init is hidden, its final eval is still drawn as the "
+             "shared best-of-init anchor point.",
     )
     return selected
+
+
+def _apply_phase_filter(df: pd.DataFrame, selected: list[str]) -> pd.DataFrame:
+    """Restrict `df` to the selected phases for display.
+
+    For a hidden init phase, the *last* eval of that phase is kept per
+    (run, config_id, seed): it carries the best-of-init objective, so every
+    curve visibly starts from the common point before the methods diverge.
+    """
+    keep = df["phase"].isin(selected)
+    hidden_init = [p for p in _INIT_PHASES if p not in selected]
+    if hidden_init:
+        init_rows = df[df["phase"].isin(hidden_init)]
+        if not init_rows.empty:
+            anchors = init_rows.groupby(
+                ["run", "config_id", "seed"], sort=False
+            )["n_evals"].idxmax()
+            keep.loc[anchors] = True
+    return df[keep].copy()
 
 
 def _render_controls(df: pd.DataFrame) -> SummaryControls:
@@ -91,15 +122,18 @@ def render_results_summary(repo_root: Path) -> None:
         st.info("No trace data found for the selected results.")
         return
 
-    selected_phases = _render_phase_filter(raw_df)
-    raw_df = raw_df[raw_df["phase"].isin(selected_phases)].copy()
-    if raw_df.empty:
-        st.info("No trace rows match the selected phase filter.")
+    # Derive best-so-far / incumbent metrics over the *full* run, then apply the
+    # phase filter for display only. Filtering before derivation would reset the
+    # running-best and make methods' curves diverge at the first shown eval.
+    df_full = derive_trace_metrics(raw_df)
+    if df_full.empty:
+        st.info("No trace data found for the selected results.")
         return
 
-    df = derive_trace_metrics(raw_df)
+    selected_phases = _render_phase_filter(df_full)
+    df = _apply_phase_filter(df_full, selected_phases)
     if df.empty:
-        st.info("No trace data found for the selected phase filter.")
+        st.info("No trace rows match the selected phase filter.")
         return
 
     controls = _render_controls(df)
@@ -121,7 +155,9 @@ def render_results_summary(repo_root: Path) -> None:
         )
 
     if not search_df.empty:
-        st.caption("**BOSS / TnALE / Random** — best objective (CR + λ·RSE) so far for selected phases.")
+        st.caption("**BOSS / TnALE / Random** — best objective (CR + λ·RSE) so far. "
+                   "Sobol init hidden by default — its final eval is kept as the shared "
+                   "start point; toggle the full phase under *Trace phases* in the sidebar.")
         st.plotly_chart(
             figures.objective_curves(
                 search_df, y_title="Best objective (CR + λ·RSE)",

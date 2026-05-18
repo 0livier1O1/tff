@@ -28,7 +28,7 @@ from app.algo_widgets import render_algo_configs
 from app.views.analyze import render_analyze_sidebar
 from app.utils import _list_tmux_sessions
 
-APP_MODES = ["Deployment", "Analyze"]
+APP_MODES = ["Deployment", "Analysis"]
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ def render_sidebar() -> SidebarConfig:
 
     st.sidebar.markdown("---")
 
-    if cfg.app_mode == "Analyze":
+    if cfg.app_mode == "Analysis":
         render_analyze_sidebar(cfg, ROOT)
         return cfg
 

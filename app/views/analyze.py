@@ -19,6 +19,11 @@ import pandas as pd
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
+from app.diagnostics import (
+    generate_gp_diagnostics, has_gp_diagnostics, load_gp_diagnostics, load_rse_cr,
+)
+from app.plotting import figures
+from app.plotting.traces import load_traces
 from app.problem_io import load_problem
 from app.views.extend import order_columns, render_problem_seed_tabs
 from app.views.results_summary import render_results_summary
@@ -155,10 +160,10 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
             st.warning(f"{skipped} checked row(s) have no completed seeds — excluded from plots.")
 
     # -----------------------------------------------------------------------
-    # Tabs: per-run problem description, results summary, per-seed results
+    # Tabs: problem description, results summary, per-seed diagnostics
     # -----------------------------------------------------------------------
-    tab_problem, tab_summary, tab_seed = st.tabs(
-        ["Problem Description", "Results Summary", "Seed results"]
+    tab_problem, tab_summary, tab_diag = st.tabs(
+        ["Problem Description", "Results Summary", "Diagnostics"]
     )
 
     with tab_problem:
@@ -167,8 +172,8 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
     with tab_summary:
         render_results_summary(repo_root)
 
-    with tab_seed:
-        st.info("Per-seed results will live here — pending implementation.")
+    with tab_diag:
+        _render_diagnostics(repo_root)
 
 
 # ---------------------------------------------------------------------------
@@ -198,3 +203,100 @@ def _render_problem_descriptions(
         seeds = run_cfg.get("seeds") or [1]
         with st.expander(f"{run}  —  problem {problem_id}", expanded=True):
             render_problem_seed_tabs(repo_root, problem, seeds)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics tab — one sub-tab per selected seed
+# ---------------------------------------------------------------------------
+
+def _render_diagnostics(repo_root: Path) -> None:
+    """One tab per seed among the selected results: the convergence trace plus
+    the (cached) BOSS GP-surrogate diagnostics."""
+    keys = st.session_state.get("selected_result_keys", [])
+    if not keys:
+        st.info("Select one or more completed results in the table above.")
+        return
+
+    df = load_traces(repo_root, keys)
+    if df.empty:
+        st.info("No trace data found for the selected results.")
+        return
+
+    runs_dir = repo_root / "artifacts" / "runs"
+    seeds = sorted(df["seed"].unique())
+    for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
+        with tab:
+            _render_gp_diagnostics(runs_dir, df[df["seed"] == seed], int(seed))
+
+
+def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
+    """GP-surrogate diagnostics for the BOSS configs at one seed. Each config has
+    its own Generate button — the expensive one-step-ahead refit runs once, is
+    cached under that config's `analysis/` folder, and reloaded for the plots."""
+    boss = (sdf[sdf["family"] == "boss"][["run", "config_id", "label", "policy"]]
+            .drop_duplicates())
+    if boss.empty:
+        st.info("No BOSS results at this seed — GP diagnostics are BOSS-only.")
+        return
+
+    # One collapsible section per BOSS config — its own Generate button, plots
+    # cached. The st.progress bar fills as the refit reports its 0–1 fraction.
+    for r in boss.itertuples(index=False):
+        lab = r.label
+        cd = (runs_dir / r.run / f"seed_{seed}"
+              / f"{r.config_id}_{r.policy.replace('-', '_')}")
+        with st.expander(f"**{lab}**  ·  `{r.policy}`", expanded=False):
+            if not has_gp_diagnostics(cd):
+                if not st.button("Generate Diagnostics", key=f"gen_{seed}_{lab}",
+                                 help="One-step-ahead GP refit (objective + RSE) — "
+                                      "expensive; runs once, then cached to disk."):
+                    st.caption("Not generated yet.")
+                    continue
+                bar = st.progress(0.0, text=f"Generating — {lab}  (0%)")
+                generate_gp_diagnostics(cd, progress=lambda f, b=bar, l=lab: b.progress(
+                    f, text=f"Generating — {l}  ({f:.0%})"))
+                bar.empty()
+
+            do = load_gp_diagnostics(cd, "objective")
+            dr = load_gp_diagnostics(cd, "rse")
+            rse, cr = load_rse_cr(cd)
+
+            t_obj, t_rse = st.tabs(["Objectives", "RSE"])
+            with t_obj:
+                oc1 = st.columns(2)
+                with oc1[0]:
+                    st.caption("one-step-ahead calibration")
+                    st.plotly_chart(figures.gp_calibration(do), width="stretch",
+                                    key=f"ocal_{seed}_{lab}")
+                with oc1[1]:
+                    st.caption("hyperparameter trajectories")
+                    st.plotly_chart(figures.gp_hyperparameters(do), width="stretch",
+                                    key=f"ohyp_{seed}_{lab}")
+                oc2 = st.columns(2)
+                with oc2[0]:
+                    st.caption("predicted vs actual")
+                    st.plotly_chart(figures.gp_parity(do), width="stretch",
+                                    key=f"opar_{seed}_{lab}")
+                with oc2[1]:
+                    st.caption("acquisition behaviour")
+                    st.plotly_chart(figures.gp_acquisition(do), width="stretch",
+                                    key=f"oacq_{seed}_{lab}")
+            with t_rse:
+                rc1 = st.columns(2)
+                with rc1[0]:
+                    st.caption("one-step-ahead calibration")
+                    st.plotly_chart(figures.gp_calibration(dr, "log RSE"), width="stretch",
+                                    key=f"rcal_{seed}_{lab}")
+                with rc1[1]:
+                    st.caption("hyperparameter trajectories")
+                    st.plotly_chart(figures.gp_hyperparameters(dr), width="stretch",
+                                    key=f"rhyp_{seed}_{lab}")
+                rc2 = st.columns(2)
+                with rc2[0]:
+                    st.caption("predicted vs actual")
+                    st.plotly_chart(figures.gp_parity(dr, "log RSE"), width="stretch",
+                                    key=f"rpar_{seed}_{lab}")
+                with rc2[1]:
+                    st.caption("RSE distribution")
+                    st.plotly_chart(figures.rse_distributions(rse, cr), width="stretch",
+                                    key=f"rdist_{seed}_{lab}")

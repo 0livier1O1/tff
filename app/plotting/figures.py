@@ -10,9 +10,11 @@ legend explains which line style is which.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy.stats import spearmanr
 
 from app.plotting.colors import colors_for, rgba
 
@@ -305,4 +307,151 @@ def incumbent_vs_generating_cr(df: pd.DataFrame) -> go.Figure:
         template="plotly_white", height=_HEIGHT,
         margin=dict(l=0, r=0, t=20, b=0), hovermode="closest", legend=_LEGEND,
     )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Per-seed convergence (Diagnostics tab)
+# ---------------------------------------------------------------------------
+
+def seed_convergence(df: pd.DataFrame) -> go.Figure:
+    """One seed's convergence — best objective, incumbent CR and incumbent RSE
+    vs function evaluations, one line per config. `objective` is shown as the
+    running best (cumulative minimum) so the curve is monotone for every family.
+    """
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04)
+    if df.empty:
+        return fig
+
+    configs = _config_order(df)
+    palette = colors_for([family for *_, family in configs])
+    for (run, config_id, label, _family), color in zip(configs, palette):
+        g = df[(df["run"] == run) & (df["config_id"] == config_id)].sort_values("n_evals")
+        x = g["n_evals"].values
+        _line(fig, x, g["objective"].cummin().values, color, label,
+              col=1, row=1, showlegend=True)
+        _line(fig, x, g["inc_cr"].values, color, label, col=1, row=2)
+        _line(fig, x, g["inc_rse"].values, color, label, col=1, row=3)
+
+    fig.update_yaxes(title_text="best objective", row=1, col=1)
+    fig.update_yaxes(title_text="incumbent CR", row=2, col=1)
+    fig.update_yaxes(title_text="incumbent RSE", row=3, col=1)
+    fig.update_xaxes(title_text="Function evaluations", row=3, col=1, rangemode="tozero")
+    fig.update_yaxes(showgrid=False)
+    fig.update_layout(
+        template="plotly_white", height=560,
+        margin=dict(l=0, r=0, t=20, b=0), legend=_LEGEND,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# BOSS GP-surrogate diagnostics — fed by app.diagnostics cached frames
+# ---------------------------------------------------------------------------
+
+def gp_calibration(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
+    """One-step-ahead GP calibration — predicted mean ±2σ against the actual
+    target (top), and the standardised residual z = (actual − mean)/σ (bottom).
+    z within ±2 ≈ honest uncertainty."""
+    k = d["k"].values
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06)
+    fig.add_trace(go.Scatter(x=k, y=d["mu"] + 2 * d["sd"], mode="lines", line_width=0,
+                             showlegend=False, hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["mu"] - 2 * d["sd"], mode="lines", line_width=0,
+                             fill="tonexty", fillcolor="rgba(255,127,14,0.2)",
+                             name="±2σ", hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["mu"], mode="lines", name="GP mean",
+                             line=dict(color="#ff7f0e")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["y"], mode="markers", name="actual",
+                             marker_color="#1f77b4"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=(d["y"] - d["mu"]) / d["sd"], mode="markers",
+                             marker_color="#1f77b4", showlegend=False), row=2, col=1)
+    for v in (-2, 0, 2):
+        fig.add_hline(y=v, line_dash="dash", line_color="#999", row=2, col=1)
+    fig.update_yaxes(title_text=lab, row=1, col=1)
+    fig.update_yaxes(title_text="z = (y−μ)/σ", row=2, col=1)
+    fig.update_xaxes(title_text="BO step", row=2, col=1)
+    fig.update_yaxes(showgrid=False)
+    fig.update_layout(template="plotly_white", height=480,
+                      margin=dict(l=0, r=0, t=20, b=0), legend=_LEGEND)
+    return fig
+
+
+def gp_hyperparameters(d: pd.DataFrame) -> go.Figure:
+    """GP hyperparameter trajectories — ARD lengthscales per bond (heatmap) and
+    noise / outputscale (log axis), across BO steps."""
+    k = d["k"].values
+    ls = d[[c for c in d.columns if c.startswith("ls")]].values.T
+    fig = make_subplots(rows=2, cols=1, vertical_spacing=0.09, row_heights=[0.6, 0.4])
+    fig.add_trace(go.Heatmap(x=k, y=list(range(ls.shape[0])), z=ls, colorscale="Viridis",
+                             colorbar=dict(len=0.5, y=0.78)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["noise"], mode="lines", name="noise",
+                             line=dict(color="#d62728")), row=2, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["outputscale"], mode="lines", name="outputscale",
+                             line=dict(color="#9467bd")), row=2, col=1)
+    fig.update_yaxes(title_text="bond dim", row=1, col=1)
+    fig.update_yaxes(title_text="value", type="log", row=2, col=1)
+    fig.update_xaxes(title_text="BO step", row=2, col=1)
+    fig.update_layout(
+        template="plotly_white", height=480, margin=dict(l=0, r=0, t=20, b=0),
+        # Legend dropped to the lower (noise/outputscale) plot so it clears the
+        # heatmap's colorbar above.
+        legend=dict(orientation="v", x=1.01, xanchor="left", y=0.36,
+                    yanchor="top", font=dict(size=10)),
+    )
+    return fig
+
+
+def gp_acquisition(d: pd.DataFrame) -> go.Figure:
+    """Acquisition behaviour — log-EI at the chosen point (declining = search
+    maturing) and the GP σ there (explore ↔ exploit), across BO steps."""
+    k = d["k"].values
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06)
+    fig.add_trace(go.Scatter(x=k, y=d["lei"], mode="lines", line=dict(color="#8c564b")),
+                  row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["sd"], mode="lines", line=dict(color="#17becf")),
+                  row=2, col=1)
+    fig.update_yaxes(title_text="log-EI at pick", row=1, col=1)
+    fig.update_yaxes(title_text="GP σ at pick", row=2, col=1)
+    fig.update_xaxes(title_text="BO step", row=2, col=1)
+    fig.update_yaxes(showgrid=False)
+    fig.update_layout(template="plotly_white", height=420, showlegend=False,
+                      margin=dict(l=0, r=0, t=20, b=0))
+    return fig
+
+
+def gp_parity(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
+    """One-step-ahead parity — GP-predicted vs actual target, one point per BO
+    step, with the y = x line. Spearman ρ quantifies how well the GP ranks."""
+    rho = spearmanr(d["y"], d["mu"])[0]
+    lo = float(min(d["y"].min(), d["mu"].min()))
+    hi = float(max(d["y"].max(), d["mu"].max()))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", showlegend=False,
+                             hoverinfo="skip", line=dict(color="#999", dash="dash")))
+    fig.add_trace(go.Scatter(x=d["y"], y=d["mu"], mode="markers",
+                             marker_color="#1f77b4", showlegend=False))
+    fig.update_xaxes(title_text=f"actual {lab}")
+    fig.update_yaxes(title_text=f"predicted {lab}", showgrid=False)
+    fig.update_layout(template="plotly_white", height=420,
+                      margin=dict(l=0, r=0, t=40, b=0),
+                      title=f"predicted vs actual  ·  Spearman ρ = {rho:.3f}")
+    return fig
+
+
+def rse_distributions(rse, cr) -> go.Figure:
+    """RSE landscape — RSE and log-RSE histograms, plus log-RSE against CR.
+    Shows whether log(RSE) has the dynamic range to be modelled, and whether
+    the RSE constraint is active in the low-CR search region."""
+    lrse = np.log(np.clip(rse, 1e-12, None))
+    fig = make_subplots(rows=1, cols=3,
+                        subplot_titles=("RSE", "log RSE", "log RSE vs CR"))
+    fig.add_trace(go.Histogram(x=rse, nbinsx=40, marker_color="#1f77b4"), row=1, col=1)
+    fig.add_trace(go.Histogram(x=lrse, nbinsx=40, marker_color="#ff7f0e"), row=1, col=2)
+    fig.add_trace(go.Scatter(x=cr, y=lrse, mode="markers",
+                             marker=dict(size=5, color="#2ca02c")), row=1, col=3)
+    fig.update_xaxes(title_text="CR", row=1, col=3)
+    fig.update_yaxes(title_text="log RSE", row=1, col=3)
+    fig.update_layout(template="plotly_white", height=360, showlegend=False,
+                      margin=dict(l=0, r=0, t=30, b=0))
     return fig

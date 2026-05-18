@@ -57,7 +57,7 @@ cfg = render_sidebar()
 # Analyze mode — show the merged algorithms table and stop here
 # ---------------------------------------------------------------------------
 
-if cfg.app_mode == "Analyze":
+if cfg.app_mode == "Analysis":
     render_analyze_main(cfg, ROOT)
     st.stop()
 

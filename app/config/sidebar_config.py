@@ -7,7 +7,7 @@ from app.config.algo_config import AlgoConfig
 
 @dataclass
 class SidebarConfig:
-    # Top-level dashboard mode: "Deployment" (configure + launch) or "Analyze" (inspect runs)
+    # Top-level dashboard mode: "Deployment" (configure + launch) or "Analysis" (inspect runs)
     app_mode: str = "Deployment"
     # ProblemConfig — fully identified by problem_id; load via app.problem_io.load_problem
     problem_id: str | None = None
