@@ -239,6 +239,10 @@ def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None
         st.info("No BOSS results at this seed — GP diagnostics are BOSS-only.")
         return
 
+    # Loss-threshold value from the Results Summary controls — marked on the
+    # RSE-distribution panels (None until that tab has rendered its controls).
+    thr = st.session_state.get("loss_threshold")
+
     # One collapsible section per BOSS config — its own Generate button, plots
     # cached. The st.progress bar fills as the refit reports its 0–1 fraction.
     for r in boss.itertuples(index=False):
@@ -261,7 +265,7 @@ def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None
             dr = load_gp_diagnostics(cd, "rse")
             rse, cr = load_rse_cr(cd)
 
-            t_obj, t_rse = st.tabs(["Objectives", "RSE"])
+            t_obj, t_rse, t_fit = st.tabs(["Objectives", "RSE", "Fitting"])
             with t_obj:
                 oc1 = st.columns(2)
                 with oc1[0]:
@@ -298,5 +302,10 @@ def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None
                                     key=f"rpar_{seed}_{lab}")
                 with rc2[1]:
                     st.caption("RSE distribution")
-                    st.plotly_chart(figures.rse_distributions(rse, cr), width="stretch",
-                                    key=f"rdist_{seed}_{lab}")
+                    st.plotly_chart(figures.rse_distributions(rse, cr, thr),
+                                    width="stretch", key=f"rdist_{seed}_{lab}")
+            with t_fit:
+                st.caption("GP-fitting procedure — optimizer per refit and "
+                           "marginal-likelihood convergence. Secondary diagnostic.")
+                st.plotly_chart(figures.fit_report(do, dr), width="stretch",
+                                key=f"fit_{seed}_{lab}")

@@ -145,12 +145,13 @@ def incumbent_cr_rse(
     *,
     use_efficiency: bool = False,
 ) -> go.Figure:
-    """2×2 — the incumbent's compression ratio (top row) and RSE (bottom row),
+    """2×2 — the incumbent's compression ratio (top row) and λ·RSE (bottom row),
     each vs number of function evaluations (left) and cumulative runtime (right).
     The incumbent is the structure achieving the running-best objective so far;
-    one line per config. Axes are shared (x down columns, y across rows) so the
-    four panels stay compact and read together. `use_efficiency` swaps the top
-    row from raw CR to efficiency (CR ÷ the generating structure's CR).
+    one line per config. The RSE row is weighted by the config's objective λ so
+    it reads on the same scale as its CR + λ·RSE contribution. Axes are shared
+    (x down columns, y across rows) so the four panels stay compact and read
+    together. `use_efficiency` swaps the top row from raw CR to efficiency.
     """
     fig = make_subplots(
         rows=2, cols=2, shared_xaxes=True, shared_yaxes=True,
@@ -165,8 +166,10 @@ def incumbent_cr_rse(
     palette = colors_for([family for *_, family in configs])
 
     for (run, config_id, label, _family), color in zip(configs, palette):
-        g = df[(df["run"] == run) & (df["config_id"] == config_id)].groupby("n_evals")
-        cr, rse = g[inc_col].mean(), g["inc_rse"].mean()
+        sel = df[(df["run"] == run) & (df["config_id"] == config_id)]
+        lam = float(sel["lambda_fitness"].iloc[0])
+        g = sel.groupby("n_evals")
+        cr, rse = g[inc_col].mean(), g["inc_rse"].mean() * lam
         x_e, x_t = cr.index.values, g["cum_time_s"].mean().values
         _line(fig, x_e, cr.values, color, label, row=1, col=1, showlegend=True)
         _line(fig, x_t, cr.values, color, label, row=1, col=2)
@@ -177,7 +180,7 @@ def incumbent_cr_rse(
     fig.update_xaxes(title_text="Function evaluations", row=2, col=1)
     fig.update_xaxes(title_text="Cumulative runtime (s)", row=2, col=2)
     fig.update_yaxes(title_text=cr_label, row=1, col=1)
-    fig.update_yaxes(title_text="RSE", row=2, col=1)
+    fig.update_yaxes(title_text="λ·RSE", row=2, col=1)
     fig.update_yaxes(rangemode="nonnegative")
     fig.update_yaxes(showgrid=False)
     fig.update_layout(
@@ -199,9 +202,10 @@ def cr_runtime_scatter(
     threshold_mode: str = "fade",
 ) -> go.Figure:
     """Scatter of final compression ratio (or efficiency) vs runtime-to-incumbent
-    — one marker per (config, seed), coloured by config. Marker size grows with
-    the incumbent RSE. Points whose RSE exceeds `loss_threshold` are either faded
-    (`threshold_mode="fade"`) or dropped (`"hide"`).
+    — one marker per (config, seed), coloured by config, with the seed number
+    printed inside. Marker size grows with the incumbent RSE. Points whose RSE
+    exceeds `loss_threshold` are either faded (`threshold_mode="fade"`) or
+    dropped (`"hide"`).
     """
     y_col = "inc_efficiency" if use_efficiency else "inc_cr"
     y_label = "Efficiency" if use_efficiency else "Compression ratio"
@@ -232,17 +236,20 @@ def cr_runtime_scatter(
     r_span = r_hi - r_lo
 
     def _sizes(values) -> list[float]:
-        """Marker diameter (px) ∝ RSE."""
+        """Marker diameter (px) ∝ RSE — floored well above the seed label's
+        size so even the smallest marker stays readable."""
         if r_span <= 0:
-            return [16.0] * len(values)
-        return [8.0 + 24.0 * (v - r_lo) / r_span for v in values]
+            return [24.0] * len(values)
+        return [18.0 + 22.0 * (v - r_lo) / r_span for v in values]
 
     for (run, config_id, label, _family), color in zip(configs, palette):
         sub = finals[(finals["run"] == run) & (finals["config_id"] == config_id)]
         opacity = [1.0 if r <= loss_threshold else 0.2 for r in sub["inc_rse"]]
         fig.add_trace(go.Scatter(
-            x=sub["runtime"], y=sub[y_col], mode="markers",
+            x=sub["runtime"], y=sub[y_col], mode="markers+text",
             name=label, legendgroup=label,
+            text=sub["seed"], textposition="middle center",
+            textfont=dict(color="white", size=10),
             marker=dict(color=color, size=_sizes(sub["inc_rse"]), opacity=opacity,
                         line=dict(width=0.5, color="white")),
             customdata=sub[["seed", "inc_rse"]],
@@ -439,10 +446,14 @@ def gp_parity(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
     return fig
 
 
-def rse_distributions(rse, cr) -> go.Figure:
+def rse_distributions(rse, cr, threshold=None) -> go.Figure:
     """RSE landscape — RSE and log-RSE histograms, plus log-RSE against CR.
     Shows whether log(RSE) has the dynamic range to be modelled, and whether
-    the RSE constraint is active in the low-CR search region."""
+    the RSE constraint is active in the low-CR search region.
+
+    `threshold` (a loss-threshold RSE value) is marked on every panel — raw on
+    the RSE histogram, log-transformed (vertical / horizontal) on the others.
+    """
     lrse = np.log(np.clip(rse, 1e-12, None))
     fig = make_subplots(rows=1, cols=3,
                         subplot_titles=("RSE", "log RSE", "log RSE vs CR"))
@@ -450,8 +461,48 @@ def rse_distributions(rse, cr) -> go.Figure:
     fig.add_trace(go.Histogram(x=lrse, nbinsx=40, marker_color="#ff7f0e"), row=1, col=2)
     fig.add_trace(go.Scatter(x=cr, y=lrse, mode="markers",
                              marker=dict(size=5, color="#2ca02c")), row=1, col=3)
+    if threshold and threshold > 0:
+        kw = dict(line_color="#d62728", line_dash="dash", line_width=1.5)
+        fig.add_vline(x=threshold, row=1, col=1, **kw)
+        fig.add_vline(x=float(np.log(threshold)), row=1, col=2, **kw)
+        fig.add_hline(y=float(np.log(threshold)), row=1, col=3, **kw)
     fig.update_xaxes(title_text="CR", row=1, col=3)
     fig.update_yaxes(title_text="log RSE", row=1, col=3)
     fig.update_layout(template="plotly_white", height=360, showlegend=False,
                       margin=dict(l=0, r=0, t=30, b=0))
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# GP-fitting procedure report
+# ---------------------------------------------------------------------------
+
+def fit_report(do: pd.DataFrame, dr: pd.DataFrame) -> go.Figure:
+    """Secondary report on how the one-step-ahead GP refits behaved: which
+    optimizer each step landed on (L-BFGS first try, L-BFGS after a flaky
+    retry, or the Adam fallback) and the fitted per-point marginal
+    log-likelihood over the run. A higher, flatter MLL curve means the fit
+    converged consistently. Not a model-quality plot — fitting health only.
+    """
+    fig = make_subplots(
+        rows=1, cols=2, column_widths=[0.4, 0.6],
+        subplot_titles=("Optimizer per step", "Fit marginal log-likelihood"),
+    )
+    cats = ["L-BFGS", "L-BFGS (retried)", "Adam fallback"]
+    for df, name, color in ((do, "objective", "#1f77b4"), (dr, "log RSE", "#ff7f0e")):
+        opt, att = df["optimizer"], df["fit_attempts"]
+        counts = [int(((opt == "lbfgs") & (att == 1)).sum()),
+                  int(((opt == "lbfgs") & (att > 1)).sum()),
+                  int((opt == "adam").sum())]
+        fig.add_trace(go.Bar(x=cats, y=counts, name=name, legendgroup=name,
+                             marker_color=color, text=counts, textposition="auto"),
+                      row=1, col=1)
+        fig.add_trace(go.Scatter(x=df["k"], y=df["mll"], mode="lines", name=name,
+                                 legendgroup=name, showlegend=False,
+                                 line_color=color), row=1, col=2)
+    fig.update_yaxes(title_text="steps", row=1, col=1)
+    fig.update_xaxes(title_text="BO step", row=1, col=2)
+    fig.update_yaxes(title_text="MLL / point", row=1, col=2)
+    fig.update_layout(template="plotly_white", height=320, barmode="group",
+                      margin=dict(l=0, r=0, t=30, b=0), legend=_LEGEND)
     return fig

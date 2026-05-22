@@ -97,8 +97,9 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
         use_efficiency = metric == "Efficiency"
     loss_threshold = st.sidebar.number_input(
         "Loss threshold (RSE)", min_value=0.0, max_value=rse_max, value=rse_max,
-        step=max(rse_max / 50, 1e-4), format="%.4f",
-        help="On the runtime scatter, points whose incumbent RSE exceeds this.",
+        step=max(rse_max / 50, 1e-4), format="%.4f", key="loss_threshold",
+        help="On the runtime scatter, points whose incumbent RSE exceeds this; "
+             "also marked on the RSE-distribution diagnostic.",
     )
     threshold_mode = st.sidebar.radio(
         "Above threshold", ["Fade", "Hide"], horizontal=True,
@@ -166,7 +167,7 @@ def render_results_summary(repo_root: Path) -> None:
         )
 
     if not search_df.empty:
-        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & RSE of the best-objective structure so far.")
+        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & λ·RSE of the best-objective structure so far.")
         st.plotly_chart(
             figures.incumbent_cr_rse(
                 search_df, use_efficiency=controls.use_efficiency,

@@ -4,7 +4,8 @@ diagnostics.py — BOSS GP-surrogate diagnostics, cached per (config, seed).
 `generate_gp_diagnostics` refits two GPs one-step-ahead for a completed BOSS
 seed — one on the search objective, one on log-RSE: at each BO step the GP is
 fit on the first k training points and predicts point k, recording predicted
-mean/std, log-EI (objective only), and kernel hyperparameters. The refit is
+mean/std, log-EI (objective only), kernel hyperparameters, and the fitting
+procedure (optimizer used, marginal log-likelihood). The refit is
 expensive (one GP fit per BO step per target), so the result is cached under
 `<config_dir>/analysis/` and reloaded on later visits.
 """
@@ -53,9 +54,11 @@ def generate_gp_diagnostics(
     # torch / botorch are heavy and only needed when (re)generating diagnostics.
     import torch
     from botorch.acquisition.analytic import LogExpectedImprovement
+    from botorch.exceptions.errors import ModelFittingError
     from botorch.fit import fit_gpytorch_mll
     from botorch.models import SingleTaskGP
     from botorch.models.transforms import Standardize
+    from botorch.optim.fit import fit_gpytorch_mll_torch
     from gpytorch.kernels import MaternKernel, ScaleKernel
     from gpytorch.mlls import ExactMarginalLogLikelihood
 
@@ -68,13 +71,41 @@ def generate_gp_diagnostics(
     d, n = X.shape[1], len(X)
 
     def _fit(xk, yk):
-        gp = SingleTaskGP(xk, yk, outcome_transform=Standardize(m=1),
-                          covar_module=ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=d)))
+        """Fit the SingleTaskGP and report the fitting procedure used. The
+        scipy L-BFGS fit occasionally aborts in line search
+        (`ABNORMAL_TERMINATION_IN_LNSRCH`) on harder targets such as log-RSE —
+        it is flaky, so retry it a few times, then fall back to the Adam
+        optimizer so one bad step never aborts the whole scan. Returns
+        `(gp, optimizer, attempts, mll)` where `optimizer` is 'lbfgs' or
+        'adam', `attempts` counts fits tried, and `mll` is the fitted
+        per-point marginal log-likelihood."""
+        def _new():
+            return SingleTaskGP(
+                xk, yk, outcome_transform=Standardize(m=1),
+                covar_module=ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=d)))
+
+        def _score(gp):
+            mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+            gp.train()
+            with torch.no_grad():
+                v = float(mll(gp(*gp.train_inputs), gp.train_targets))
+            gp.eval()
+            return v
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            for attempt in range(1, 4):
+                gp = _new()
+                try:
+                    fit_gpytorch_mll(ExactMarginalLogLikelihood(gp.likelihood, gp),
+                                     optimizer_kwargs={"options": {"maxiter": 200}})
+                    return gp.eval(), "lbfgs", attempt, _score(gp)
+                except ModelFittingError:
+                    pass
+            gp = _new()
             fit_gpytorch_mll(ExactMarginalLogLikelihood(gp.likelihood, gp),
-                             optimizer_kwargs={"options": {"maxiter": 200}})
-        return gp.eval()
+                             optimizer=fit_gpytorch_mll_torch)
+            return gp.eval(), "adam", 4, _score(gp)
 
     total, done = 2 * (n - ninit), 0
 
@@ -82,13 +113,14 @@ def generate_gp_diagnostics(
         nonlocal done
         rows = []
         for k in range(ninit, n):
-            gp = _fit(X[:k], Y[:k])
+            gp, optimizer, attempts, mll = _fit(X[:k], Y[:k])
             post = gp.posterior(X[k:k + 1])
             ls = gp.covar_module.base_kernel.lengthscale.detach().flatten().numpy()
             row = dict(
                 k=k, y=float(Y[k]), mu=float(post.mean), sd=float(post.variance.sqrt()),
                 noise=float(gp.likelihood.noise),
                 outputscale=float(gp.covar_module.outputscale),
+                optimizer=optimizer, fit_attempts=attempts, mll=mll,
                 **{f"ls{i}": float(ls[i]) for i in range(d)},
             )
             if with_ei:

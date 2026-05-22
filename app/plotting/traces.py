@@ -9,7 +9,8 @@ can group by config.
 Returned columns:
     run, config_id, label, policy, family, seed, phase, n_evals, objective,
     cr, rse, efficiency, inc_cr, inc_rse, inc_efficiency, inc_cum_time_s,
-    target_cr, step_time_s, cum_time_s
+    target_cr, step_time_s, cum_time_s, lambda_fitness
+`lambda_fitness` is the objective weight λ in CR + λ·RSE (NaN for MABSS).
 `n_evals` is the 1-based function-evaluation count (one trace row = one
 decomposition). `objective` is each algorithm's search objective — RSE for
 MABSS, CR + λ·RSE for non-MABSS methods (running best for the latter). `cr`/`rse` are
@@ -41,7 +42,7 @@ _OUT_COLS = [
     "run", "config_id", "label", "policy", "family", "seed", "phase",
     "n_evals", "objective", "cr", "rse", "efficiency",
     "inc_cr", "inc_rse", "inc_efficiency", "inc_cum_time_s",
-    "target_cr", "step_time_s", "cum_time_s",
+    "target_cr", "step_time_s", "cum_time_s", "lambda_fitness",
 ]
 
 
@@ -175,6 +176,8 @@ def load_traces(
             df["label"] = ac["label"]
             df["policy"] = ac["policy"]
             df["family"] = ac["family"]
+            # Objective weight of CR + λ·RSE — keyed per family; MABSS has no λ.
+            df["lambda_fitness"] = ac.get(f"{ac['family']}_lambda_fitness", float("nan"))
             df["seed"] = seed
             frames.append(df)
 
