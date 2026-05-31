@@ -69,6 +69,13 @@ def main():
     parser.add_argument("--maxiter-tn", type=int, default=1000)
     parser.add_argument("--n-runs", type=int, default=1)
     parser.add_argument("--acqf", type=str, default="ei", choices=["ei", "ucb"])
+    parser.add_argument(
+        "--kernel",
+        type=str,
+        default="matern",
+        choices=["matern", "weighted_shortest_path", "weighted_sp"],
+        help="GP kernel used by BOSS.",
+    )
     parser.add_argument("--ucb-beta", type=float, default=2.0)
     parser.add_argument(
         "--lamda", type=float, default=1.0,
@@ -127,6 +134,7 @@ def main():
         momentum=args.momentum,
         loss_patience=args.loss_patience,
         lr_patience=args.lr_patience,
+        kernel=args.kernel,
         seed=args.seed,
         verbose=True,
     )

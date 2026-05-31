@@ -12,13 +12,14 @@ from botorch.fit import fit_gpytorch_mll
 from botorch.models import SingleTaskGP
 from botorch.models.transforms import Standardize
 from botorch.acquisition.analytic import LogExpectedImprovement, UpperConfidenceBound
-from botorch.optim import optimize_acqf
+from botorch.optim import optimize_acqf, optimize_acqf_discrete_local_search
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize
 from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
+from tnss.kernels.weighted_shortest_path import WeightedShortestPathKernel
 from tnss.utils import triu_to_adj_matrix
 
 
@@ -39,6 +40,15 @@ def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
     t0 = time.time()
     tgt_np = target.numpy() if hasattr(target, 'numpy') else target
     tgt_cp = cp.asarray(tgt_np)
+    # Normalize the target to unit norm before decomposition. RSE is
+    # scale-invariant (||recon - target|| / ||target||), so the loss
+    # trajectory and final best_rse are identical to the unnormalized case,
+    # but the optimization landscape is much friendlier — SGD/Adam start
+    # from O(1) loss instead of ||target||/||cores_init|| (often 1e3-1e4),
+    # which avoids early LR-decay thrash and divergence. Reconstruction
+    # is rescaled back to the original magnitude before returning.
+    tgt_norm = float(cp.linalg.norm(tgt_cp))
+    tgt_cp = tgt_cp / tgt_norm
     A_cp = cp.asarray(A_int.numpy() if hasattr(A_int, 'numpy') else A_int)
     ntwrk = cuTensorNetwork(A_cp, backend=backend, dtype=dtype)
     cr = float(ntwrk.network_size()) / float(ntwrk.target_size())
@@ -58,7 +68,7 @@ def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
         if best_rse < min_rse:
             break
     eval_time = time.time() - t0
-    return cr, best_rse, eval_time, ntwrk.contract(), best_losses, ntwrk.contraction_stats
+    return cr, best_rse, eval_time, ntwrk.contract() * tgt_norm, best_losses, ntwrk.contraction_stats
 
 
 class BOSS:
@@ -78,8 +88,15 @@ class BOSS:
     min_rse     : early-stopping threshold per TN eval
     maxiter_tn  : FCTN-PAM iterations per evaluation
     n_runs      : restarts per candidate (best is kept)
-    raw_samples : L-BFGS-B random restarts for acqf
-    num_restarts: gradient starts for acqf optimizer
+    raw_samples : random restarts/initial samples for acqf optimizer
+    num_restarts: multistart count for acqf optimizer
+    kernel      : 'matern' (plain ARD over rank vector) or
+                  'weighted_shortest_path' (shortest-path kernel)
+    wsp_mode    : shortest-path kernel variant, 'matern', 'bogrape', or
+                  'soft' (only used when kernel is weighted_shortest_path)
+    acqf_optimizer: 'mip' (discrete local search over the integer rank
+                  lattice; default; works with non-differentiable kernels)
+                  or 'gradient' (continuous L-BFGS-B via optimize_acqf)
     verbose     : print per-iteration summary
     """
 
@@ -102,6 +119,9 @@ class BOSS:
         lr_patience: int = 250,
         raw_samples: int = 256,
         num_restarts: int = 10,
+        kernel: str = "matern",
+        wsp_mode: str = "matern",
+        acqf_optimizer: str = "mip",
         seed: int | None = None,
         verbose: bool = True,
     ):
@@ -127,6 +147,19 @@ class BOSS:
         self.budget = budget
         self.raw_samples = raw_samples
         self.num_restarts = num_restarts
+        assert kernel in ("matern", "weighted_shortest_path", "weighted_sp"), (
+            "kernel must be 'matern' or 'weighted_shortest_path', "
+            f"got {kernel!r}"
+        )
+        assert wsp_mode in ("matern", "bogrape", "soft"), (
+            f"wsp_mode must be 'matern', 'bogrape', or 'soft', got {wsp_mode!r}"
+        )
+        assert acqf_optimizer in ("mip", "gradient"), (
+            f"acqf_optimizer must be 'mip' or 'gradient', got {acqf_optimizer!r}"
+        )
+        self.kernel = kernel
+        self.wsp_mode = wsp_mode
+        self.acqf_optimizer = acqf_optimizer
         self.seed = seed
         self.verbose = verbose
         
@@ -138,8 +171,25 @@ class BOSS:
         self.std_bounds = torch.zeros_like(self.bounds_int)
         self.std_bounds[1] = 1.0
 
-        # Kernel: Matern-2.5 with ARD (one lengthscale per bond)
-        self._kernel = lambda: ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=self.D))
+        # Integer rank lattice in normalized space: rank r in {1..max_rank} maps
+        # to (r-1)/(max_rank-1) via `_to_int`'s inverse, so the feasible choices
+        # per dimension are linspace(0, 1, max_rank). Used by the discrete
+        # ("mip") acqf optimizer, which only evaluates (never differentiates)
+        # the acquisition and so is compatible with non-differentiable kernels.
+        choices = torch.linspace(0.0, 1.0, max_rank, dtype=torch.double)
+        self._discrete_choices = [choices] * self.D
+
+        # Kernel over the normalized upper-triangular rank vector.
+        if kernel == "matern":
+            self._kernel = lambda: ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=self.D))
+        else:
+            self._kernel = lambda: ScaleKernel(
+                WeightedShortestPathKernel(
+                    num_nodes=N,
+                    weight_bounds=(1.0, float(self.max_rank)),
+                    mode=self.wsp_mode,
+                )
+            )
 
         # Results
         self.rows: list[dict] = []
@@ -331,13 +381,25 @@ class BOSS:
             acqf = LogExpectedImprovement(model=model, best_f=best_f, maximize=False)
         with warnings.catch_warnings(), gpsttngs.fast_pred_samples(state=True):
             warnings.simplefilter("ignore")
-            cand, _ = optimize_acqf(
-                acq_function=acqf,
-                bounds=self.std_bounds,
-                q=1,
-                num_restarts=self.num_restarts,
-                raw_samples=self.raw_samples,
-            )
+            if self.acqf_optimizer == "gradient":
+                cand, _ = optimize_acqf(
+                    acq_function=acqf,
+                    bounds=self.std_bounds,
+                    q=1,
+                    num_restarts=self.num_restarts,
+                    raw_samples=self.raw_samples,
+                )
+            else:
+                # Discrete local search over the integer rank lattice. Only
+                # evaluates the acquisition, so it works with the
+                # (non-differentiable) shortest-path kernels.
+                cand, _ = optimize_acqf_discrete_local_search(
+                    acq_function=acqf,
+                    discrete_choices=self._discrete_choices,
+                    q=1,
+                    num_restarts=self.num_restarts,
+                    raw_samples=self.raw_samples,
+                )
         return cand.detach()
 
     def _to_int(self, x_std: Tensor) -> Tensor:

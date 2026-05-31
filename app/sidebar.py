@@ -56,7 +56,7 @@ def render_sidebar() -> SidebarConfig:
 
 def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
     cfg.extend_mode = st.sidebar.toggle(
-        "Extend existing run", value=False,
+        "Extend existing run", value=False, key="extend_mode_toggle",
         help="Add new algorithm configs (and optionally new seeds) to an existing run. "
              "The run's problem is locked.",
     )
@@ -74,7 +74,7 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
 
     st.sidebar.markdown("### General Settings")
     _sc1, _sc2 = st.sidebar.columns(2)
-    cfg.seeds_str = _sc1.text_input("Random Seeds (csv)", "1", help=SEEDS)
+    cfg.seeds_str = _sc1.text_input("Random Seeds (csv)", "1", key="seeds_str_input", help=SEEDS)
     cfg.cuda_device = _sc2.selectbox("CUDA Device", [0, 1], index=0, help=CUDA_DEVICE)
     if cfg.extend_mode:
         cfg.overwrite = st.sidebar.toggle(

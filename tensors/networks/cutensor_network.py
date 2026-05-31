@@ -413,8 +413,8 @@ class cuTensorNetwork:
         tol=None,
         pct_loss_improvment=0.025,
         init_lr=None,
-        loss_patience=2500,
-        lr_patience=250,
+        loss_patience=500,
+        lr_patience=50,
         max_epochs=25000,
         momentum=0.5,
         method="sgd",
@@ -427,7 +427,7 @@ class cuTensorNetwork:
         kwargs["use_adam"] = use_adam
 
         if init_lr is None:
-            init_lr = 0.002 if use_adam else 0.01
+            init_lr = 0.01
 
         # --- Optional warm-start pass (modifies self.cores in-place) ---
         warm_losses = []
@@ -490,9 +490,9 @@ class cuTensorNetwork:
         target,
         tol=None,
         pct_loss_improvment=0.025,
-        init_lr=0.05,
-        loss_patience=2500,
-        lr_patience=250,
+        init_lr=0.01,
+        loss_patience=500,
+        lr_patience=50,
         max_epochs=25000,
         momentum=0.5,
         **kwargs,
@@ -572,9 +572,9 @@ class cuTensorNetwork:
         target,
         tol=0.01,
         pct_loss_improvment=0.025,
-        init_lr=0.05,
-        loss_patience=2500,
-        lr_patience=250,
+        init_lr=0.01,
+        loss_patience=500,
+        lr_patience=50,
         max_epochs=25000,
         momentum=0.55,
         beta1=0.9,

@@ -250,6 +250,21 @@ def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None
         cd = (runs_dir / r.run / f"seed_{seed}"
               / f"{r.config_id}_{r.policy.replace('-', '_')}")
         with st.expander(f"**{lab}**  ·  `{r.policy}`", expanded=False):
+            dt_path = cd / "decomp_traces.json"
+            if dt_path.exists():
+                st.caption("Decomposition loss per evaluation — darker = later step.")
+                with open(dt_path) as f:
+                    decomp_traces = json.load(f)
+                tr = pd.read_csv(cd / "traces.csv")
+                cr_by_step = {int(s): float(c) for s, c in zip(tr["step"], tr["cr"])}
+                dcol, _ = st.columns(2)
+                with dcol:
+                    st.plotly_chart(
+                        figures.decomp_loss_curves(decomp_traces, cr_by_step),
+                        width="stretch", key=f"decomp_{seed}_{lab}")
+            else:
+                st.caption("No decomposition traces saved for this result.")
+
             if not has_gp_diagnostics(cd):
                 if not st.button("Generate Diagnostics", key=f"gen_{seed}_{lab}",
                                  help="One-step-ahead GP refit (objective + RSE) — "

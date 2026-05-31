@@ -55,10 +55,10 @@ class AlgoConfig:
     # Decomposition (every family runs a TN decomposition under the hood)
     decomp_method: str = "adam"
     decomp_epochs: int = 2000
-    decomp_init_lr: float | None = 0.1
+    decomp_init_lr: float | None = 0.01
     decomp_momentum: float = 0.9
-    decomp_loss_patience: int = 1000
-    decomp_lr_patience: int = 250
+    decomp_loss_patience: int = 500
+    decomp_lr_patience: int = 50
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

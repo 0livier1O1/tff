@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
 from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
@@ -505,4 +506,40 @@ def fit_report(do: pd.DataFrame, dr: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(title_text="MLL / point", row=1, col=2)
     fig.update_layout(template="plotly_white", height=320, barmode="group",
                       margin=dict(l=0, r=0, t=30, b=0), legend=_LEGEND)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Decomposition loss curves
+# ---------------------------------------------------------------------------
+
+def decomp_loss_curves(traces: list[dict],
+                       cr_by_step: dict[int, float] | None = None) -> go.Figure:
+    """Tensor-decomposition loss curves — one line per evaluation, raw loss
+    against optimiser epoch on a linear y-axis. Lines are shaded along a
+    sequential colorscale, darker for later search steps, so the progression
+    of the search reads at a glance. No legend (one trace per evaluation).
+    If `cr_by_step` is given, the per-step CR is shown in the hover tooltip.
+    """
+    fig = go.Figure()
+    n = len(traces)
+    shades = sample_colorscale(
+        "Blues", [0.3 + 0.7 * i / max(n - 1, 1) for i in range(n)])
+    for color, t in zip(shades, traces):
+        losses = t["losses"]
+        cr_str = ""
+        if cr_by_step is not None:
+            cr = cr_by_step.get(int(t["step"]))
+            if cr is not None:
+                cr_str = f"<br>CR {cr:.4g}"
+        fig.add_trace(go.Scattergl(
+            x=list(range(len(losses))), y=losses, mode="lines",
+            line=dict(color=color, width=1), showlegend=False,
+            hovertemplate=(f"step {t['step']}<br>epoch %{{x}}<br>"
+                           f"loss %{{y:.4g}}{cr_str}<extra></extra>"),
+        ))
+    fig.update_xaxes(title_text="Epoch", rangemode="tozero")
+    fig.update_yaxes(title_text="Decomposition loss", rangemode="tozero")
+    fig.update_layout(template="plotly_white", height=_HEIGHT,
+                      margin=dict(l=0, r=0, t=20, b=0), showlegend=False)
     return fig
