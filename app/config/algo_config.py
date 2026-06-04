@@ -61,9 +61,9 @@ class AlgoConfig:
     # live on the base class (one name, not boss_budget/cboss_budget/…). A family
     # that doesn't use one simply ignores it; subclasses override only the
     # defaults that differ. Defaults below are the common case.
-    budget: int = 100
+    budget: int = 200
     max_rank: int = 10
-    n_init: int = 10
+    n_init: int = 20
     init_method: str = "sobol"
     n_runs: int = 1
     # Doubles as the decomposition early-stop threshold AND (for cBOSS) the
@@ -140,8 +140,6 @@ class MABSSConfig(AlgoConfig):
 @dataclass(kw_only=True)
 class BOSSConfig(AlgoConfig):
     family: str = "boss"
-
-    budget: int = 200    # shared field, BOSS default differs
     # max_rank, n_init, n_runs, min_rse, ucb_beta, lambda_fitness, kernel: base defaults
 
 
@@ -154,7 +152,6 @@ class CBOSSConfig(AlgoConfig):
     family: str = "cboss"
 
     # Shared fields whose cBOSS defaults differ from the base
-    n_init: int = 20
     init_method: str = "lhs"                # 'lhs' | 'sobol'  (the init design)
     feasible_rse: float = 1e-3              # feasibility threshold + decomp early-stop
     # budget(100)/max_rank/n_runs/lambda_fitness/kernel: base defaults
@@ -185,7 +182,6 @@ class CBOSSConfig(AlgoConfig):
 class TnALEConfig(AlgoConfig):
     family: str = "tnale"
 
-    budget: int = 200    # shared field, TnALE default differs
     # max_rank, n_runs, min_rse, lambda_fitness, init_method("sobol"), n_init: base defaults
 
     tnale_topology: str = "ring"
@@ -208,7 +204,6 @@ class TnALEConfig(AlgoConfig):
 class RandomSearchConfig(AlgoConfig):
     family: str = "random"
 
-    budget: int = 200             # shared field, default differs
     init_method: str = "random"   # shared field, default differs
     # max_rank, n_runs, feasible_rse, lambda_fitness, n_init: base defaults
 

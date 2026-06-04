@@ -141,7 +141,7 @@ def main() -> None:
 
     t0 = time.time()
     progress_file.write_text(
-        json.dumps({"step": 0, "budget": args.budget, "started_at": t0})
+        json.dumps({"phase": "init", "step": 0, "budget": args.budget, "started_at": t0})
     )
     summary, rows = algo.run(progress_file=progress_file)
 

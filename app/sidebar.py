@@ -22,11 +22,11 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import algo_config_from_dict
-from app.config.constants import SEEDS, CUDA_DEVICE, TMUX_SESSION, RUN_NAME
+from app.config.constants import SEEDS, TMUX_SESSION, RUN_NAME
 from app.problem import render_problem_section, _render_problem_summary
 from app.algo_widgets import render_algo_configs
 from app.views.analyze import render_analyze_sidebar
-from app.utils import _list_tmux_sessions
+from app.utils import _list_tmux_sessions, all_gpus, free_gpus
 
 APP_MODES = ["Deployment", "Analysis"]
 
@@ -73,9 +73,14 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
         render_problem_section(cfg, ROOT)
 
     st.sidebar.markdown("### General Settings")
-    _sc1, _sc2 = st.sidebar.columns(2)
-    cfg.seeds_str = _sc1.text_input("Random Seeds (csv)", "1", key="seeds_str_input", help=SEEDS)
-    cfg.cuda_device = _sc2.selectbox("CUDA Device", [0, 1], index=0, help=CUDA_DEVICE)
+    cfg.seeds_str = st.sidebar.text_input("Random Seeds (csv)", "1", key="seeds_str_input", help=SEEDS)
+    _all, _free = all_gpus(), free_gpus()
+    _busy = [g for g in _all if g not in _free]
+    st.sidebar.caption(
+        f"GPUs **{', '.join(map(str, _all))}**"
+        + (f" · busy now: {', '.join(map(str, _busy))}" if _busy else " · all free")
+        + " — jobs run one per free GPU; busy ones are skipped until they clear."
+    )
     if cfg.extend_mode:
         cfg.overwrite = st.sidebar.toggle(
             "Overwrite existing seeds", value=False,

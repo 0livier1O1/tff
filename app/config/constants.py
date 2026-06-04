@@ -15,11 +15,6 @@ SEEDS = (
     "independently, allowing statistical aggregation (mean ± std) across runs."
 )
 
-CUDA_DEVICE = (
-    "GPU index passed as CUDA_VISIBLE_DEVICES to all subprocesses. "
-    "Use this to pin jobs to a specific device on multi-GPU machines."
-)
-
 TMUX_SESSION = (
     "Attach the run script to a live tmux session so the job continues "
     "if the browser disconnects. Start one with `tmux new -s boss`."

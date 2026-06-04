@@ -9,9 +9,10 @@ and read directly from there.
 from __future__ import annotations
 
 import json
-import os
+import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from app.config.algo_config import (
 )
 from app.config.problem_config import ProblemConfig, mint_problem_id, now_iso
 from app.problem_io import load_problem, save_problem, runs_root, target_path_for, adj_path_for
-from app.utils import _write_run_script, _script_alive
+from app.utils import _script_alive
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +355,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         json.dump(config_dict, f, indent=4)
 
     jobs: list[dict] = []
-    cmds: list[list[str]] = []
+    manifest_jobs: list[dict] = []
     for seed in seeds:
         target_path = target_path_for(ROOT, problem, seed)
         adj_path = adj_path_for(ROOT, problem, seed)
@@ -369,12 +370,14 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
                 # leave the stale .done (and stale outputs) behind.
                 shutil.rmtree(algo_dir)
             algo_dir.mkdir(parents=True, exist_ok=True)
+            # Clear stale per-job state so the dashboard doesn't show a previous
+            # attempt's GPU assignment / progress before the dispatcher restarts it.
             (algo_dir / "progress.json").unlink(missing_ok=True)
+            (algo_dir / "gpu").unlink(missing_ok=True)
 
             cmd = build_cmd(acfg, problem, seed, algo_dir)
             cmd.extend(["--target-path", target_path, "--adj-path", adj_path])
 
-            cmds.append(cmd)
             jobs.append({
                 "seed": seed,
                 "algo": acfg.policy,
@@ -382,35 +385,50 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
                 "config_id": acfg.config_id,
                 "algo_dir": str(algo_dir),
             })
+            manifest_jobs.append({
+                "cmd": cmd,
+                "algo_dir": str(algo_dir),
+                "label": acfg.label,
+                "seed": seed,
+                "policy": acfg.policy,
+            })
 
-    if not cmds:
+    if not manifest_jobs:
         st.sidebar.warning("All requested seed/config combinations are already complete. Nothing to run.")
         st.stop()
 
-    script = out_dir / "run.sh"
-    _write_run_script(script, cmds, cfg.cuda_device)
+    # One dispatcher per run distributes these jobs across the free GPUs
+    # (one job per GPU) and writes run.pid itself. Replaces the old run.sh.
+    pid_file = out_dir / "run.pid"
+    pid_file.unlink(missing_ok=True)
+    manifest_path = out_dir / "dispatch.json"
+    manifest_path.write_text(json.dumps(
+        {"pid_file": str(pid_file), "cwd": str(ROOT), "jobs": manifest_jobs}, indent=2,
+    ))
 
     if cfg.use_tmux and cfg.tmux_session:
+        dispatch = (
+            f"cd {shlex.quote(str(ROOT))} && "
+            f"{shlex.quote(sys.executable)} -m app.gpu_dispatch {shlex.quote(str(manifest_path))}"
+        )
         subprocess.run(
-            ["tmux", "send-keys", "-t", cfg.tmux_session, f"bash {script}", "Enter"],
+            ["tmux", "send-keys", "-t", cfg.tmux_session, dispatch, "Enter"],
             check=True,
         )
     else:
         with open(out_dir / "run.log", "w") as log:
-            _proc = subprocess.Popen(
-                ["bash", str(script)],
+            subprocess.Popen(
+                [sys.executable, "-m", "app.gpu_dispatch", str(manifest_path)],
                 cwd=str(ROOT),
                 stdout=log,
                 stderr=log,
-                env={**os.environ, "CUDA_VISIBLE_DEVICES": str(cfg.cuda_device)},
             )
-        (out_dir / "run.pid").write_text(str(_proc.pid))
 
     run_record = {
         "run_name": cfg.run_name,
         "problem_id": problem.problem_id,
         "jobs": jobs,
-        "pid_file": str(out_dir / "run.pid"),
+        "pid_file": str(pid_file),
         "submitted_at": time.time(),
     }
     with open(out_dir / "session_state.json", "w") as f:

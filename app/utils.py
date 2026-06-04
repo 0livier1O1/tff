@@ -6,7 +6,6 @@ functions independently testable.
 """
 
 import json
-import shlex
 import subprocess as _subprocess
 from pathlib import Path
 
@@ -39,27 +38,45 @@ def _artifact_fully_done(out_dir: Path) -> bool:
         return False
 
 
-# ── Shell script launcher ──────────────────────────────────────────────────────
+# ── GPU detection ───────────────────────────────────────────────────────────────
 
 
-def _write_run_script(script_path: Path, cmds: list, cuda_device: int) -> None:
-    """Write a sequential bash script that runs all cmds in order.
+def _gpu_used_mib() -> dict[int, int] | None:
+    """Map GPU index → used memory (MiB) from nvidia-smi, or None if it can't be read."""
+    try:
+        r = _subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return None
+        used = {}
+        for line in r.stdout.strip().splitlines():
+            idx, mib = (p.strip() for p in line.split(","))
+            used[int(idx)] = int(mib)
+        return used or None
+    except Exception:
+        return None
 
-    Writes its own PID to run.pid so the dashboard can track liveness
-    whether it was launched directly or via tmux.
+
+def all_gpus() -> list[int]:
+    """Every GPU index on the box — the dispatcher's fixed pool. `[0]` if unknown."""
+    used = _gpu_used_mib()
+    return sorted(used) if used else [0]
+
+
+def free_gpus(threshold_mib: int = 512) -> list[int]:
+    """GPU indices currently using less than `threshold_mib` of memory.
+
+    The dispatcher re-checks this before every launch so it never piles onto a
+    GPU someone else just grabbed. Empty when every GPU is busy (nvidia-smi
+    worked but none qualify); `[0]` only when GPU state can't be read at all.
     """
-    pid_file = script_path.parent / "run.pid"
-    lines = [
-        "#!/bin/bash",
-        f"export CUDA_VISIBLE_DEVICES={cuda_device}",
-        f"cd {ROOT}",
-        f"echo $$ > {pid_file}",
-        "",
-    ]
-    for cmd in cmds:
-        lines.append(" ".join(shlex.quote(str(c)) for c in cmd))
-    script_path.write_text("\n".join(lines) + "\n")
-    script_path.chmod(0o755)
+    used = _gpu_used_mib()
+    if used is None:
+        return [0]
+    return [i for i, u in used.items() if u < threshold_mib]
 
 
 # ── Tmux helpers ───────────────────────────────────────────────────────────────
@@ -88,6 +105,20 @@ def _script_alive(pid_file: Path) -> bool:
         return psutil.pid_exists(pid)
     except Exception:
         return False
+
+
+def _job_gpu(job: dict) -> str:
+    """GPU index the dispatcher assigned this job, or "" if not yet launched.
+
+    Written to `<algo_dir>/gpu` by app.gpu_dispatch just before the job starts.
+    """
+    gpu_file = Path(job.get("algo_dir", "")) / "gpu"
+    if gpu_file.exists():
+        try:
+            return gpu_file.read_text().strip()
+        except Exception:
+            return ""
+    return ""
 
 
 def _job_status(job: dict, script_alive: bool = True) -> tuple:
