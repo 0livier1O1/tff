@@ -113,7 +113,7 @@ class BOSS:
         n_runs: int = 1,
         acqf: str = "ei",
         ucb_beta: float = 2.0,
-        decomp_method: str = "sgd",
+        decomp_method: str = "adam",
         init_lr: float | None = None,
         momentum: float = 0.5,
         loss_patience: int = 2500,

@@ -84,7 +84,7 @@ def main():
     parser.add_argument(
         "--decomp-method",
         type=str,
-        default="sgd",
+        default="adam",
         choices=["pam", "sgd", "adam", "als"],
         help="pam/sgd/adam/als=cuTensorNetwork",
     )
@@ -193,7 +193,7 @@ if __name__ == "__main__":
             "--min-rse",    "0.01",
             "--maxiter-tn", "200",
             "--acqf",       "ei",
-            "--decomp-method", "sgd",
+            "--decomp-method", "adam",
             "--out-dir",    "artifacts/debug_boss/seed_1/boss_ei",
         ]
 

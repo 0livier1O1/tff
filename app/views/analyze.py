@@ -259,8 +259,11 @@ def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None
                 cr_by_step = {int(s): float(c) for s, c in zip(tr["step"], tr["cr"])}
                 dcol, _ = st.columns(2)
                 with dcol:
+                    log_y = st.toggle("Log scale", key=f"decomp_log_{seed}_{lab}",
+                                      help="Plot decomposition loss on a log y-axis.")
                     st.plotly_chart(
-                        figures.decomp_loss_curves(decomp_traces, cr_by_step),
+                        figures.decomp_loss_curves(decomp_traces, cr_by_step,
+                                                   log_y=log_y),
                         width="stretch", key=f"decomp_{seed}_{lab}")
             else:
                 st.caption("No decomposition traces saved for this result.")

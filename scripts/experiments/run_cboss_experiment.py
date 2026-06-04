@@ -190,7 +190,7 @@ if __name__ == "__main__":
             "--n-cores", "5", "--max-rank", "6", "--seed", "1",
             "--budget", "10", "--n-init", "10", "--max-bond", "6",
             "--feasible-rse", "0.01", "--min-rse", "0.01", "--maxiter-tn", "200",
-            "--acqf", "cei", "--decomp-method", "sgd",
+            "--acqf", "cei", "--decomp-method", "adam",
             "--out-dir", "artifacts/debug_cboss/seed_1/cboss_cei",
         ]
     try:
