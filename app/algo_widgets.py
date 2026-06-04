@@ -353,9 +353,17 @@ def _render_boss(acfg: BOSSConfig) -> None:
         "Max Bond Rank", min_value=1, max_value=100, value=acfg.max_rank,
         key=f"boss_max_bond_{cid}", help=BOSS_MAX_BOND,
     )
-    acfg.n_init = st.number_input(
+    ni, idz = st.columns(2)
+    acfg.n_init = ni.number_input(
         "Init Points (n_init)", value=acfg.n_init, min_value=2,
         key=f"boss_n_init_{cid}", help=BOSS_N_INIT,
+    )
+    _id_opts = ["sobol", "lhs"]
+    acfg.init_method = idz.selectbox(
+        "Init Design", _id_opts,
+        index=_id_opts.index(acfg.init_method) if acfg.init_method in _id_opts else 0,
+        key=f"boss_init_design_{cid}",
+        help="'sobol' = low-discrepancy; 'lhs' = Latin hypercube (better per-dim coverage).",
     )
     c3, c4 = st.columns(2)
     acfg.lambda_fitness = c3.number_input(
@@ -375,6 +383,12 @@ def _render_boss(acfg: BOSSConfig) -> None:
     acfg.feasible_rse = c6.number_input(
         "Feasible RSE", value=acfg.feasible_rse, format="%e",
         key=f"boss_min_rse_{cid}", help=BOSS_MIN_RSE_DECOMP,
+    )
+    acfg.freq_update = st.number_input(
+        "Freq update (GP hyper-refit)", min_value=1, max_value=1000, value=acfg.freq_update,
+        key=f"boss_freq_update_{cid}",
+        help="Re-optimize GP hyperparameters every N BO steps; the GP still conditions "
+             "on all observed data each step in between.",
     )
 
 
@@ -463,8 +477,8 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
         "GP epochs (init fit)", min_value=10, max_value=20000, value=acfg.cboss_gp_epochs, step=10,
         key=f"cboss_gp_epochs_{cid}", help="Max epochs for the one-off full fit at init.",
     )
-    acfg.cboss_freq_update = g4.number_input(
-        "Freq update", min_value=1, max_value=1000, value=acfg.cboss_freq_update,
+    acfg.freq_update = g4.number_input(
+        "Freq update", min_value=1, max_value=1000, value=acfg.freq_update,
         key=f"cboss_freq_update_{cid}",
         help="Refresh the variational dist every N steps (hyperparameters stay frozen).",
     )

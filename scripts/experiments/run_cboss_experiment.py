@@ -142,9 +142,7 @@ def main():
     progress_file.write_text(
         json.dumps({"phase": "init", "step": 0, "budget": args.budget, "started_at": t0})
     )
-    summary, rows = cboss.run(progress_file=progress_file)
-
-    np.save(out_dir / "best_x_int.npy", summary["best_x_int"].numpy())
+    rows = cboss.run(progress_file=progress_file)
 
     df = pd.DataFrame(rows)
     df["Algo"] = f"cboss-{args.acqf}"
@@ -171,16 +169,11 @@ def main():
         t=res["t"].numpy(),
     )
 
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump({k: (v.tolist() if hasattr(v, "tolist") else v)
-                   for k, v in summary.items()}, f, indent=2)
-
     with open(out_dir / ".done", "w") as f:
         f.write("ok")
 
-    print(f"Done → {out_dir}")
-    print(f"Feasible found: {summary['n_feasible']}  best CR: {summary['best_cr']:.5f}  "
-          f"best objective: {summary['best_objective']:.5f}")
+    n_feasible = int(sum(r["feasible"] for r in rows))
+    print(f"Done → {out_dir}  ({len(rows)} evals, {n_feasible} feasible)")
 
 
 if __name__ == "__main__":

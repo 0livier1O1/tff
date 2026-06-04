@@ -77,8 +77,21 @@ def _read_trace_csv(path: str) -> pd.DataFrame:
     return df[_RAW_COLS].reset_index(drop=True)
 
 
-def derive_trace_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    """Recompute n_evals, cumulative time, and incumbents after phase filtering."""
+def derive_trace_metrics(
+    df: pd.DataFrame, best_by: str = "objective",
+    feasible_threshold: float = float("inf"),
+) -> pd.DataFrame:
+    """Recompute n_evals, cumulative time, and incumbents after phase filtering.
+
+    `best_by` selects what the *incumbent* (inc_cr / inc_rse, and so every
+    incumbent-based plot + the reported best) tracks:
+      - "objective"   — the running-best objective (CR + λ·RSE), as the search runs.
+      - "feasible_cr" — the running-lowest CR among *feasible* evals, where feasible
+                        means RSE < `feasible_threshold`. Before the first feasible
+                        eval the incumbent is undefined (NaN).
+    The `objective` column always carries the running-best objective so the
+    objective curve is available in either mode.
+    """
     if df.empty:
         return pd.DataFrame(columns=_OUT_COLS)
 
@@ -88,14 +101,19 @@ def derive_trace_metrics(df: pd.DataFrame) -> pd.DataFrame:
         g["n_evals"] = g.index + 1
         g["cum_time_s"] = g["step_time_s"].cumsum()
 
-        running_best = g["objective"].cummin()
-        is_incumbent = g["objective"] <= running_best
+        running_best_obj = g["objective"].cummin()
+        if best_by == "feasible_cr":
+            feasible = g["rse"] < feasible_threshold
+            running_best_cr = g["cr"].where(feasible).cummin()  # NaN until 1st feasible
+            is_incumbent = feasible & (g["cr"] <= running_best_cr)
+        else:
+            is_incumbent = g["objective"] <= running_best_obj
         g["inc_cr"] = g["cr"].where(is_incumbent).ffill()
         g["inc_rse"] = g["rse"].where(is_incumbent).ffill()
         g["inc_cum_time_s"] = g["cum_time_s"].where(is_incumbent).ffill()
 
         if (g["family"] != "mabss").all():
-            g["objective"] = running_best
+            g["objective"] = running_best_obj
 
         tcr = g["target_cr"]
         has_tcr = tcr.notna() & (tcr != 0)

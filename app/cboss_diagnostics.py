@@ -6,7 +6,7 @@ the predicted P(feasible) at each BO step (`pf_pred`) is already a genuine
 one-step-ahead prediction (made before the point was decomposed), and the
 realized `feasible` label is the truth. The ARD lengthscale evolution comes from
 the per-refit `gp_states.pt` snapshots. The feasibility threshold shown is the
-one the algorithm actually used (`feasible_rse` from summary.json).
+one the algorithm actually used (`feasible_rse` from the run's config.json).
 
 `generate_cboss_diagnostics(config_dir)` writes the figures under
 `<config_dir>/analysis/cboss/`. Reuses app/plotting/classification_figures.py.
@@ -56,14 +56,26 @@ def _lengthscale_matrix(gp_states: list, n_edges: int):
     return np.stack(cols, axis=1), labels
 
 
+def _algo_config(config_dir: Path) -> dict:
+    """The algo-config dict for this result dir, from the run's config.json.
+
+    `config_dir` is `runs/<run>/seed_<k>/<config_id>_<policy>`; config.json sits at
+    `runs/<run>/config.json` and the leading token of the dir name is the config_id."""
+    cfg = json.loads((config_dir.parents[1] / "config.json").read_text())
+    cid = config_dir.name.split("_")[0]
+    return next(a for a in cfg["algo_configs"] if a["config_id"] == cid)
+
+
 def generate_cboss_diagnostics(config_dir: Path) -> Path:
     """Build and save all cBOSS feasibility-classifier figures. Returns the dir."""
     config_dir = Path(config_dir)
-    summary = json.loads((config_dir / "summary.json").read_text())
-    feasible_rse = float(summary["feasible_rse"])
-    n_init = int(summary["n_init"])
-    max_rank = int(summary["max_rank"])
-    n_cores = int(summary["n_cores"])
+    # Run metadata comes from the run's config.json (no per-run summary file).
+    algo = _algo_config(config_dir)
+    feasible_rse = float(algo["feasible_rse"])
+    n_init = int(algo["n_init"])
+    max_rank = int(algo["max_rank"])
+    acqf = algo["policy"].split("-")[1]               # cboss-ficr -> ficr
+    ficr_t = float(algo.get("cboss_ficr_t", 1.0))
 
     traces = pd.read_csv(config_dir / "traces.csv")
     rse_all = traces["rse"].to_numpy(float)
@@ -78,6 +90,8 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
 
     # ||X|| of the reconstructed integer ranks for the BO points
     z = np.load(config_dir / "cboss_results.npz")
+    # N cores from the search-space width D = N(N-1)/2.
+    n_cores = int(round((1 + (1 + 8 * z["X_std"].shape[1]) ** 0.5) / 2))
     X_bo = z["X_std"][n_init:n_init + len(bo)][valid]
     ranks = np.round(X_bo * (max_rank - 1) + 1)
     xnorm = np.linalg.norm(ranks, axis=1)
@@ -99,10 +113,9 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
         steps_bo, bo["acqf_value"].to_numpy(float)[valid], p,
         (bo["rse"].to_numpy(float)[valid] < feasible_rse).astype(int),
         bo["acqf_used"].astype(str).to_numpy()[valid]))
-    if str(summary.get("acqf")) == "ficr" and "infeasible_frac" in bo:
+    if acqf == "ficr" and "infeasible_frac" in bo:
         _save("ficr_weights", af.ficr_weights(
-            steps_bo, bo["infeasible_frac"].to_numpy(float)[valid],
-            float(summary.get("ficr_t", 1.0))))
+            steps_bo, bo["infeasible_frac"].to_numpy(float)[valid], ficr_t))
 
     both_classes = y.min() == 0 and y.max() == 1
     if both_classes:
@@ -138,5 +151,5 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("config_dir", help="a cBOSS result dir (has traces.csv, summary.json, …)")
+    ap.add_argument("config_dir", help="a cBOSS result dir (has traces.csv, cboss_results.npz, gp_states.pt, …)")
     generate_cboss_diagnostics(Path(ap.parse_args().config_dir))

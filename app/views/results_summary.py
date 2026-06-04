@@ -23,6 +23,9 @@ class SummaryControls:
     use_efficiency: bool = False
     loss_threshold: float = float("inf")
     threshold_mode: str = "fade"
+    # What "best"/incumbent means: "objective" (CR + λ·RSE) or "feasible_cr"
+    # (lowest CR among evals with RSE < loss_threshold).
+    best_by: str = "objective"
 
 
 def _phase_options(phases: pd.Series) -> list[str]:
@@ -88,6 +91,12 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
     can_efficiency = bool(df["efficiency"].notna().all())
 
     st.sidebar.markdown("### Graph settings")
+    best_by = "feasible_cr" if st.sidebar.radio(
+        "Best by", ["Objective", "Feasible CR"], horizontal=True, key="best_by",
+        help="What the incumbent / reported best tracks. 'Objective' = running-best "
+             "CR + λ·RSE. 'Feasible CR' = lowest CR among evals with RSE below the "
+             "loss threshold below (the feasibility cutoff).",
+    ) == "Feasible CR" else "objective"
     use_efficiency = False
     if can_efficiency:
         metric = st.sidebar.selectbox(
@@ -99,8 +108,8 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
     loss_threshold = st.sidebar.number_input(
         "Loss threshold (RSE)", min_value=0.0, max_value=rse_max, value=rse_max,
         step=max(rse_max / 50, 1e-4), format="%.4f", key="loss_threshold",
-        help="On the runtime scatter, points whose incumbent RSE exceeds this; "
-             "also marked on the RSE-distribution diagnostic.",
+        help="Fades points above this RSE on the runtime scatter; also the "
+             "feasibility cutoff for 'Best by → Feasible CR' (feasible iff RSE < this).",
     )
     threshold_mode = st.sidebar.radio(
         "Above threshold", ["Fade", "Hide"], horizontal=True,
@@ -109,7 +118,7 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
     ).lower()
     return SummaryControls(
         use_efficiency=use_efficiency, loss_threshold=float(loss_threshold),
-        threshold_mode=threshold_mode,
+        threshold_mode=threshold_mode, best_by=best_by,
     )
 
 
@@ -139,6 +148,14 @@ def render_results_summary(repo_root: Path) -> None:
         return
 
     controls = _render_controls(df)
+    # The incumbent under "Feasible CR" depends on the loss-threshold cutoff, set
+    # in the controls — re-derive over the full run, then re-apply the phase filter.
+    if controls.best_by == "feasible_cr":
+        df = _apply_phase_filter(
+            derive_trace_metrics(raw_df, best_by="feasible_cr",
+                                 feasible_threshold=controls.loss_threshold),
+            selected_phases,
+        )
     render_summary_plots(df, controls, key_prefix="summary")
 
 
@@ -154,6 +171,7 @@ def render_summary_plots(
     """Draw the results-summary charts for `df` (already derived + phase-filtered).
     `key_prefix` keeps chart element-ids unique when rendered in several tabs."""
     cr_word = "efficiency" if controls.use_efficiency else "compression ratio"
+    inc_word = "best feasible-CR" if controls.best_by == "feasible_cr" else "best-objective"
 
     # MABSS and global/local search baselines optimise different objectives — RSE vs. CR + λ·RSE —
     # so each family group gets its own chart.
@@ -182,7 +200,7 @@ def render_summary_plots(
         )
 
     if not search_df.empty:
-        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & λ·RSE of the best-objective structure so far.")
+        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & λ·RSE of the {inc_word} structure so far.")
         st.plotly_chart(
             figures.incumbent_cr_rse(
                 search_df, use_efficiency=controls.use_efficiency,
@@ -229,7 +247,10 @@ def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
         st.info("No trace data for this seed.")
         return
 
-    df_full = derive_trace_metrics(raw_df)
+    # Honor the global Graph-settings 'Best by' + loss-threshold where set.
+    best_by = "feasible_cr" if st.session_state.get("best_by") == "Feasible CR" else "objective"
+    threshold = float(st.session_state.get("loss_threshold", float("inf")))
+    df_full = derive_trace_metrics(raw_df, best_by=best_by, feasible_threshold=threshold)
     if df_full.empty:
         st.info("No trace data for this seed.")
         return
@@ -241,7 +262,5 @@ def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
         st.info("No trace rows for this seed after the default phase filter.")
         return
 
-    controls = SummaryControls(
-        loss_threshold=float(st.session_state.get("loss_threshold", float("inf"))),
-    )
+    controls = SummaryControls(loss_threshold=threshold, best_by=best_by)
     render_summary_plots(df, controls, key_prefix=f"perf_{seed}")

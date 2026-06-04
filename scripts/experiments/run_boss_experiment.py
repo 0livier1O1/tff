@@ -64,8 +64,14 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--budget", type=int, default=20)
     parser.add_argument("--n-init", type=int, default=10)
+    parser.add_argument("--init-design", type=str, default="sobol", choices=["lhs", "sobol"])
     parser.add_argument("--max-bond", type=int, default=10)
-    parser.add_argument("--min-rse", type=float, default=0.01)
+    parser.add_argument("--feasible-rse", type=float, default=0.01,
+                        help="Feasibility threshold (RSE < this); also the decomp early-stop unless --min-rse given.")
+    parser.add_argument("--min-rse", type=float, default=None,
+                        help="Decomposition early-stop RSE per eval (defaults to --feasible-rse).")
+    parser.add_argument("--freq-update", type=int, default=5,
+                        help="Re-optimize GP hyperparameters every N BO steps (conditions on all data in between).")
     parser.add_argument("--maxiter-tn", type=int, default=1000)
     parser.add_argument("--n-runs", type=int, default=1)
     parser.add_argument("--acqf", type=str, default="ei", choices=["ei", "ucb"])
@@ -122,8 +128,11 @@ def main():
         target,
         budget=args.budget,
         n_init=args.n_init,
+        init_design=args.init_design,
         max_rank=args.max_bond,
+        feasible_rse=args.feasible_rse,
         min_rse=args.min_rse,
+        freq_update=args.freq_update,
         maxiter_tn=args.maxiter_tn,
         lamda=args.lamda,
         n_runs=args.n_runs,
@@ -145,10 +154,7 @@ def main():
             {"phase": "init", "step": 0, "budget": args.budget, "started_at": t0}
         )
     )
-    summary, rows = boss.run(progress_file=progress_file)
-
-    best_x_int = summary["best_x_int"]
-    np.save(out_dir / "best_x_int.npy", best_x_int.numpy())
+    rows = boss.run(progress_file=progress_file)
 
     # Persist traces
     df = pd.DataFrame(rows)
@@ -160,6 +166,8 @@ def main():
         json.dump(boss.decomp_traces, f)
     with open(out_dir / "contraction_traces.json", "w") as f:
         json.dump(boss.contraction_traces, f)
+    # GP-fit snapshots (init + each hyperparameter refit) for offline inspection.
+    torch.save(boss.gp_states, out_dir / "gp_states.pt")
 
     res = boss.get_results()
     np.savez(
@@ -167,6 +175,7 @@ def main():
         X_std=res["X_std"].numpy(),
         Y_rse=res["Y_rse"].numpy(),
         Y_cr=res["Y_cr"].numpy(),
+        Y_feasible=res["Y_feasible"].numpy(),
         Y_objective=res["Y_objective"].numpy(),
         t=res["t"].numpy(),
     )
@@ -174,8 +183,8 @@ def main():
     with open(out_dir / ".done", "w") as f:
         f.write("ok")
 
-    print(f"Done → {out_dir}")
-    print(f"Best objective: {summary['best_objective']:.5f}")
+    best_obj = min((r["objective"] for r in rows), default=float("nan"))
+    print(f"Done → {out_dir}  ({len(rows)} evals, best objective {best_obj:.5f})")
 
 
 if __name__ == "__main__":

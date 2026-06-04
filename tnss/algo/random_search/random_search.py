@@ -127,7 +127,7 @@ class RandomSearch:
         self.train_Y_cr: list[float] = []
         self.train_t: list[float] = []
 
-    def run(self, progress_file: Path | None = None) -> tuple[dict, list[dict]]:
+    def run(self, progress_file: Path | None = None) -> list[dict]:
         if self.init_method == "sobol":
             self._sobol_init(progress_file)
 
@@ -151,7 +151,7 @@ class RandomSearch:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        return self._summarize(), self.rows
+        return self.rows
 
     def get_results(self) -> dict:
         y_rse = torch.tensor(self.train_Y_rse, dtype=torch.double).unsqueeze(1)
@@ -246,24 +246,6 @@ class RandomSearch:
         self.train_Y_cr.append(cr)
         self.train_t.append(eval_time)
         return row
-
-    def _summarize(self) -> dict:
-        if not self.rows:
-            return {}
-        objectives = [r["objective"] for r in self.rows]
-        best_idx = int(np.argmin(objectives))
-        best_x_int = self.train_X_int[best_idx]
-        return {
-            "budget": self.budget,
-            "objective_lambda": self.lamda,
-            "best_idx": best_idx,
-            "best_x_int": best_x_int,
-            "best_adj": _triu_to_full(best_x_int, self.t_shape).int(),
-            "best_objective": float(objectives[best_idx]),
-            "best_rse": float(self.rows[best_idx]["rse"]),
-            "best_cr": float(self.rows[best_idx]["cr"]),
-            "total_evals": len(self.rows),
-        }
 
     @staticmethod
     def _atomic_write(path: Path | None, data: dict) -> None:

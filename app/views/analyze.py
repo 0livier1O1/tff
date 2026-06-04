@@ -360,7 +360,7 @@ def _debuggable_runs(runs_dir: Path) -> dict[str, dict]:
 
 def _config_seeds(run_dir: Path, config_id: str, policy: str) -> list[int]:
     """Seeds that produced output for this (config, policy). traces.csv is the
-    one artifact written by every family (BOSS, e.g., writes no summary.json)."""
+    canonical per-eval artifact written by every family (no summary file is written)."""
     sub = f"{config_id}_{policy.replace('-', '_')}"
     seeds = []
     for sd in run_dir.glob("seed_*"):
@@ -445,7 +445,7 @@ def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> N
         cd = (runs_dir / r.run / f"seed_{seed}"
               / f"{r.config_id}_{r.policy.replace('-', '_')}")
         with st.expander(f"**{lab}**  ·  `{r.policy}`", expanded=False):
-            if not (cd / "summary.json").exists():
+            if not (cd / "cboss_results.npz").exists():
                 st.caption("No cBOSS artifacts found for this result.")
                 continue
             if not has_cboss_diagnostics(cd):

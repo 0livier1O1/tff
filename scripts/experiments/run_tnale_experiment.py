@@ -143,11 +143,7 @@ def main() -> None:
     progress_file.write_text(
         json.dumps({"phase": "init", "step": 0, "budget": args.budget, "started_at": t0})
     )
-    summary, rows = algo.run(progress_file=progress_file)
-
-    best_adj = summary.get("best_adj")
-    if best_adj is not None:
-        np.save(out_dir / "best_adj.npy", best_adj)
+    rows = algo.run(progress_file=progress_file)
 
     df = pd.DataFrame(rows)
     df["Algo"] = "tnale"
@@ -159,30 +155,11 @@ def main() -> None:
     with open(out_dir / "contraction_traces.json", "w") as f:
         json.dump(algo.contraction_traces, f)
 
-    clean_summary = {
-        "algo": "tnale",
-        "Seed": args.seed,
-        "steps": len(rows),
-        "budget": args.budget,
-        "total_evals": summary.get("total_evals", len(rows)),
-        "best_rse": float(summary.get("best_rse", float("nan"))),
-        "best_cr": float(summary.get("best_cr", float("nan"))),
-        "final_step_loss": float(df["rse"].iloc[-1]) if not df.empty else float("nan"),
-        "final_cr": float(df["cr"].iloc[-1]) if not df.empty else float("nan"),
-        "mean_eval_time_s": float(df["eval_time_s"].mean()) if "eval_time_s" in df.columns else float("nan"),
-    }
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump([clean_summary], f, indent=2)
-
     with open(out_dir / ".done", "w") as f:
         f.write("ok")
 
-    print(f"Done → {out_dir}")
-    print(
-        f"Best RSE: {summary.get('best_rse', float('nan')):.6f}  "
-        f"Best CR: {summary.get('best_cr', float('nan')):.4f}  "
-        f"Total evals: {summary.get('total_evals', '?')}"
-    )
+    print(f"Done → {out_dir}  ({algo.eval_count} evals, "
+          f"best RSE {algo.best_rse:.6f}, best CR {algo.best_cr:.4f})")
 
 
 if __name__ == "__main__":

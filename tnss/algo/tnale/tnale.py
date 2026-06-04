@@ -171,8 +171,10 @@ class TnALE:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, progress_file: Path | None = None) -> tuple[dict, list[dict]]:
-        """Run TnALE for `budget` ALE steps. Returns (summary, rows)."""
+    def run(self, progress_file: Path | None = None) -> list[dict]:
+        """Run TnALE for `budget` ALE steps. Returns the per-evaluation rows.
+
+        'Best' is derived at presentation time from the rows, not summarized here."""
         self._initialize(progress_file)
 
         for step in range(self.budget):
@@ -195,7 +197,7 @@ class TnALE:
                 "step": step + 1, "budget": self.budget,
             })
 
-        return self._summarize(), self.rows
+        return self.rows
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -686,19 +688,6 @@ class TnALE:
             {"step": self.eval_count, "phase": phase, **(contraction_stats or {})}
         )
 
-    def _summarize(self) -> dict:
-        if not self.rows:
-            return {}
-        best_idx = int(np.argmin([r["rse"] for r in self.rows]))
-        return {
-            "budget": self.budget,
-            "total_evals": self.eval_count,
-            "lambda_fitness": self.lambda_fitness,
-            "best_eval_idx": best_idx,
-            "best_rse": self.best_rse,
-            "best_cr": self.best_cr,
-            "best_adj": self._center.to_adj_matrix(),
-        }
 
     # ------------------------------------------------------------------
 
@@ -766,17 +755,17 @@ if __name__ == "__main__":
         verbose=True,
     )
 
-    summary, rows = algo.run()
+    rows = algo.run()
     center = algo._center
 
     print("\n--- Summary ---")
-    print(f"  total evals     : {summary['total_evals']}")
-    print(f"  best RSE        : {summary['best_rse']:.6f}")
-    print(f"  best CR         : {summary['best_cr']:.4f}")
+    print(f"  total evals     : {algo.eval_count}")
+    print(f"  best RSE        : {algo.best_rse:.6f}")
+    print(f"  best CR         : {algo.best_cr:.4f}")
     print(f"  found ranks     : {center.ranks.tolist()}")
     print(f"  found perm      : {center.permute.tolist()}")
     print(f"  true  ranks     : {true_ranks.tolist()}")
     print(f"  true  perm      : {true_perm.tolist()}")
     print(f"  ranks match     : {np.array_equal(center.ranks, true_ranks)}")
     print(f"  perm  match     : {np.array_equal(center.permute, true_perm)}")
-    print(f"  best adj (vis):\n{summary['best_adj']}")
+    print(f"  best adj (vis):\n{center.to_adj_matrix()}")

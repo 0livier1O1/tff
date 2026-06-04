@@ -73,6 +73,9 @@ class AlgoConfig:
     lambda_fitness: float = 10.0
     kernel: str = "matern"
     ucb_beta: float = 2.0
+    # Surrogate refresh cadence for the BO families (BOSS/cBOSS): re-fit the GP
+    # (hyperparameters for BOSS, variational dist for cBOSS) every N steps.
+    freq_update: int = 5
 
     # Decomposition (every family runs a TN decomposition under the hood)
     decomp_method: str = "adam"
@@ -163,7 +166,7 @@ class CBOSSConfig(AlgoConfig):
     cboss_var_strategy: str = "whitened"    # whitened | unwhitened
     cboss_wsp_mode: str = "matern"          # only for the wsp kernel
     cboss_gp_epochs: int = 400              # full fit at init
-    cboss_freq_update: int = 5              # refresh variational dist every N steps
+    # (refresh cadence is the shared base field `freq_update`)
     cboss_gp_refine_epochs: int = 60
     cboss_gp_tol: float = 1e-4
     cboss_gp_patience: int = 10

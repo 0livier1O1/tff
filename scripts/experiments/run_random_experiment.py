@@ -119,11 +119,7 @@ def main() -> None:
             "started_at": t0,
         })
     )
-    summary, rows = algo.run(progress_file=progress_file)
-
-    best_x_int = summary["best_x_int"]
-    np.save(out_dir / "best_x_int.npy", best_x_int.numpy())
-    np.save(out_dir / "best_adj.npy", summary["best_adj"].numpy())
+    rows = algo.run(progress_file=progress_file)
 
     df = pd.DataFrame(rows)
     df["Algo"] = "random"
@@ -145,29 +141,11 @@ def main() -> None:
         t=res["t"].numpy(),
     )
 
-    clean_summary = {
-        "algo": "random",
-        "Seed": args.seed,
-        "budget": args.budget,
-        "init_method": args.init_method,
-        "n_sobol_init": args.n_sobol_init if args.init_method == "sobol" else 0,
-        "total_evals": summary.get("total_evals", len(rows)),
-        "objective_lambda": args.lamda,
-        "best_objective": float(summary.get("best_objective", float("nan"))),
-        "best_rse": float(summary.get("best_rse", float("nan"))),
-        "best_cr": float(summary.get("best_cr", float("nan"))),
-        "mean_eval_time_s": (
-            float(df["eval_time_s"].mean()) if "eval_time_s" in df.columns else float("nan")
-        ),
-    }
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump([clean_summary], f, indent=2)
-
     with open(out_dir / ".done", "w") as f:
         f.write("ok")
 
-    print(f"Done -> {out_dir}")
-    print(f"Best objective: {summary['best_objective']:.5f}")
+    best_obj = min((r["objective"] for r in rows), default=float("nan"))
+    print(f"Done -> {out_dir}  ({len(rows)} evals, best objective {best_obj:.5f})")
 
 
 if __name__ == "__main__":

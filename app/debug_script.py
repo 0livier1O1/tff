@@ -43,14 +43,14 @@ class _ObjSpec:
 def _boss_spec(a) -> _ObjSpec:
     return _ObjSpec(
         "from tnss.algo.boss.boss import BOSS", "BOSS", True, [],
-        [("budget", a.budget), ("n_init", a.n_init),
-         ("max_rank", a.max_rank), ("min_rse", a.feasible_rse),
-         ("maxiter_tn", a.decomp_epochs), ("lamda", a.lambda_fitness),
-         ("n_runs", a.n_runs), ("acqf", a.policy.split("-")[1]),
-         ("ucb_beta", a.ucb_beta), ("decomp_method", a.decomp_method),
-         ("init_lr", a.decomp_init_lr), ("momentum", a.decomp_momentum),
-         ("loss_patience", a.decomp_loss_patience), ("lr_patience", a.decomp_lr_patience),
-         ("kernel", a.kernel)],
+        [("budget", a.budget), ("n_init", a.n_init), ("init_design", a.init_method),
+         ("max_rank", a.max_rank), ("feasible_rse", a.feasible_rse),
+         ("freq_update", a.freq_update), ("maxiter_tn", a.decomp_epochs),
+         ("lamda", a.lambda_fitness), ("n_runs", a.n_runs),
+         ("acqf", a.policy.split("-")[1]), ("ucb_beta", a.ucb_beta),
+         ("decomp_method", a.decomp_method), ("init_lr", a.decomp_init_lr),
+         ("momentum", a.decomp_momentum), ("loss_patience", a.decomp_loss_patience),
+         ("lr_patience", a.decomp_lr_patience), ("kernel", a.kernel)],
     )
 
 
@@ -67,7 +67,7 @@ def _cboss_spec(a) -> _ObjSpec:
          ("wsp_mode", a.cboss_wsp_mode), ("decomp_method", a.decomp_method),
          ("init_lr", a.decomp_init_lr), ("momentum", a.decomp_momentum),
          ("loss_patience", a.decomp_loss_patience), ("lr_patience", a.decomp_lr_patience),
-         ("gp_epochs", a.cboss_gp_epochs), ("freq_update", a.cboss_freq_update),
+         ("gp_epochs", a.cboss_gp_epochs), ("freq_update", a.freq_update),
          ("gp_refine_epochs", a.cboss_gp_refine_epochs), ("gp_tol", a.cboss_gp_tol),
          ("gp_patience", a.cboss_gp_patience), ("mc_samples", a.cboss_mc_samples),
          ("raw_samples", a.cboss_raw_samples), ("num_restarts", a.cboss_num_restarts)],
@@ -215,8 +215,10 @@ adj_np, target_np = load_problem_artifacts(TARGET_PATH, ADJ_PATH)
 {ctor}
 
 if __name__ == "__main__":
-    summary, rows = algo.run()
-    print("Done. Summary:")
-    for _k, _v in summary.items():
-        print(f"  {{_k}}: {{_v}}")
+    rows = algo.run()
+    print(f"Done. {{len(rows)}} evaluations.")
+    if rows:
+        _best = min(rows, key=lambda r: r["objective"])
+        print(f"  best objective={{_best['objective']:.5f}}  "
+              f"CR={{_best['cr']:.5f}}  RSE={{_best['rse']:.5f}}")
 '''
