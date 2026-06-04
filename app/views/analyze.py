@@ -19,6 +19,8 @@ import pandas as pd
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
+from app.cboss_diagnostics import generate_cboss_diagnostics, has_cboss_diagnostics
+from app.debug_script import write_debug_script, SUPPORTED_FAMILIES
 from app.diagnostics import (
     generate_gp_diagnostics, has_gp_diagnostics, load_gp_diagnostics, load_rse_cr,
 )
@@ -26,7 +28,7 @@ from app.plotting import figures
 from app.plotting.traces import load_traces
 from app.problem_io import load_problem
 from app.views.extend import order_columns, render_problem_seed_tabs
-from app.views.results_summary import render_results_summary
+from app.views.results_summary import render_results_summary, render_seed_performance
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +164,8 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
     # -----------------------------------------------------------------------
     # Tabs: problem description, results summary, per-seed diagnostics
     # -----------------------------------------------------------------------
-    tab_problem, tab_summary, tab_diag = st.tabs(
-        ["Problem Description", "Results Summary", "Diagnostics"]
+    tab_problem, tab_summary, tab_diag, tab_debug = st.tabs(
+        ["Problem Description", "Results Summary", "Diagnostics", "Debug Instance"]
     )
 
     with tab_problem:
@@ -174,6 +176,9 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
 
     with tab_diag:
         _render_diagnostics(repo_root)
+
+    with tab_debug:
+        _render_debug_instance(repo_root)
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +231,13 @@ def _render_diagnostics(repo_root: Path) -> None:
     seeds = sorted(df["seed"].unique())
     for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
         with tab:
-            _render_gp_diagnostics(runs_dir, df[df["seed"] == seed], int(seed))
+            sdf = df[df["seed"] == seed]
+            perf_tab, surr_tab = st.tabs(["Performance", "Surrogate diagnostics"])
+            with perf_tab:
+                render_seed_performance(repo_root, keys, int(seed))
+            with surr_tab:
+                _render_gp_diagnostics(runs_dir, sdf, int(seed))
+                _render_cboss_diagnostics(runs_dir, sdf, int(seed))
 
 
 def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
@@ -236,7 +247,6 @@ def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None
     boss = (sdf[sdf["family"] == "boss"][["run", "config_id", "label", "policy"]]
             .drop_duplicates())
     if boss.empty:
-        st.info("No BOSS results at this seed — GP diagnostics are BOSS-only.")
         return
 
     # Loss-threshold value from the Results Summary controls — marked on the
@@ -327,3 +337,138 @@ def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None
                            "marginal-likelihood convergence. Secondary diagnostic.")
                 st.plotly_chart(figures.fit_report(do, dr), width="stretch",
                                 key=f"fit_{seed}_{lab}")
+
+
+# ---------------------------------------------------------------------------
+# Debug Instance tab — generate a standalone debug script for one cBOSS run
+# ---------------------------------------------------------------------------
+
+def _debuggable_runs(runs_dir: Path) -> dict[str, dict]:
+    """Runs under artifacts/runs/ that have any algorithm configs."""
+    out: dict[str, dict] = {}
+    if not runs_dir.exists():
+        return out
+    for d in sorted(runs_dir.iterdir(), reverse=True):
+        cfg_path = d / "config.json"
+        if not cfg_path.exists():
+            continue
+        cfg = json.loads(cfg_path.read_text())
+        if cfg.get("algo_configs"):
+            out[d.name] = cfg
+    return out
+
+
+def _config_seeds(run_dir: Path, config_id: str, policy: str) -> list[int]:
+    """Seeds that produced output for this (config, policy). traces.csv is the
+    one artifact written by every family (BOSS, e.g., writes no summary.json)."""
+    sub = f"{config_id}_{policy.replace('-', '_')}"
+    seeds = []
+    for sd in run_dir.glob("seed_*"):
+        if (sd / sub / "traces.csv").exists():
+            seeds.append(int(sd.name.split("_")[1]))
+    return sorted(seeds)
+
+
+def _render_debug_instance(repo_root: Path) -> None:
+    """Pick any (run, algorithm, seed) and generate a standalone debug script."""
+    st.caption(
+        "Generate a standalone Python script that reruns one instance exactly "
+        "(same target, seeding, and parameters the dashboard used). Open it in "
+        "VSCode and run under the debugger (F5), setting breakpoints in "
+        "`tnss/algo/...`. Works for any algorithm family."
+    )
+    runs_dir = repo_root / "artifacts" / "runs"
+    runs = _debuggable_runs(runs_dir)
+    if not runs:
+        st.info("No runs with algorithm configs found under artifacts/runs/.")
+        return
+
+    c_run, c_algo, c_seed, _ = st.columns([3, 3, 1, 3])
+    run = c_run.selectbox("Run", list(runs), key="dbg_run")
+    cfg = runs[run]
+    configs = [a for a in cfg["algo_configs"] if a.get("family") in SUPPORTED_FAMILIES]
+    if not configs:
+        st.info("No debuggable algorithms in this run yet (MABSS is not supported).")
+        return
+    labels = [f"{a['label']}  ·  {a['policy']}" for a in configs]
+    idx = c_algo.selectbox("Algorithm", range(len(configs)),
+                           format_func=lambda i: labels[i], key="dbg_config")
+    chosen = configs[idx]
+
+    seeds = _config_seeds(runs_dir / run, chosen["config_id"], chosen["policy"])
+    if not seeds:
+        st.warning("No completed seeds with artifacts for this config.")
+        return
+    seed = c_seed.selectbox("Seed", seeds, key="dbg_seed")
+
+    if st.button("Generate debug script", type="primary", key="dbg_generate"):
+        path = write_debug_script(
+            repo_root, run, chosen["config_id"], chosen["policy"], int(seed),
+        )
+        st.success("Debug script written — open it in VSCode and run with F5:")
+        st.code(str(path), language=None)
+
+
+# ---------------------------------------------------------------------------
+# cBOSS diagnostics — feasibility-classifier + acquisition figures (PNGs)
+# ---------------------------------------------------------------------------
+
+# (png stem, caption) grouped into tabs. Conditional figures (ficr_weights,
+# the one-class-skipped predictive plots, the wsp-skipped heatmap) are shown
+# only when their file was actually produced.
+_CBOSS_PNG_GROUPS: dict[str, list[tuple[str, str]]] = {
+    "Feasibility": [
+        ("rse_distribution", "RSE distribution — feasible vs infeasible (threshold marked)"),
+        ("proba", "Predicted P(feasible) by true class and vs CR"),
+        ("roc", "ROC — one-step-ahead predictions"),
+        ("calibration", "Calibration — one-step-ahead predictions"),
+        ("accuracy_by_cr", "One-step-ahead accuracy by CR bin"),
+        ("pairs", "One-step-ahead pairs plot (errors highlighted)"),
+    ],
+    "Acquisition": [
+        ("acqf_value_trace", "Acquisition value + feasibility belief at the chosen candidate"),
+        ("ficr_weights", "ficr interpolation weights over steps"),
+    ],
+    "GP": [
+        ("lengthscale_heatmap", "ARD lengthscale evolution across refits"),
+    ],
+}
+
+
+def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
+    """Feasibility-classifier + acquisition diagnostics for the cBOSS configs at
+    one seed. PNGs are generated once per config and cached under analysis/cboss/."""
+    cboss = (sdf[sdf["family"] == "cboss"][["run", "config_id", "label", "policy"]]
+             .drop_duplicates())
+    for r in cboss.itertuples(index=False):
+        lab = r.label
+        cd = (runs_dir / r.run / f"seed_{seed}"
+              / f"{r.config_id}_{r.policy.replace('-', '_')}")
+        with st.expander(f"**{lab}**  ·  `{r.policy}`", expanded=False):
+            if not (cd / "summary.json").exists():
+                st.caption("No cBOSS artifacts found for this result.")
+                continue
+            if not has_cboss_diagnostics(cd):
+                if not st.button("Generate Diagnostics", key=f"gen_cboss_{seed}_{lab}",
+                                 help="Feasibility-classifier + acquisition diagnostics "
+                                      "from the saved run artifacts — cached to disk."):
+                    st.caption("Not generated yet.")
+                    continue
+                with st.spinner(f"Generating — {lab}"):
+                    generate_cboss_diagnostics(cd)
+            _render_cboss_pngs(cd / "analysis" / "cboss", seed, lab)
+
+
+def _render_cboss_pngs(diag_dir: Path, seed: int, lab: str) -> None:
+    """Show the cached cBOSS PNGs, grouped into tabs; skip figures not produced."""
+    present = {g: [(n, c) for n, c in items if (diag_dir / f"{n}.png").exists()]
+               for g, items in _CBOSS_PNG_GROUPS.items()}
+    groups = [g for g, items in present.items() if items]
+    if not groups:
+        st.caption("No diagnostic figures were produced for this result.")
+        return
+    for tab, g in zip(st.tabs(groups), groups):
+        with tab:
+            for name, cap in present[g]:
+                st.caption(cap)
+                st.image(str(diag_dir / f"{name}.png"), use_container_width=True)

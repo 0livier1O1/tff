@@ -54,25 +54,15 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
     configs: list[AlgoConfig] = _ensure_default_configs()
 
     for acfg in configs:
-        cid = acfg.config_id
-        # Expander + save/duplicate/delete on one row, so a config can be saved
-        # to the global library, cloned, or removed without opening it.
-        exp_col, save_col, dup_col, del_col = st.sidebar.columns([4, 1, 1, 1])
-        with exp_col.expander(f"**{acfg.label}**  ·  `{acfg.policy}`", expanded=False):
+        # Near-full-width expander + a single ⋮ overflow menu holding the
+        # save/duplicate/delete actions, so the expander reclaims the width that
+        # a button column would otherwise waste.
+        exp_col, menu_col = st.sidebar.columns([7, 1])
+        with exp_col.expander(f"**{acfg.label}**", expanded=False):
             _render_one_config(acfg)
-        _render_save_popover(save_col, acfg)
-        if dup_col.button(":material/content_copy:", key=f"duplicate_{cid}",
-                          width="stretch",
-                          help="Duplicate this algorithm config (same params, new id)"):
-            st.session_state["algo_configs"].append(duplicate_algo_config(acfg))
-            st.rerun()
-        if del_col.button(":material/delete:", key=f"remove_{cid}",
-                          width="stretch", type="primary",
-                          help="Remove this algorithm config"):
-            st.session_state["algo_configs"] = [
-                c for c in st.session_state["algo_configs"] if c.config_id != cid
-            ]
-            st.rerun()
+        with menu_col.popover(":material/more_vert:", width="stretch",
+                              help="Save / duplicate / delete"):
+            _render_actions_menu(acfg)
 
     _render_add_algorithm()
 
@@ -80,19 +70,29 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Save / add-from-saved — the global, problem-independent config library
+# Per-config overflow menu — save to library / duplicate / delete
 # ---------------------------------------------------------------------------
 
-def _render_save_popover(col, acfg: AlgoConfig) -> None:
-    """A save button that opens a name field to register `acfg` globally."""
+def _render_actions_menu(acfg: AlgoConfig) -> None:
+    """Contents of a config's ⋮ popover: save / duplicate / delete as three
+    horizontal icon buttons. Save uses the config's own label as the library name."""
     cid = acfg.config_id
-    with col.popover(":material/bookmark_add:", width="stretch"):
-        st.markdown("**Save configuration**")
-        name = st.text_input("Name", value=acfg.label, key=f"save_name_{cid}")
-        if st.button("Save", key=f"save_btn_{cid}", type="primary", width="stretch"):
-            save_algo(name, acfg)
-            st.toast(f"Saved configuration '{name.strip()}'.", icon="💾")
-            st.rerun()
+    save_col, dup_col, del_col = st.columns(3)
+    if save_col.button(":material/bookmark_add:", key=f"save_btn_{cid}", width="stretch",
+                       help=f"Save to library as '{acfg.label}'"):
+        save_algo(acfg.label, acfg)
+        st.toast(f"Saved configuration '{acfg.label.strip()}'.", icon="💾")
+        st.rerun()
+    if dup_col.button(":material/content_copy:", key=f"duplicate_{cid}", width="stretch",
+                      help="Duplicate (same params, new id)"):
+        st.session_state["algo_configs"].append(duplicate_algo_config(acfg))
+        st.rerun()
+    if del_col.button(":material/delete:", key=f"remove_{cid}", width="stretch",
+                      type="primary", help="Delete this config"):
+        st.session_state["algo_configs"] = [
+            c for c in st.session_state["algo_configs"] if c.config_id != cid
+        ]
+        st.rerun()
 
 
 def _render_add_algorithm() -> None:
