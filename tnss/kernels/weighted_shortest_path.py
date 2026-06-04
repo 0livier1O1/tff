@@ -9,7 +9,7 @@ from gpytorch.kernels import Kernel, MaternKernel
 from torch import Tensor
 
 
-Mode = Literal["matern", "bogrape", "soft"]
+Mode = Literal["matern", "bogrape", "soft", "ewsp"]
 
 
 class WeightedShortestPathKernel(Kernel):
@@ -46,6 +46,13 @@ class WeightedShortestPathKernel(Kernel):
         trainable lengthscale ``l``. As ``l -> 0`` it recovers ``"bogrape"``;
         larger ``l`` grades smoothly so nearby distances (5 vs 6) score higher
         than distant ones (5 vs 16). A sum of per-pair RBF kernels, hence PD.
+    ``"ewsp"``
+        Exponentiated (nonlinear) weighted SSP, the analog of BoGrape's ESSP
+        kernel: ``k = exp(k_bogrape)``. Exponentiating the linear match-fraction
+        adds representation power (BoGrape reports better uncertainty
+        quantification), at the cost of a non-unit diagonal. PD as an
+        exponentiated PD kernel. Magnitude is left to an outer ``ScaleKernel``
+        (BoGrape's ``sigma`` would be redundant with the outputscale).
 
     Wrap this in a ``ScaleKernel`` to learn the output magnitude.
     """
@@ -60,7 +67,7 @@ class WeightedShortestPathKernel(Kernel):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        if mode not in ("matern", "bogrape", "soft"):
+        if mode not in ("matern", "bogrape", "soft", "ewsp"):
             raise ValueError(f"Unknown mode: {mode!r}")
         if num_nodes is not None and num_nodes < 2:
             raise ValueError("num_nodes must be at least 2.")
@@ -119,6 +126,15 @@ class WeightedShortestPathKernel(Kernel):
             return torch.exp(-(gap ** 2) / (2 * ls.unsqueeze(-1) ** 2)).mean(dim=-1)
 
         # bogrape: fraction of identified node pairs with matching distance.
+        k = self._match_fraction(z1, z2, diag)
+        if self.mode == "ewsp":
+            # Exponentiated (ESSP-style) variant; magnitude left to ScaleKernel.
+            return torch.exp(k)
+        return k
+
+    @staticmethod
+    def _match_fraction(z1: Tensor, z2: Tensor, diag: bool) -> Tensor:
+        """Fraction of identified node pairs with matching shortest-path distance."""
         if diag:
             return (z1 == z2).to(z1.dtype).mean(dim=-1)
         match = (z1.unsqueeze(-2) == z2.unsqueeze(-3)).to(z1.dtype)
@@ -129,37 +145,42 @@ class WeightedShortestPathKernel(Kernel):
     # ------------------------------------------------------------------
 
     def _distance_features(self, x: Tensor) -> Tensor:
-        """Map input rows to identity-indexed shortest-path distance vectors."""
+        """Map input rows to identity-indexed shortest-path distance vectors.
+
+        All rows are processed as a single batch: adjacency construction and
+        Floyd-Warshall are vectorized over the leading dimension, so the only
+        Python loop is the ``n`` relaxation sweeps of Floyd-Warshall itself.
+        """
         if x.size(-1) < 1:
             raise ValueError("Input must have a non-empty feature dimension.")
 
         n = self._resolve_num_nodes(x.size(-1))
         iu, jv = torch.triu_indices(n, n, offset=1)
-        flat = x.reshape(-1, x.size(-1))
-        vecs = torch.stack([self._distance_vec(row, n, iu, jv) for row in flat])
+        flat = x.reshape(-1, x.size(-1))                     # (B, D)
+        weights = self._weights_from_row(flat.detach())      # (B, D) integer
+        B = weights.size(0)
+
+        # Batched symmetric adjacency from the upper-triangular weights.
+        adj = torch.zeros((B, n, n), dtype=torch.long)
+        adj[:, iu, jv] = weights
+        adj[:, jv, iu] = weights
+
+        # Batched Floyd-Warshall: missing edges -> inf, zero diagonal.
+        dist = adj.to(torch.double).masked_fill(adj <= 0, float("inf"))
+        dist.diagonal(dim1=-2, dim2=-1).zero_()
+        for k in range(n):
+            via_k = dist[:, :, k : k + 1] + dist[:, k : k + 1, :]
+            dist = torch.minimum(dist, via_k)
+
+        cap = self._cap_value(n, weights)
+        dist = torch.where(torch.isfinite(dist), dist, dist.new_full((), cap))
+        vecs = dist[:, iu, jv].round()                       # (B, D)
 
         dtype = x.dtype if x.is_floating_point() else torch.get_default_dtype()
         return vecs.reshape(*x.shape[:-1], -1).to(device=x.device, dtype=dtype)
 
-    def _distance_vec(self, row: Tensor, n: int, iu: Tensor, jv: Tensor) -> Tensor:
-        """Weighted shortest-path distances for one graph, ordered by node pair."""
-        weights = self._weights_from_row(row.detach())
-        adj = torch.zeros((n, n), dtype=torch.long)
-        adj[iu, jv] = weights
-        adj[jv, iu] = weights
-
-        dist = adj.to(torch.double).masked_fill(adj <= 0, float("inf"))
-        dist.fill_diagonal_(0.0)
-        for k in range(n):  # Floyd-Warshall
-            dist = torch.minimum(dist, dist[:, k : k + 1] + dist[k : k + 1, :])
-
-        cap = self._cap_value(n, weights)
-        dist = torch.where(torch.isfinite(dist), dist, dist.new_full((), cap))
-        return dist[iu, jv].round()
-
-    def _weights_from_row(self, row: Tensor) -> Tensor:
-        """Map one input row to integer edge weights shifted down by one."""
-        values = row
+    def _weights_from_row(self, values: Tensor) -> Tensor:
+        """Map input rows to integer edge weights shifted down by one."""
         if self.weight_bounds is not None:
             lo, hi = self.weight_bounds
             values = (values * (hi - lo) + lo).clamp(min=lo, max=hi)
@@ -225,18 +246,14 @@ if __name__ == "__main__":
     print("g_a weights    :", weights_a.tolist(), "(edge order:",
           list(zip(iu.tolist(), jv.tolist())), ")")
 
-    # --- Step 2: shortest-path distance vector for each graph --------------
-    dvec_a = k._distance_vec(g_a[0], N, iu, jv)   # <-- breakpoint: step Floyd-Warshall
-    dvec_b = k._distance_vec(g_b[0], N, iu, jv)
-    print("dist vec g_a   :", dvec_a.tolist(), "(cap =", k._cap_value(N, weights_a), ")")
-    print("dist vec g_b   :", dvec_b.tolist())
-
-    # --- Step 3: full feature batch ---------------------------------------
-    feats = k._distance_features(X)               # <-- breakpoint: (2, D) features
+    # --- Step 2: shortest-path distance vectors (batched Floyd-Warshall) --
+    feats = k._distance_features(X)               # <-- breakpoint: step Floyd-Warshall
+    print("dist vec g_a   :", feats[0].tolist(), "(cap =", k._cap_value(N, weights_a), ")")
+    print("dist vec g_b   :", feats[1].tolist())
     print("feature batch  :\n", feats)
 
     # --- Step 4: kernel matrices in all modes -----------------------------
-    for mode in ("matern", "bogrape", "soft"):
+    for mode in ("matern", "bogrape", "soft", "ewsp"):
         km = WeightedShortestPathKernel(num_nodes=N, weight_bounds=bounds, mode=mode)
         K = km.forward(X, X)                       # <-- breakpoint: enter forward()
         Kdiag = km.forward(X, X, diag=True)
@@ -258,7 +275,7 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     Xr = torch.rand(n_cand, D2, dtype=torch.double)   # normalized [0,1]^D
 
-    for mode in ("matern", "bogrape", "soft"):
+    for mode in ("matern", "bogrape", "soft", "ewsp"):
         km = WeightedShortestPathKernel(num_nodes=N2, weight_bounds=bounds, mode=mode)
         if mode == "matern":
             km._base.lengthscale = 10.0               # stand-in for a fitted value
