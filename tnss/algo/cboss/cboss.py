@@ -202,7 +202,9 @@ class CBOSS:
 
             row = self._observe(
                 cand_std, step=self.n_init + b, phase="bo",
-                pf_pred=pf_pred, acqf_value=acqf_value, gp_elbo=feas.final_elbo,
+                pf_pred=pf_pred, acqf_value=acqf_value,
+                acqf_used=("seek-feas" if seek else self.acqf), infeasible_frac=c,
+                gp_elbo=feas.final_elbo,
                 gp_fit_time=gp_fit_time, suggest_time=suggest_time,
             )
 
@@ -315,6 +317,7 @@ class CBOSS:
 
     def _observe(self, x_std: Tensor, *, step: int, phase: str,
                  pf_pred: float = float("nan"), acqf_value: float = float("nan"),
+                 acqf_used: str = "init", infeasible_frac: float = float("nan"),
                  gp_elbo: float = float("nan"),
                  gp_fit_time: float = 0.0, suggest_time: float = 0.0) -> dict:
         x_int_flat = self._to_int(x_std).squeeze(0)
@@ -338,6 +341,8 @@ class CBOSS:
             "objective_lambda": self.lamda,
             "pf_pred": pf_pred,
             "acqf_value": acqf_value,
+            "acqf_used": acqf_used,
+            "infeasible_frac": infeasible_frac,
             "gp_elbo": gp_elbo,
             "eval_time_s": eval_time,
             "gp_fit_time_s": gp_fit_time,
@@ -409,6 +414,8 @@ class CBOSS:
             "budget": self.budget,
             "feasible_rse": self.feasible_rse,
             "acqf": self.acqf,
+            "ficr_t": self.ficr_t,
+            "seek_feasible_first": self.seek_feasible_first,
             "kernel": self.kernel,
             "var_strategy": self.var_strategy,
             "max_rank": self.max_rank,

@@ -22,11 +22,7 @@ import torch
 import torch.nn.functional as F
 
 from app.plotting import classification_figures as cf
-
-FIGS = [
-    "rse_distribution", "roc", "calibration", "accuracy_by_cr",
-    "pairs", "proba", "lengthscale_heatmap",
-]
+from app.plotting import acquisition_figures as af
 
 
 def _diag_dir(config_dir: Path) -> Path:
@@ -34,8 +30,10 @@ def _diag_dir(config_dir: Path) -> Path:
 
 
 def has_cboss_diagnostics(config_dir: Path) -> bool:
+    # rse_distribution + acqf_value_trace are produced for every run; the rest
+    # are conditional (one feasibility class, kernel without a lengthscale, …).
     d = _diag_dir(config_dir)
-    return all((d / f"{name}.png").exists() for name in FIGS)
+    return (d / "rse_distribution.png").exists() and (d / "acqf_value_trace.png").exists()
 
 
 def _edge_labels(n_cores: int) -> list:
@@ -94,6 +92,17 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
         plt.close(fig)
 
     _save("rse_distribution", cf.rse_distribution(rse_all, feasible_rse))
+
+    # acquisition-function diagnostics (all BO steps)
+    steps_bo = bo["step"].to_numpy(float)[valid]
+    _save("acqf_value_trace", af.acquisition_trace(
+        steps_bo, bo["acqf_value"].to_numpy(float)[valid], p,
+        (bo["rse"].to_numpy(float)[valid] < feasible_rse).astype(int),
+        bo["acqf_used"].astype(str).to_numpy()[valid]))
+    if str(summary.get("acqf")) == "ficr" and "infeasible_frac" in bo:
+        _save("ficr_weights", af.ficr_weights(
+            steps_bo, bo["infeasible_frac"].to_numpy(float)[valid],
+            float(summary.get("ficr_t", 1.0))))
 
     both_classes = y.min() == 0 and y.max() == 1
     if both_classes:
