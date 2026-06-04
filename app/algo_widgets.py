@@ -18,6 +18,9 @@ from app.config.algo_config import (
     AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, TnALEConfig, RandomSearchConfig,
     POLICY_OPTIONS, new_algo_config, replace_policy, duplicate_algo_config,
 )
+from app.config.saved_algos import (
+    list_saved_algos, save_algo, instantiate_saved, delete_saved_algo,
+)
 from app.config.constants import (
     DECOMP_EPOCHS, DECOMP_ENGINE, DECOMP_INIT_LR, DECOMP_MOMENTUM,
     DECOMP_LOSS_PATIENCE, DECOMP_LR_PATIENCE,
@@ -52,11 +55,17 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
 
     for acfg in configs:
         cid = acfg.config_id
-        # Expander + delete/duplicate on one row, so a config can be removed or
-        # cloned without opening it.
-        exp_col, del_col, dup_col = st.sidebar.columns([6, 1, 1])
+        # Expander + save/duplicate/delete on one row, so a config can be saved
+        # to the global library, cloned, or removed without opening it.
+        exp_col, save_col, dup_col, del_col = st.sidebar.columns([4, 1, 1, 1])
         with exp_col.expander(f"**{acfg.label}**  ·  `{acfg.policy}`", expanded=False):
             _render_one_config(acfg)
+        _render_save_popover(save_col, acfg)
+        if dup_col.button(":material/content_copy:", key=f"duplicate_{cid}",
+                          width="stretch",
+                          help="Duplicate this algorithm config (same params, new id)"):
+            st.session_state["algo_configs"].append(duplicate_algo_config(acfg))
+            st.rerun()
         if del_col.button(":material/delete:", key=f"remove_{cid}",
                           width="stretch", type="primary",
                           help="Remove this algorithm config"):
@@ -64,21 +73,62 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
                 c for c in st.session_state["algo_configs"] if c.config_id != cid
             ]
             st.rerun()
-        if dup_col.button(":material/content_copy:", key=f"duplicate_{cid}",
-                          width="stretch",
-                          help="Duplicate this algorithm config (same params, new id)"):
-            st.session_state["algo_configs"].append(duplicate_algo_config(acfg))
-            st.rerun()
 
-    add_col1, add_col2 = st.sidebar.columns([2, 3])
-    new_policy = add_col1.selectbox(
-        "New policy", POLICY_OPTIONS, label_visibility="collapsed", key="new_algo_policy",
-    )
-    if add_col2.button("+ Add algorithm", width="stretch"):
-        st.session_state["algo_configs"].append(new_algo_config(new_policy))
-        st.rerun()
+    _render_add_algorithm()
 
     cfg.algo_configs = list(st.session_state["algo_configs"])
+
+
+# ---------------------------------------------------------------------------
+# Save / add-from-saved — the global, problem-independent config library
+# ---------------------------------------------------------------------------
+
+def _render_save_popover(col, acfg: AlgoConfig) -> None:
+    """A save button that opens a name field to register `acfg` globally."""
+    cid = acfg.config_id
+    with col.popover(":material/bookmark_add:", width="stretch"):
+        st.markdown("**Save configuration**")
+        name = st.text_input("Name", value=acfg.label, key=f"save_name_{cid}")
+        if st.button("Save", key=f"save_btn_{cid}", type="primary", width="stretch"):
+            save_algo(name, acfg)
+            st.toast(f"Saved configuration '{name.strip()}'.", icon="💾")
+            st.rerun()
+
+
+def _render_add_algorithm() -> None:
+    """Add a fresh policy or a copy of a saved config (saved names listed after
+    the built-in policies, shown plainly)."""
+    saved_names = [s["name"] for s in list_saved_algos() if s["name"] not in POLICY_OPTIONS]
+    options = POLICY_OPTIONS + saved_names
+
+    add_col1, add_col2 = st.sidebar.columns([2, 3])
+    choice = add_col1.selectbox(
+        "New policy", options, label_visibility="collapsed", key="new_algo_policy",
+    )
+    if add_col2.button("+ Add algorithm", width="stretch"):
+        if choice in saved_names:
+            st.session_state["algo_configs"].append(instantiate_saved(choice))
+        else:
+            st.session_state["algo_configs"].append(new_algo_config(choice))
+        st.rerun()
+
+
+def render_saved_library_section() -> None:
+    """Standalone sidebar section listing the global saved-config library, with
+    a delete button per entry. Rendered under the Execute button (see dashboard).
+    Hidden entirely when the library is empty."""
+    saved = list_saved_algos()
+    if not saved:
+        return
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(f"### Saved configurations ({len(saved)})")
+    for s in saved:
+        name_col, del_col = st.sidebar.columns([5, 1])
+        name_col.markdown(f"**{s['name']}**  ·  `{s['policy']}`")
+        if del_col.button(":material/delete:", key=f"del_saved_{s['name']}",
+                          help=f"Delete saved config '{s['name']}'"):
+            delete_saved_algo(s["name"])
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
