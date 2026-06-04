@@ -15,7 +15,7 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import (
-    AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig, RandomSearchConfig,
+    AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, TnALEConfig, RandomSearchConfig,
     POLICY_OPTIONS, new_algo_config, replace_policy, duplicate_algo_config,
 )
 from app.config.constants import (
@@ -123,6 +123,8 @@ def _render_one_config(acfg: AlgoConfig) -> None:
         _render_mabss(acfg)
     elif isinstance(acfg, BOSSConfig):
         _render_boss(acfg)
+    elif isinstance(acfg, CBOSSConfig):
+        _render_cboss(acfg)
     elif isinstance(acfg, TnALEConfig):
         _render_tnale(acfg)
     elif isinstance(acfg, RandomSearchConfig):
@@ -323,6 +325,131 @@ def _render_boss(acfg: BOSSConfig) -> None:
     acfg.boss_min_rse = c6.number_input(
         "Min RSE", value=acfg.boss_min_rse, format="%e",
         key=f"boss_min_rse_{cid}", help=BOSS_MIN_RSE_DECOMP,
+    )
+
+
+def _render_cboss(acfg: CBOSSConfig) -> None:
+    cid = acfg.config_id
+    c1, c2 = st.columns(2)
+    acfg.cboss_budget = c1.number_input(
+        "Budget", min_value=1, max_value=10000, value=acfg.cboss_budget,
+        key=f"cboss_budget_{cid}", help="BO iterations after the initial design.",
+    )
+    acfg.cboss_max_bond = c2.number_input(
+        "Max Bond Rank", min_value=1, max_value=100, value=acfg.cboss_max_bond,
+        key=f"cboss_max_bond_{cid}", help="Upper bound on each searched bond rank.",
+    )
+
+    c3, c4 = st.columns(2)
+    acfg.cboss_n_init = c3.number_input(
+        "Init Points (n_init)", value=acfg.cboss_n_init, min_value=2,
+        key=f"cboss_n_init_{cid}", help="Initial design evaluations before BO.",
+    )
+    _id_opts = ["lhs", "sobol"]
+    acfg.cboss_init_design = c4.selectbox(
+        "Init Design", _id_opts,
+        index=_id_opts.index(acfg.cboss_init_design) if acfg.cboss_init_design in _id_opts else 0,
+        key=f"cboss_init_design_{cid}",
+        help="'lhs' = Latin hypercube (better per-dim coverage, more likely to seed a "
+             "feasible structure); 'sobol' = low-discrepancy.",
+    )
+
+    c5, c6 = st.columns(2)
+    acfg.cboss_feasible_rse = c5.number_input(
+        "Feasible RSE", value=acfg.cboss_feasible_rse, format="%e",
+        key=f"cboss_feasible_rse_{cid}",
+        help="Feasibility threshold: a structure is feasible iff best RSE < this.",
+    )
+    acfg.cboss_min_rse = c6.number_input(
+        "Min RSE (decomp)", value=acfg.cboss_min_rse, format="%e",
+        key=f"cboss_min_rse_{cid}", help="Decomposition early-stop threshold per eval.",
+    )
+
+    c7, c8 = st.columns(2)
+    acfg.cboss_lambda_fitness = c7.number_input(
+        "λ fitness (plot)", value=acfg.cboss_lambda_fitness, min_value=0.0, format="%f",
+        key=f"cboss_lambda_{cid}",
+        help="Only for the CR + λ·RSE comparison plot; cBOSS does not optimize this.",
+    )
+    acfg.cboss_n_runs = c8.number_input(
+        "N runs", min_value=1, max_value=10, value=acfg.cboss_n_runs,
+        key=f"cboss_n_runs_{cid}", help="Decomposition restarts per candidate (best RSE kept).",
+    )
+
+    if acfg.policy == "cboss-ficr":
+        acfg.cboss_ficr_t = st.select_slider(
+            "ficr t (feasibility interpolation)", options=[0.5, 1.0, 2.0],
+            value=acfg.cboss_ficr_t if acfg.cboss_ficr_t in (0.5, 1.0, 2.0) else 1.0,
+            key=f"cboss_ficr_t_{cid}",
+            help="Exponent t in α=(1-ct)·UCB + ct·P(feasible), c=infeasible fraction.",
+        )
+    acfg.cboss_seek_feasible_first = st.checkbox(
+        "Seek feasibility first", value=acfg.cboss_seek_feasible_first,
+        key=f"cboss_seek_{cid}",
+        help="Until a feasible point is found, maximize P(feasible) instead of the "
+             "constrained acquisition (gives the acqf a feasible anchor).",
+    )
+
+    st.markdown("---")
+    st.markdown("*Feasibility GP surrogate*")
+    g1, g2 = st.columns(2)
+    _ko = ["matern", "matern32", "rbf", "weighted_shortest_path"]
+    acfg.cboss_kernel = g1.selectbox(
+        "Kernel", _ko, index=_ko.index(acfg.cboss_kernel) if acfg.cboss_kernel in _ko else 0,
+        key=f"cboss_kernel_{cid}", help="Feasibility-classifier kernel (ARD unless wsp).",
+    )
+    _vs = ["whitened", "unwhitened"]
+    acfg.cboss_var_strategy = g2.selectbox(
+        "Var. strategy", _vs,
+        index=_vs.index(acfg.cboss_var_strategy) if acfg.cboss_var_strategy in _vs else 0,
+        key=f"cboss_var_strategy_{cid}", help="Variational strategy.",
+    )
+    if acfg.cboss_kernel == "weighted_shortest_path":
+        _wm = ["matern", "bogrape", "soft", "ewsp"]
+        acfg.cboss_wsp_mode = st.selectbox(
+            "WSP mode", _wm,
+            index=_wm.index(acfg.cboss_wsp_mode) if acfg.cboss_wsp_mode in _wm else 0,
+            key=f"cboss_wsp_mode_{cid}", help="Shortest-path kernel variant.",
+        )
+
+    g3, g4 = st.columns(2)
+    acfg.cboss_gp_epochs = g3.number_input(
+        "GP epochs (init fit)", min_value=10, max_value=20000, value=acfg.cboss_gp_epochs, step=10,
+        key=f"cboss_gp_epochs_{cid}", help="Max epochs for the one-off full fit at init.",
+    )
+    acfg.cboss_freq_update = g4.number_input(
+        "Freq update", min_value=1, max_value=1000, value=acfg.cboss_freq_update,
+        key=f"cboss_freq_update_{cid}",
+        help="Refresh the variational dist every N steps (hyperparameters stay frozen).",
+    )
+    g5, g6 = st.columns(2)
+    acfg.cboss_gp_refine_epochs = g5.number_input(
+        "GP refine epochs", min_value=1, max_value=5000, value=acfg.cboss_gp_refine_epochs,
+        key=f"cboss_gp_refine_{cid}", help="Max epochs per frozen-hyperparameter refresh.",
+    )
+    acfg.cboss_gp_patience = g6.number_input(
+        "GP patience", min_value=1, max_value=1000, value=acfg.cboss_gp_patience,
+        key=f"cboss_gp_patience_{cid}", help="ELBO convergence patience (epochs).",
+    )
+    g7, g8 = st.columns(2)
+    acfg.cboss_gp_tol = g7.number_input(
+        "GP tol", value=acfg.cboss_gp_tol, format="%e",
+        key=f"cboss_gp_tol_{cid}", help="ELBO convergence tolerance.",
+    )
+    acfg.cboss_mc_samples = g8.number_input(
+        "MC samples (cei)", min_value=1, max_value=4096, value=acfg.cboss_mc_samples,
+        key=f"cboss_mc_{cid}", help="MC samples for the constrained-EI acquisition.",
+    )
+
+    st.markdown("*Acquisition optimizer*")
+    a1, a2 = st.columns(2)
+    acfg.cboss_raw_samples = a1.number_input(
+        "Raw samples", min_value=1, max_value=8192, value=acfg.cboss_raw_samples,
+        key=f"cboss_raw_{cid}", help="Discrete local-search initial candidates.",
+    )
+    acfg.cboss_num_restarts = a2.number_input(
+        "Num restarts", min_value=1, max_value=512, value=acfg.cboss_num_restarts,
+        key=f"cboss_restarts_{cid}", help="Discrete local-search restarts.",
     )
 
 

@@ -92,7 +92,14 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
             help=RUN_NAME,
         )
 
-    st.sidebar.markdown("### Algorithms")
+    _algo_hdr, _algo_clear = st.sidebar.columns([2, 1], vertical_alignment="bottom")
+    _algo_hdr.markdown("### Algorithms")
+    if _algo_clear.button(
+        "Clear all", key="clear_all_algos", width="stretch", type="primary",
+        help="Remove all algorithm configs at once",
+    ):
+        st.session_state["algo_configs"] = []
+        st.rerun()
     render_algo_configs(cfg)
 
 

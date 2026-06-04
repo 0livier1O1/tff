@@ -92,8 +92,9 @@ class BOSS:
     num_restarts: multistart count for acqf optimizer
     kernel      : 'matern' (plain ARD over rank vector) or
                   'weighted_shortest_path' (shortest-path kernel)
-    wsp_mode    : shortest-path kernel variant, 'matern', 'bogrape', or
-                  'soft' (only used when kernel is weighted_shortest_path)
+    wsp_mode    : shortest-path kernel variant, 'matern', 'bogrape',
+                  'soft', or 'ewsp' (only used when kernel is
+                  weighted_shortest_path)
     acqf_optimizer: 'mip' (discrete local search over the integer rank
                   lattice; default; works with non-differentiable kernels)
                   or 'gradient' (continuous L-BFGS-B via optimize_acqf)
@@ -151,8 +152,9 @@ class BOSS:
             "kernel must be 'matern' or 'weighted_shortest_path', "
             f"got {kernel!r}"
         )
-        assert wsp_mode in ("matern", "bogrape", "soft"), (
-            f"wsp_mode must be 'matern', 'bogrape', or 'soft', got {wsp_mode!r}"
+        assert wsp_mode in ("matern", "bogrape", "soft", "ewsp"), (
+            "wsp_mode must be 'matern', 'bogrape', 'soft', or 'ewsp', "
+            f"got {wsp_mode!r}"
         )
         assert acqf_optimizer in ("mip", "gradient"), (
             f"acqf_optimizer must be 'mip' or 'gradient', got {acqf_optimizer!r}"

@@ -514,12 +514,16 @@ def fit_report(do: pd.DataFrame, dr: pd.DataFrame) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 def decomp_loss_curves(traces: list[dict],
-                       cr_by_step: dict[int, float] | None = None) -> go.Figure:
+                       cr_by_step: dict[int, float] | None = None,
+                       log_y: bool = False) -> go.Figure:
     """Tensor-decomposition loss curves — one line per evaluation, raw loss
-    against optimiser epoch on a linear y-axis. Lines are shaded along a
-    sequential colorscale, darker for later search steps, so the progression
-    of the search reads at a glance. No legend (one trace per evaluation).
+    against optimiser epoch. Lines are shaded along a sequential colorscale,
+    darker for later search steps, so the progression of the search reads at
+    a glance. No legend (one trace per evaluation).
     If `cr_by_step` is given, the per-step CR is shown in the hover tooltip.
+    With `log_y`, the plotted values are log of the loss (better for losses
+    that span several orders of magnitude); otherwise the raw loss is plotted
+    on a linear axis anchored at zero.
     """
     fig = go.Figure()
     n = len(traces)
@@ -527,19 +531,23 @@ def decomp_loss_curves(traces: list[dict],
         "Blues", [0.3 + 0.7 * i / max(n - 1, 1) for i in range(n)])
     for color, t in zip(shades, traces):
         losses = t["losses"]
+        y = np.log(losses) if log_y else losses
         cr_str = ""
         if cr_by_step is not None:
             cr = cr_by_step.get(int(t["step"]))
             if cr is not None:
                 cr_str = f"<br>CR {cr:.4g}"
         fig.add_trace(go.Scattergl(
-            x=list(range(len(losses))), y=losses, mode="lines",
+            x=list(range(len(losses))), y=y, mode="lines",
             line=dict(color=color, width=1), showlegend=False,
             hovertemplate=(f"step {t['step']}<br>epoch %{{x}}<br>"
                            f"loss %{{y:.4g}}{cr_str}<extra></extra>"),
         ))
     fig.update_xaxes(title_text="Epoch", rangemode="tozero")
-    fig.update_yaxes(title_text="Decomposition loss", rangemode="tozero")
+    if log_y:
+        fig.update_yaxes(title_text="log10 Decomposition loss")
+    else:
+        fig.update_yaxes(title_text="Decomposition loss", rangemode="tozero")
     fig.update_layout(template="plotly_white", height=_HEIGHT,
                       margin=dict(l=0, r=0, t=20, b=0), showlegend=False)
     return fig

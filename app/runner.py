@@ -19,7 +19,7 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import (
-    AlgoConfig, MABSSConfig, BOSSConfig, TnALEConfig, RandomSearchConfig,
+    AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, TnALEConfig, RandomSearchConfig,
 )
 from app.config.problem_config import ProblemConfig, mint_problem_id, now_iso
 from app.problem_io import load_problem, save_problem, runs_root, target_path_for, adj_path_for
@@ -147,6 +147,46 @@ def boss_cmd(acfg: BOSSConfig, problem: ProblemConfig, seed: int, algo_dir: Path
     return cmd
 
 
+def cboss_cmd(acfg: CBOSSConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
+    acqf = acfg.policy.split("-")[1]  # cboss-cei → cei
+    cmd = [
+        "conda", "run", "-n", "tensors",
+        "python", "scripts/experiments/run_cboss_experiment.py",
+        "--n-cores",       str(problem.n_cores),
+        "--max-rank",      str(problem.max_rank),
+        "--seed",          str(seed),
+        "--budget",        str(acfg.cboss_budget),
+        "--n-init",        str(acfg.cboss_n_init),
+        "--init-design",   acfg.cboss_init_design,
+        "--max-bond",      str(acfg.cboss_max_bond),
+        "--n-runs",        str(acfg.cboss_n_runs),
+        "--feasible-rse",  str(acfg.cboss_feasible_rse),
+        "--min-rse",       str(acfg.cboss_min_rse),
+        "--maxiter-tn",    str(acfg.decomp_epochs),
+        "--acqf",          acqf,
+        "--lamda",         str(acfg.cboss_lambda_fitness),
+        "--kernel",        acfg.cboss_kernel,
+        "--var-strategy",  acfg.cboss_var_strategy,
+        "--wsp-mode",      acfg.cboss_wsp_mode,
+        "--gp-epochs",     str(acfg.cboss_gp_epochs),
+        "--freq-update",   str(acfg.cboss_freq_update),
+        "--gp-refine-epochs", str(acfg.cboss_gp_refine_epochs),
+        "--gp-tol",        str(acfg.cboss_gp_tol),
+        "--gp-patience",   str(acfg.cboss_gp_patience),
+        "--mc-samples",    str(acfg.cboss_mc_samples),
+        "--raw-samples",   str(acfg.cboss_raw_samples),
+        "--num-restarts",  str(acfg.cboss_num_restarts),
+        "--out-dir",       str(algo_dir),
+    ]
+    cmd += _decomp_flags(acfg)
+
+    if acfg.policy == "cboss-ficr":
+        cmd += ["--ficr-t", str(acfg.cboss_ficr_t)]
+    if not acfg.cboss_seek_feasible_first:
+        cmd.append("--no-seek-feasible-first")
+    return cmd
+
+
 def tnale_cmd(acfg: TnALEConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
     cmd = [
         "conda", "run", "-n", "tensors",
@@ -212,6 +252,8 @@ def build_cmd(acfg: AlgoConfig, problem: ProblemConfig, seed: int, algo_dir: Pat
         return mabss_cmd(acfg, problem, seed, algo_dir)
     if isinstance(acfg, BOSSConfig):
         return boss_cmd(acfg, problem, seed, algo_dir)
+    if isinstance(acfg, CBOSSConfig):
+        return cboss_cmd(acfg, problem, seed, algo_dir)
     if isinstance(acfg, TnALEConfig):
         return tnale_cmd(acfg, problem, seed, algo_dir)
     if isinstance(acfg, RandomSearchConfig):
