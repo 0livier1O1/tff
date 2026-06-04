@@ -15,7 +15,6 @@ class SidebarConfig:
     algo_configs: list[AlgoConfig] = field(default_factory=list)
     # Run control
     seeds_str: str = "1"
-    cuda_device: int = 0
     use_tmux: bool = False
     tmux_session: str | None = None
     run_name: str = ""

@@ -16,10 +16,18 @@ import pandas as pd
 import streamlit as st
 
 from app.config.algo_config import algo_config_from_dict
-from app.utils import _script_alive, _job_status
+from app.utils import _script_alive, _job_status, _job_gpu
 
 
 _STALE = ("Failed", "Interrupted", "Cancelled")
+
+# Pretty labels for the progress.json "phase" field (written by the algos).
+# init/sobol_init → the design phase (step counts to n_init/n_sobol_init);
+# bo → BO search; TnALE adds interpolation → main. Unknown/absent → blank.
+_PHASE_LABELS = {
+    "init": "Init", "sobol_init": "Init", "bo": "BO",
+    "interpolation": "Interpolation", "main": "Main", "random": "Random",
+}
 
 
 def _prefill_rerun_stale(ROOT: Path, rname: str,
@@ -56,15 +64,26 @@ def _clear_run(ROOT: Path, rname: str) -> None:
 
 
 def render_job_status_panel(ROOT: Path) -> None:
-    """Display and update the active-run tracker. Reads/writes session state."""
+    """Display and update the active-run tracker.
+
+    Gated on there being active runs, then delegated to an auto-refreshing
+    fragment so the table updates itself while the dispatcher runs jobs across
+    the GPUs — no manual Refresh button. When the last run finishes the fragment
+    triggers a full rerun, which drops back through this gate and stops the
+    auto-refresh.
+    """
+    if not st.session_state.get("active_runs"):
+        return
+    _auto_refresh_panel(ROOT)
+
+
+@st.fragment(run_every=2)
+def _auto_refresh_panel(ROOT: Path) -> None:
     active_runs = st.session_state.get("active_runs", [])
     if not active_runs:
         return
 
-    _hdr, _btn = st.columns([5, 1])
-    _hdr.markdown("#### Active Runs")
-    if _btn.button("Refresh", width="stretch"):
-        st.rerun()
+    st.markdown("#### Active Runs")
 
     def _fmt_ts(ts):
         return _dt.fromtimestamp(ts).strftime("%H:%M:%S") if ts else ""
@@ -96,10 +115,13 @@ def render_job_status_panel(ROOT: Path) -> None:
             pf = algo_dir / "progress.json"
             done_f = algo_dir / ".done"
 
-            started_at = None
+            phase, started_at = "", None
             if pf.exists():
                 try:
-                    started_at = json.loads(pf.read_text()).get("started_at")
+                    pg = json.loads(pf.read_text())
+                    started_at = pg.get("started_at")
+                    raw = pg.get("phase", "")
+                    phase = _PHASE_LABELS.get(raw, raw.capitalize() if raw else "")
                 except Exception:
                     pass
             completed_at = done_f.stat().st_mtime if done_f.exists() else None
@@ -108,7 +130,9 @@ def render_job_status_panel(ROOT: Path) -> None:
                 "Seed":      job["seed"],
                 "Algo":      job.get("label", job["algo"]),
                 "Policy":    job["algo"],
+                "GPU":       _job_gpu(job),
                 "Status":    status,
+                "Phase":     phase,
                 "Step":      step,
                 "Submitted": _fmt_ts(submitted_at),
                 "Started":   _fmt_ts(started_at),
@@ -140,8 +164,12 @@ def render_job_status_panel(ROOT: Path) -> None:
 
         if all_done:
             (out_dir / "session_state.json").unlink(missing_ok=True)
-            st.sidebar.success(f"`{rname}` complete.")
+            st.toast(f"`{rname}` complete.", icon="✅")
         else:
             still_active.append(rec)
 
     st.session_state["active_runs"] = still_active
+    # Nothing left running → full rerun so the parent gate stops this fragment's
+    # auto-refresh (a fragment can't un-schedule its own run_every).
+    if not still_active:
+        st.rerun()

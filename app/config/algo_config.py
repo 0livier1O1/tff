@@ -57,6 +57,23 @@ class AlgoConfig:
     policy: str
     family: str  # "mabss" | "boss" | "tnale" | "random" — discriminator for JSON
 
+    # Shared search parameters — the same concept across every family, so they
+    # live on the base class (one name, not boss_budget/cboss_budget/…). A family
+    # that doesn't use one simply ignores it; subclasses override only the
+    # defaults that differ. Defaults below are the common case.
+    budget: int = 200
+    max_rank: int = 10
+    n_init: int = 20
+    init_method: str = "sobol"
+    n_runs: int = 1
+    # Doubles as the decomposition early-stop threshold AND (for cBOSS) the
+    # feasibility threshold — a structure is feasible iff best RSE < this, and
+    # the decomposition stops refining a candidate once it's reached.
+    feasible_rse: float = 1e-2
+    lambda_fitness: float = 10.0
+    kernel: str = "matern"
+    ucb_beta: float = 2.0
+
     # Decomposition (every family runs a TN decomposition under the hood)
     decomp_method: str = "adam"
     decomp_epochs: int = 2000
@@ -82,14 +99,13 @@ class AlgoConfig:
 class MABSSConfig(AlgoConfig):
     family: str = "mabss"
 
-    mabss_budget: int = 50
-    mabss_max_rank: int = 10
+    budget: int = 50          # shared field, MABSS default differs
+    ucb_beta: float = 5.0     # shared field (GP-UCB / EXP4 exploration β)
+
     mabss_warm_start_method: str | None = None
     mabss_warm_start_epochs: int = 0
 
     # GP surrogate (used by mabss-ucb and the GP-expert of mabss-exp4)
-    beta: float = 5.0
-    kernel_name: str = "matern"
     learn_noise: bool = False
     fixed_noise: float = 1e-6
 
@@ -124,14 +140,7 @@ class MABSSConfig(AlgoConfig):
 @dataclass(kw_only=True)
 class BOSSConfig(AlgoConfig):
     family: str = "boss"
-
-    boss_budget: int = 200
-    boss_max_bond: int = 10
-    boss_n_init: int = 10
-    boss_n_runs: int = 1
-    boss_min_rse: float = 1e-2
-    boss_ucb_beta: float = 2.0     # only used when policy == 'boss-ucb'
-    boss_lambda_fitness: float = 10.0
+    # max_rank, n_init, n_runs, min_rse, ucb_beta, lambda_fitness, kernel: base defaults
 
 
 # ---------------------------------------------------------------------------
@@ -142,19 +151,15 @@ class BOSSConfig(AlgoConfig):
 class CBOSSConfig(AlgoConfig):
     family: str = "cboss"
 
-    cboss_budget: int = 100
-    cboss_max_bond: int = 10
-    cboss_n_init: int = 20
-    cboss_init_design: str = "lhs"          # 'lhs' | 'sobol'
-    cboss_n_runs: int = 1
-    cboss_feasible_rse: float = 1e-3        # feasible iff best RSE < this
-    cboss_min_rse: float = 1e-3             # decomposition early-stop
-    cboss_lambda_fitness: float = 10.0      # only for the CR + λ·RSE comparison plot
+    # Shared fields whose cBOSS defaults differ from the base
+    init_method: str = "lhs"                # 'lhs' | 'sobol'  (the init design)
+    feasible_rse: float = 1e-3              # feasibility threshold + decomp early-stop
+    # budget(100)/max_rank/n_runs/lambda_fitness/kernel: base defaults
+
     cboss_ficr_t: float = 1.0               # interpolation exponent (cboss-ficr only)
     cboss_seek_feasible_first: bool = True
 
-    # Feasibility GP surrogate
-    cboss_kernel: str = "matern"            # matern | matern32 | rbf | weighted_shortest_path
+    # Feasibility GP surrogate (var_strategy/wsp_mode are cBOSS-specific)
     cboss_var_strategy: str = "whitened"    # whitened | unwhitened
     cboss_wsp_mode: str = "matern"          # only for the wsp kernel
     cboss_gp_epochs: int = 400              # full fit at init
@@ -177,10 +182,8 @@ class CBOSSConfig(AlgoConfig):
 class TnALEConfig(AlgoConfig):
     family: str = "tnale"
 
-    tnale_budget: int = 200
-    tnale_max_rank: int = 10
-    tnale_n_runs: int = 1
-    tnale_min_rse: float = 1e-2
+    # max_rank, n_runs, min_rse, lambda_fitness, init_method("sobol"), n_init: base defaults
+
     tnale_topology: str = "ring"
     tnale_local_step_init: int = 2
     tnale_local_step_main: int = 1
@@ -188,12 +191,9 @@ class TnALEConfig(AlgoConfig):
     tnale_interp_iters: int = 2
     tnale_local_opt_iter: int = 1
     tnale_init_sparsity: float = 0.6
-    tnale_lambda_fitness: float = 10.0
     tnale_n_perm_samples: int = 10
     tnale_perm_radius: int = 1
     tnale_phase_change_reset: bool = True
-    tnale_init_method: str = "sobol"
-    tnale_n_sobol_init: int = 10
 
 
 # ---------------------------------------------------------------------------
@@ -204,13 +204,9 @@ class TnALEConfig(AlgoConfig):
 class RandomSearchConfig(AlgoConfig):
     family: str = "random"
 
-    random_budget: int = 200
-    random_max_bond: int = 10
-    random_n_runs: int = 1
-    random_min_rse: float = 1e-2
-    random_lambda_fitness: float = 10.0
-    random_init_method: str = "random"
-    random_n_sobol_init: int = 10
+    init_method: str = "random"   # shared field, default differs
+    # max_rank, n_runs, feasible_rse, lambda_fitness, n_init: base defaults
+
 
 # ---------------------------------------------------------------------------
 # Factories

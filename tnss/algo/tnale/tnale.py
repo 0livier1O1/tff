@@ -173,7 +173,7 @@ class TnALE:
 
     def run(self, progress_file: Path | None = None) -> tuple[dict, list[dict]]:
         """Run TnALE for `budget` ALE steps. Returns (summary, rows)."""
-        self._initialize()
+        self._initialize(progress_file)
 
         for step in range(self.budget):
             # End-of-round-trip or convergence-triggered restart
@@ -187,9 +187,13 @@ class TnALE:
                     f"[TnALE {step+1}/{self.budget}] "
                     f"pos={self._update_idx}  "
                     f"best_RSE={self.best_rse:.5f}  best_CR={self.best_cr:.4f}  "
-                    f"evals={self.eval_count}  phase={'init' if self._in_init_phase else 'main'}"
+                    f"evals={self.eval_count}  "
+                    f"phase={'interpolation' if self._in_init_phase else 'main'}"
                 )
-            self._atomic_write(progress_file, {"step": step + 1, "budget": self.budget})
+            self._atomic_write(progress_file, {
+                "phase": "interpolation" if self._in_init_phase else "main",
+                "step": step + 1, "budget": self.budget,
+            })
 
         return self._summarize(), self.rows
 
@@ -197,7 +201,7 @@ class TnALE:
     # Initialisation
     # ------------------------------------------------------------------
 
-    def _initialize(self) -> None:
+    def _initialize(self, progress_file: Path | None = None) -> None:
         N = self.N
         D = self.D
 
@@ -223,7 +227,7 @@ class TnALE:
         # Phase / sweep state needed both for Sobol evaluations (if any) and main loop
         self._interp_on = self.interp_on
         self._in_init_phase = True  # reset to interp_on below; True here spans _run_sobol_init
-        self._in_sobol_init = False  # True only inside _run_sobol_init — tags rows 'sobol_init'
+        self._in_sobol_init = False  # True only inside _run_sobol_init — tags rows 'init'
         self._local_step = self.local_step_init if self._interp_on else self.local_step_main
         self._times_of_local_sampling = 1
         self._update_idx = -1  # placeholder for any pre-ALE evaluations
@@ -231,7 +235,7 @@ class TnALE:
 
         # Choose initial ranks
         if self.init_method == "sobol":
-            raw = self._run_sobol_init()
+            raw = self._run_sobol_init(progress_file)
         else:
             raw = np.array(
                 [
@@ -597,14 +601,14 @@ class TnALE:
     # Sobol initialisation phase
     # ------------------------------------------------------------------
 
-    def _run_sobol_init(self) -> np.ndarray:
+    def _run_sobol_init(self, progress_file: Path | None = None) -> np.ndarray:
         """
         Draw n_sobol_init Sobol candidates, evaluate each, return ranks of the best.
 
         Bit-identical samples to BOSS when topology='full', same seed, same
         n_sobol_init, and same max_rank (both bounds are inclusive). Caller
         must have already set self._fixed_permute and _last_row_time; these
-        evaluations are tagged phase='sobol_init' in the trace.
+        evaluations are tagged phase='init' in the trace.
         """
         R = self.max_rank
         bounds = torch.stack([
@@ -618,13 +622,16 @@ class TnALE:
         best_obj = float("inf")
         best_ranks = samples[0].copy()
         self._in_sobol_init = True
-        for ranks in samples:
+        for i, ranks in enumerate(samples):
             s = Structure(ranks.copy(), self.phys_dims, self._fixed_permute, self._bonds)
             rse, cr, _ = self._eval_one(s, update_idx=None)
             obj = cr + self.lambda_fitness * rse
             if obj < best_obj:
                 best_obj = obj
                 best_ranks = ranks.copy()
+            self._atomic_write(progress_file, {
+                "phase": "init", "step": i + 1, "budget": self.n_sobol_init,
+            })
         self._in_sobol_init = False
 
         if self.verbose:
@@ -649,8 +656,8 @@ class TnALE:
         step_time = now - self._last_row_time
         self._last_row_time = now
         phase = (
-            "sobol_init" if self._in_sobol_init
-            else "init" if self._in_init_phase
+            "init" if self._in_sobol_init
+            else "interpolation" if self._in_init_phase
             else "main"
         )
         self.rows.append(

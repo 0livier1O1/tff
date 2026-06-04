@@ -176,8 +176,8 @@ def load_traces(
             df["label"] = ac["label"]
             df["policy"] = ac["policy"]
             df["family"] = ac["family"]
-            # Objective weight of CR + λ·RSE — keyed per family; MABSS has no λ.
-            df["lambda_fitness"] = ac.get(f"{ac['family']}_lambda_fitness", float("nan"))
+            # Objective weight of CR + λ·RSE — shared field; MABSS has no λ.
+            df["lambda_fitness"] = ac.get("lambda_fitness", float("nan"))
             df["seed"] = seed
             frames.append(df)
 

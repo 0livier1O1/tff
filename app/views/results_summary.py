@@ -26,16 +26,17 @@ class SummaryControls:
 
 
 def _phase_options(phases: pd.Series) -> list[str]:
-    preferred = ["sobol_init", "init", "bo", "main", "random"]
+    preferred = ["sobol_init", "lhs_init", "init", "interpolation", "bo", "main", "random"]
     present = set(phases.dropna().astype(str))
     ordered = [p for p in preferred if p in present]
     ordered.extend(sorted(present - set(ordered)))
     return ordered
 
 
-# Only Sobol initialization is pre-search setup. TnALE's "init" phase is the
-# initial-radius ALE search and is kept visible.
-_INIT_PHASES = ("sobol_init",)
+# Pre-search initialization is hidden by default: the Sobol/LHS design for
+# BOSS/CBOSS, and TnALE's "init" draw (renamed from "sobol_init"). TnALE's
+# "interpolation" and "main" phases are the actual search and stay visible.
+_INIT_PHASES = ("sobol_init", "lhs_init", "init")
 
 
 def _render_phase_filter(df: pd.DataFrame) -> list[str]:
