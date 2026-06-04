@@ -69,6 +69,13 @@ def main():
     parser.add_argument("--maxiter-tn", type=int, default=1000)
     parser.add_argument("--n-runs", type=int, default=1)
     parser.add_argument("--acqf", type=str, default="ei", choices=["ei", "ucb"])
+    parser.add_argument(
+        "--kernel",
+        type=str,
+        default="matern",
+        choices=["matern", "weighted_shortest_path", "weighted_sp"],
+        help="GP kernel used by BOSS.",
+    )
     parser.add_argument("--ucb-beta", type=float, default=2.0)
     parser.add_argument(
         "--lamda", type=float, default=1.0,
@@ -77,7 +84,7 @@ def main():
     parser.add_argument(
         "--decomp-method",
         type=str,
-        default="sgd",
+        default="adam",
         choices=["pam", "sgd", "adam", "als"],
         help="pam/sgd/adam/als=cuTensorNetwork",
     )
@@ -127,6 +134,7 @@ def main():
         momentum=args.momentum,
         loss_patience=args.loss_patience,
         lr_patience=args.lr_patience,
+        kernel=args.kernel,
         seed=args.seed,
         verbose=True,
     )
@@ -147,6 +155,11 @@ def main():
     df["Algo"] = f"boss-{args.acqf}"
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
+
+    with open(out_dir / "decomp_traces.json", "w") as f:
+        json.dump(boss.decomp_traces, f)
+    with open(out_dir / "contraction_traces.json", "w") as f:
+        json.dump(boss.contraction_traces, f)
 
     res = boss.get_results()
     np.savez(
@@ -180,7 +193,7 @@ if __name__ == "__main__":
             "--min-rse",    "0.01",
             "--maxiter-tn", "200",
             "--acqf",       "ei",
-            "--decomp-method", "sgd",
+            "--decomp-method", "adam",
             "--out-dir",    "artifacts/debug_boss/seed_1/boss_ei",
         ]
 

@@ -23,10 +23,13 @@ from typing import Any
 
 MABSS_POLICIES = ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4"]
 BOSS_POLICIES  = ["boss-ei", "boss-ucb"]
+CBOSS_POLICIES = ["cboss-cei", "cboss-pf", "cboss-ficr"]
 TNALE_POLICIES = ["tnale"]
 RANDOM_POLICIES = ["random"]
 
-POLICY_OPTIONS: list[str] = MABSS_POLICIES + BOSS_POLICIES + TNALE_POLICIES + RANDOM_POLICIES
+POLICY_OPTIONS: list[str] = (
+    MABSS_POLICIES + BOSS_POLICIES + CBOSS_POLICIES + TNALE_POLICIES + RANDOM_POLICIES
+)
 
 
 def policy_family(policy: str) -> str:
@@ -34,6 +37,8 @@ def policy_family(policy: str) -> str:
         return "mabss"
     if policy in BOSS_POLICIES:
         return "boss"
+    if policy in CBOSS_POLICIES:
+        return "cboss"
     if policy in TNALE_POLICIES:
         return "tnale"
     if policy in RANDOM_POLICIES:
@@ -55,10 +60,10 @@ class AlgoConfig:
     # Decomposition (every family runs a TN decomposition under the hood)
     decomp_method: str = "adam"
     decomp_epochs: int = 2000
-    decomp_init_lr: float | None = 0.1
+    decomp_init_lr: float | None = 0.01
     decomp_momentum: float = 0.9
-    decomp_loss_patience: int = 1000
-    decomp_lr_patience: int = 250
+    decomp_loss_patience: int = 500
+    decomp_lr_patience: int = 50
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -130,6 +135,41 @@ class BOSSConfig(AlgoConfig):
 
 
 # ---------------------------------------------------------------------------
+# cBOSS (constrained BOSS)
+# ---------------------------------------------------------------------------
+
+@dataclass(kw_only=True)
+class CBOSSConfig(AlgoConfig):
+    family: str = "cboss"
+
+    cboss_budget: int = 100
+    cboss_max_bond: int = 10
+    cboss_n_init: int = 20
+    cboss_init_design: str = "lhs"          # 'lhs' | 'sobol'
+    cboss_n_runs: int = 1
+    cboss_feasible_rse: float = 1e-3        # feasible iff best RSE < this
+    cboss_min_rse: float = 1e-3             # decomposition early-stop
+    cboss_lambda_fitness: float = 10.0      # only for the CR + λ·RSE comparison plot
+    cboss_ficr_t: float = 1.0               # interpolation exponent (cboss-ficr only)
+    cboss_seek_feasible_first: bool = True
+
+    # Feasibility GP surrogate
+    cboss_kernel: str = "matern"            # matern | matern32 | rbf | weighted_shortest_path
+    cboss_var_strategy: str = "whitened"    # whitened | unwhitened
+    cboss_wsp_mode: str = "matern"          # only for the wsp kernel
+    cboss_gp_epochs: int = 400              # full fit at init
+    cboss_freq_update: int = 5              # refresh variational dist every N steps
+    cboss_gp_refine_epochs: int = 60
+    cboss_gp_tol: float = 1e-4
+    cboss_gp_patience: int = 10
+
+    # Acquisition optimizer (discrete local search) + MC samples for cei
+    cboss_mc_samples: int = 128
+    cboss_raw_samples: int = 256
+    cboss_num_restarts: int = 10
+
+
+# ---------------------------------------------------------------------------
 # TnALE
 # ---------------------------------------------------------------------------
 
@@ -169,6 +209,8 @@ class RandomSearchConfig(AlgoConfig):
     random_n_runs: int = 1
     random_min_rse: float = 1e-2
     random_lambda_fitness: float = 10.0
+    random_init_method: str = "random"
+    random_n_sobol_init: int = 10
 
 # ---------------------------------------------------------------------------
 # Factories
@@ -177,6 +219,7 @@ class RandomSearchConfig(AlgoConfig):
 _CONFIG_CLS = {
     "mabss": MABSSConfig,
     "boss":  BOSSConfig,
+    "cboss": CBOSSConfig,
     "tnale": TnALEConfig,
     "random": RandomSearchConfig,
 }

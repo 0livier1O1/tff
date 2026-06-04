@@ -141,17 +141,23 @@ def render_problem_seed_tabs(repo_root: Path, problem: ProblemConfig, seeds: lis
 
 # Column groups in display order. Within each group, alphabetical.
 _PREFERRED_HEAD = ["Seeds", "config_id", "label", "policy", "family"]
+# Shared params unified onto the base AlgoConfig — shown right after the head.
+_SHARED_FIELDS = [
+    "budget", "max_rank", "n_init", "init_method", "n_runs", "feasible_rse",
+    "lambda_fitness", "kernel", "ucb_beta",
+]
 _MABSS_LOOSE_FIELDS = {
-    "beta", "kernel_name", "learn_noise", "fixed_noise",
+    "learn_noise", "fixed_noise",
     "exp3_gamma", "exp3_decay", "exp3_loss_bins", "exp3_cr_bins",
     "exp4_gamma", "exp4_eta", "dtype",
 }
 
 
 def order_columns(df: pd.DataFrame) -> list[str]:
-    """Order an algo_configs dataframe's columns: head → decomp → mabss → boss → tnale → leftover."""
+    """Order an algo_configs dataframe's columns: head → shared → decomp → mabss → boss → tnale → leftover."""
     cols = list(df.columns)
     head = [c for c in _PREFERRED_HEAD if c in cols]
+    shared = [c for c in _SHARED_FIELDS if c in cols]
     decomp = sorted(c for c in cols if c.startswith("decomp_"))
     mabss = sorted(
         c for c in cols
@@ -159,9 +165,9 @@ def order_columns(df: pd.DataFrame) -> list[str]:
     )
     boss = sorted(c for c in cols if c.startswith("boss_"))
     tnale = sorted(c for c in cols if c.startswith("tnale_"))
-    seen = set(head + decomp + mabss + boss + tnale)
+    seen = set(head + shared + decomp + mabss + boss + tnale)
     leftover = [c for c in cols if c not in seen]
-    return head + decomp + mabss + boss + tnale + leftover
+    return head + shared + decomp + mabss + boss + tnale + leftover
 
 
 def seeds_for_config(run_dir: Path, config: dict) -> list[int]:

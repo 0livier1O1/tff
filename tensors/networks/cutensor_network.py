@@ -1,4 +1,5 @@
 import sys
+import time
 import torch
 import numpy as np
 import cupy as cp
@@ -154,6 +155,83 @@ def increment_mode_rank(tensor, i):
     return new_tensor
 
 
+# ---------------------------------------------------------------------------
+# Contraction-cost collection (cuTensorNet path planner + autotune)
+# ---------------------------------------------------------------------------
+
+# Scalar fields safe to flatten into a per-step traces.csv row. The structured
+# fields (contract_path, slices, intermediate_modes, eq) are intentionally
+# excluded here — they live in the full per-step contraction_traces.json.
+CONTRACTION_SCALAR_KEYS = (
+    "path_opt_time_s",
+    "autotune_time_s",
+    "autotune_iterations",
+    "opt_cost_flops",
+    "largest_intermediate_elements",
+    "num_slices",
+)
+
+
+def _jsonify(obj, _depth=0):
+    """Best-effort conversion of cuTensorNet info objects to JSON-serializable data.
+
+    Never raises: anything it cannot interpret falls back to ``repr``.
+    """
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    # 0-d numpy/cupy scalars (numpy int64 etc. are not python ints).
+    if getattr(obj, "ndim", None) == 0 and hasattr(obj, "item"):
+        try:
+            return obj.item()
+        except Exception:
+            return str(obj)
+    if isinstance(obj, (list, tuple)):
+        if _depth > 8:
+            return str(obj)
+        return [_jsonify(x, _depth + 1) for x in obj]
+    if isinstance(obj, dict):
+        return {str(k): _jsonify(v, _depth + 1) for k, v in obj.items()}
+    if hasattr(obj, "tolist"):
+        try:
+            return _jsonify(obj.tolist(), _depth + 1)
+        except Exception:
+            pass
+    return str(obj)
+
+
+def _extract_contraction_info(info):
+    """Pull cost fields off a cuTensorNet path-optimizer ``info`` object.
+
+    Defensive — a missing or unreadable attribute is recorded rather than raised,
+    so cost collection can never break a decomposition run.
+    """
+    fields = {}
+    for src, dst in (
+        ("opt_cost", "opt_cost_flops"),
+        ("largest_intermediate", "largest_intermediate_elements"),
+        ("num_slices", "num_slices"),
+        ("slices", "slices"),
+        ("intermediate_modes", "intermediate_modes"),
+        ("path", "contract_path"),
+    ):
+        try:
+            fields[dst] = _jsonify(getattr(info, src, None))
+        except Exception as exc:  # noqa: BLE001 — never let collection abort a run
+            fields[dst] = f"<unreadable: {exc!r}>"
+    return fields
+
+
+def contraction_scalar_row(stats):
+    """Flatten the scalar contraction-cost fields for a flat traces.csv row.
+
+    Keys are prefixed with ``ctn_``. Pass ``None`` (e.g. for non-cuTensorNet
+    decomposition methods) to get a row of ``None`` placeholders so the CSV
+    schema stays stable across steps.
+    """
+    stats = stats or {}
+    return {f"ctn_{k}": stats.get(k) for k in CONTRACTION_SCALAR_KEYS}
+
+
 class cuTensorNetwork:
     _DTYPE_OPTIONS = ("float16", "float32", "float64")
 
@@ -202,6 +280,8 @@ class cuTensorNetwork:
 
         self.cores = []
         self._qualifiers = None
+        # Populated by _plan_and_autotune() on each SGD/Adam decomposition pass.
+        self.contraction_stats = None
         if cores is None:
             self.cores = _random_cores_from_adj(
                 self.adj_matrix, init_std, self.backend, backend_dtype
@@ -232,6 +312,41 @@ class cuTensorNetwork:
         
         # Native cuTensorNet optimizer is sufficient on a dedicated A5000.
         self.ntwrk.contract_path()
+
+    def _plan_and_autotune(self, autotune_iterations=5):
+        """Plan the contraction path and autotune, recording cost into ``self.contraction_stats``.
+
+        Used by the cuTensorNet-backed SGD/Adam decomposition paths. Returns
+        ``(path, info)`` from ``contract_path()`` so callers can build the
+        per-iteration optimize config. Cost collection is cheap (path planning
+        is microseconds–milliseconds for these network sizes) and fully
+        wrapped — a failure to read a field degrades to a placeholder string
+        rather than aborting the decomposition.
+        """
+        t0 = time.perf_counter()
+        path, info = self.ntwrk.contract_path()
+        path_opt_time_s = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        autotune_result = self.ntwrk.autotune(iterations=autotune_iterations)
+        autotune_time_s = time.perf_counter() - t0
+
+        stats = {
+            "backend": self.backend,
+            "dtype": self.dtype_name,
+            "eq": self.eq,
+            "n_cores": int(self.dim),
+            "path_opt_time_s": path_opt_time_s,
+            "autotune_iterations": int(autotune_iterations),
+            "autotune_time_s": autotune_time_s,
+            "autotune_result": _jsonify(autotune_result),
+        }
+        try:
+            stats.update(_extract_contraction_info(info))
+        except Exception as exc:  # noqa: BLE001
+            stats["contraction_info_error"] = repr(exc)
+        self.contraction_stats = stats
+        return path, info
 
     def contract_ntwrk(self):
         return self.ntwrk.contract()
@@ -298,8 +413,8 @@ class cuTensorNetwork:
         tol=None,
         pct_loss_improvment=0.025,
         init_lr=None,
-        loss_patience=2500,
-        lr_patience=250,
+        loss_patience=500,
+        lr_patience=50,
         max_epochs=25000,
         momentum=0.5,
         method="sgd",
@@ -312,7 +427,7 @@ class cuTensorNetwork:
         kwargs["use_adam"] = use_adam
 
         if init_lr is None:
-            init_lr = 0.002 if use_adam else 0.01
+            init_lr = 0.01
 
         # --- Optional warm-start pass (modifies self.cores in-place) ---
         warm_losses = []
@@ -375,9 +490,9 @@ class cuTensorNetwork:
         target,
         tol=None,
         pct_loss_improvment=0.025,
-        init_lr=0.05,
-        loss_patience=2500,
-        lr_patience=250,
+        init_lr=0.01,
+        loss_patience=500,
+        lr_patience=50,
         max_epochs=25000,
         momentum=0.5,
         **kwargs,
@@ -407,8 +522,7 @@ class cuTensorNetwork:
         target = target.to(dtype=ref_tensor.dtype, device=ref_tensor.device)
         target_norm = torch.norm(target).clamp_min(torch.finfo(target.dtype).eps)
 
-        path, info = self.ntwrk.contract_path()
-        self.ntwrk.autotune(iterations=5)
+        path, info = self._plan_and_autotune(autotune_iterations=5)
         slices = getattr(info, "slices", None)
         optimize_cfg = {"path": path, "slicing": slices}
 
@@ -458,9 +572,9 @@ class cuTensorNetwork:
         target,
         tol=0.01,
         pct_loss_improvment=0.025,
-        init_lr=0.05,
-        loss_patience=2500,
-        lr_patience=250,
+        init_lr=0.01,
+        loss_patience=500,
+        lr_patience=50,
         max_epochs=25000,
         momentum=0.55,
         beta1=0.9,
@@ -485,8 +599,7 @@ class cuTensorNetwork:
         target = target.astype(self.cores[0].dtype, copy=False)
         target_norm = cp.linalg.norm(target)
 
-        self.ntwrk.contract_path()
-        self.ntwrk.autotune(iterations=5)
+        self._plan_and_autotune(autotune_iterations=5)
 
         lr = float(init_lr)
         velocity = [cp.zeros_like(node) for node in self.cores]

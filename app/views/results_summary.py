@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from app.plotting import figures
-from app.plotting.traces import load_traces
+from app.plotting.traces import derive_trace_metrics, load_traces
 
 
 @dataclass
@@ -23,6 +23,58 @@ class SummaryControls:
     use_efficiency: bool = False
     loss_threshold: float = float("inf")
     threshold_mode: str = "fade"
+
+
+def _phase_options(phases: pd.Series) -> list[str]:
+    preferred = ["sobol_init", "init", "bo", "main", "random"]
+    present = set(phases.dropna().astype(str))
+    ordered = [p for p in preferred if p in present]
+    ordered.extend(sorted(present - set(ordered)))
+    return ordered
+
+
+# Only Sobol initialization is pre-search setup. TnALE's "init" phase is the
+# initial-radius ALE search and is kept visible.
+_INIT_PHASES = ("sobol_init",)
+
+
+def _render_phase_filter(df: pd.DataFrame) -> list[str]:
+    options = _phase_options(df["phase"])
+    # Hide the Sobol init by default — it explores random high-objective
+    # structures that blow up the y-axis. This is a *display* filter only:
+    # best-so-far and incumbent metrics are derived over the full run before
+    # this filter is applied, so hiding init never changes the curves' values.
+    default = [p for p in options if p not in _INIT_PHASES] or options
+    st.sidebar.markdown("### Trace phases")
+    selected = st.sidebar.multiselect(
+        "Include phases",
+        options,
+        default=default,
+        help="Display filter only — best-so-far and incumbent statistics are "
+             "always computed over the full run, including init. When the "
+             "Sobol init is hidden, its final eval is still drawn as the "
+             "shared best-of-init anchor point.",
+    )
+    return selected
+
+
+def _apply_phase_filter(df: pd.DataFrame, selected: list[str]) -> pd.DataFrame:
+    """Restrict `df` to the selected phases for display.
+
+    For a hidden init phase, the *last* eval of that phase is kept per
+    (run, config_id, seed): it carries the best-of-init objective, so every
+    curve visibly starts from the common point before the methods diverge.
+    """
+    keep = df["phase"].isin(selected)
+    hidden_init = [p for p in _INIT_PHASES if p not in selected]
+    if hidden_init:
+        init_rows = df[df["phase"].isin(hidden_init)]
+        if not init_rows.empty:
+            anchors = init_rows.groupby(
+                ["run", "config_id", "seed"], sort=False
+            )["n_evals"].idxmax()
+            keep.loc[anchors] = True
+    return df[keep].copy()
 
 
 def _render_controls(df: pd.DataFrame) -> SummaryControls:
@@ -45,8 +97,9 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
         use_efficiency = metric == "Efficiency"
     loss_threshold = st.sidebar.number_input(
         "Loss threshold (RSE)", min_value=0.0, max_value=rse_max, value=rse_max,
-        step=max(rse_max / 50, 1e-4), format="%.4f",
-        help="On the runtime scatter, points whose incumbent RSE exceeds this.",
+        step=max(rse_max / 50, 1e-4), format="%.4f", key="loss_threshold",
+        help="On the runtime scatter, points whose incumbent RSE exceeds this; "
+             "also marked on the RSE-distribution diagnostic.",
     )
     threshold_mode = st.sidebar.radio(
         "Above threshold", ["Fade", "Hide"], horizontal=True,
@@ -65,12 +118,40 @@ def render_results_summary(repo_root: Path) -> None:
         st.info("Select one or more completed results in the table above.")
         return
 
-    df = load_traces(repo_root, keys)
-    if df.empty:
+    raw_df = load_traces(repo_root, keys, derive=False)
+    if raw_df.empty:
         st.info("No trace data found for the selected results.")
         return
 
+    # Derive best-so-far / incumbent metrics over the *full* run, then apply the
+    # phase filter for display only. Filtering before derivation would reset the
+    # running-best and make methods' curves diverge at the first shown eval.
+    df_full = derive_trace_metrics(raw_df)
+    if df_full.empty:
+        st.info("No trace data found for the selected results.")
+        return
+
+    selected_phases = _render_phase_filter(df_full)
+    df = _apply_phase_filter(df_full, selected_phases)
+    if df.empty:
+        st.info("No trace rows match the selected phase filter.")
+        return
+
     controls = _render_controls(df)
+    render_summary_plots(df, controls, key_prefix="summary")
+
+
+# ---------------------------------------------------------------------------
+# Shared plotting — used by the Results Summary tab (all seeds) and the
+# per-seed Performance tab in Diagnostics (single seed). Adapts automatically:
+# the same charts simply contain one seed's traces.
+# ---------------------------------------------------------------------------
+
+def render_summary_plots(
+    df: pd.DataFrame, controls: SummaryControls, key_prefix: str = "",
+) -> None:
+    """Draw the results-summary charts for `df` (already derived + phase-filtered).
+    `key_prefix` keeps chart element-ids unique when rendered in several tabs."""
     cr_word = "efficiency" if controls.use_efficiency else "compression ratio"
 
     # MABSS and global/local search baselines optimise different objectives — RSE vs. CR + λ·RSE —
@@ -85,25 +166,27 @@ def render_results_summary(repo_root: Path) -> None:
                 mabss_df, y_title="Objective (RSE)", show_cr=True,
                 use_efficiency=controls.use_efficiency,
             ),
-            width="stretch",
+            width="stretch", key=f"{key_prefix}_mabss_obj",
         )
 
     if not search_df.empty:
-        st.caption("**BOSS / TnALE / Random** — best objective (CR + λ·RSE) so far; Sobol init excluded where present.")
+        st.caption("**BOSS / TnALE / Random** — best objective (CR + λ·RSE) so far. "
+                   "Sobol init hidden by default — its final eval is kept as the shared "
+                   "start point; toggle the full phase under *Trace phases* in the sidebar.")
         st.plotly_chart(
             figures.objective_curves(
                 search_df, y_title="Best objective (CR + λ·RSE)",
             ),
-            width="stretch",
+            width="stretch", key=f"{key_prefix}_search_obj",
         )
 
     if not search_df.empty:
-        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & RSE of the best-objective structure so far.")
+        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & λ·RSE of the best-objective structure so far.")
         st.plotly_chart(
             figures.incumbent_cr_rse(
                 search_df, use_efficiency=controls.use_efficiency,
             ),
-            width="stretch",
+            width="stretch", key=f"{key_prefix}_inc_cr_rse",
         )
 
     scatter_caption = (
@@ -123,13 +206,41 @@ def render_results_summary(repo_root: Path) -> None:
         col_a, col_b = st.columns(2)
         with col_a:
             st.caption(scatter_caption)
-            st.plotly_chart(scatter_fig, width="stretch")
+            st.plotly_chart(scatter_fig, width="stretch", key=f"{key_prefix}_scatter")
         with col_b:
             st.caption("**BOSS / TnALE / Random** — best CR found vs. generating-structure CR.")
             st.plotly_chart(
                 figures.incumbent_vs_generating_cr(search_df),
-                width="stretch",
+                width="stretch", key=f"{key_prefix}_gen_cr",
             )
     else:
         st.caption(scatter_caption)
-        st.plotly_chart(scatter_fig, width="stretch")
+        st.plotly_chart(scatter_fig, width="stretch", key=f"{key_prefix}_scatter")
+
+
+def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
+    """Per-seed Performance view: the results-summary charts for one seed only
+    (no averaging). Reuses the global Graph-settings (loss threshold) where set;
+    phase filtering uses the default (Sobol init hidden)."""
+    raw_df = load_traces(repo_root, keys, derive=False)
+    raw_df = raw_df[raw_df["seed"] == seed]
+    if raw_df.empty:
+        st.info("No trace data for this seed.")
+        return
+
+    df_full = derive_trace_metrics(raw_df)
+    if df_full.empty:
+        st.info("No trace data for this seed.")
+        return
+
+    options = _phase_options(df_full["phase"])
+    selected = [p for p in options if p not in _INIT_PHASES] or options
+    df = _apply_phase_filter(df_full, selected)
+    if df.empty:
+        st.info("No trace rows for this seed after the default phase filter.")
+        return
+
+    controls = SummaryControls(
+        loss_threshold=float(st.session_state.get("loss_threshold", float("inf"))),
+    )
+    render_summary_plots(df, controls, key_prefix=f"perf_{seed}")

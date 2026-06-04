@@ -11,7 +11,7 @@ from torch import Tensor
 
 import cupy as cp
 
-from tensors.networks.cutensor_network import cuTensorNetwork
+from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
 from tnss.utils import triu_to_adj_matrix
 
 
@@ -23,7 +23,13 @@ def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
 def _eval_tn(target, adj, maxiter, n_runs, min_rse, *, method="pam",
              backend="cupy", dtype="float32",
              init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
-    """Evaluate one candidate with cuTensorNetwork decomposition."""
+    """Evaluate one candidate with cuTensorNetwork decomposition.
+
+    Returns ``(cr, best_rse, elapsed, best_losses, contraction_stats)`` where
+    ``best_losses`` is the loss trajectory of the restart that achieved the
+    best RSE and ``contraction_stats`` is the cuTensorNet path/autotune cost
+    dict (identical across restarts — topology is fixed).
+    """
     t0 = time.time()
     tgt_np = target.numpy() if hasattr(target, "numpy") else target
     target_cp = cp.asarray(tgt_np)
@@ -32,6 +38,7 @@ def _eval_tn(target, adj, maxiter, n_runs, min_rse, *, method="pam",
     cr = float(net.network_size()) / float(net.target_size())
 
     best_rse = float("inf")
+    best_losses: list[float] = []
     for _ in range(n_runs):
         losses = net.decompose(
             target_cp,
@@ -43,15 +50,18 @@ def _eval_tn(target, adj, maxiter, n_runs, min_rse, *, method="pam",
             lr_patience=lr_patience,
         )
         rse = float(losses[-1]) if losses else float("inf")
-        best_rse = min(best_rse, rse)
+        if rse < best_rse:
+            best_rse = rse
+            best_losses = [float(x) for x in losses]
         if best_rse < min_rse:
             break
 
     elapsed = time.time() - t0
+    contraction_stats = net.contraction_stats
     del net, adj_cp, target_cp
     if cp.get_default_memory_pool() is not None:
         cp.get_default_memory_pool().free_all_blocks()
-    return cr, best_rse, elapsed
+    return cr, best_rse, elapsed, best_losses, contraction_stats
 
 
 class RandomSearch:
@@ -77,6 +87,8 @@ class RandomSearch:
         momentum: float = 0.5,
         loss_patience: int = 2500,
         lr_patience: int = 250,
+        init_method: str = "random",
+        n_sobol_init: int = 10,
         seed: int | None = None,
         verbose: bool = True,
     ) -> None:
@@ -96,19 +108,32 @@ class RandomSearch:
         self.momentum = momentum
         self.loss_patience = loss_patience
         self.lr_patience = lr_patience
+        if init_method not in ("random", "sobol"):
+            raise ValueError(f"init_method must be 'random' or 'sobol', got {init_method!r}")
+        self.init_method = init_method
+        self.n_sobol_init = n_sobol_init
         self.seed = seed
         self.verbose = verbose
 
         self.rng = np.random.default_rng(seed)
         self.rows: list[dict] = []
+        # Per-step decomposition loss trajectories and cuTensorNet contraction
+        # cost, written alongside traces.csv as decomp_traces.json /
+        # contraction_traces.json.
+        self.decomp_traces: list[dict] = []
+        self.contraction_traces: list[dict] = []
         self.train_X_int: list[Tensor] = []
         self.train_Y_rse: list[float] = []
         self.train_Y_cr: list[float] = []
         self.train_t: list[float] = []
 
     def run(self, progress_file: Path | None = None) -> tuple[dict, list[dict]]:
+        if self.init_method == "sobol":
+            self._sobol_init(progress_file)
+
+        step_offset = len(self.rows)
         for step in range(self.budget):
-            row = self._observe(step=step)
+            row = self._observe(step=step_offset + step, phase="random")
             self._atomic_write(
                 progress_file,
                 {"phase": "random", "step": step + 1, "budget": self.budget},
@@ -146,13 +171,41 @@ class RandomSearch:
         vals = self.rng.integers(1, self.max_rank + 1, size=self.D, dtype=np.int64)
         return torch.tensor(vals, dtype=torch.int)
 
-    def _observe(self, *, step: int) -> dict:
+    def _sobol_init(self, progress_file: Path | None) -> None:
+        from botorch.utils.sampling import draw_sobol_samples
+        from botorch.utils.transforms import unnormalize
+
+        bounds = torch.stack([
+            torch.ones(self.D, dtype=torch.double),
+            torch.full((self.D,), float(self.max_rank), dtype=torch.double),
+        ])
+        std_bounds = torch.zeros_like(bounds)
+        std_bounds[1] = 1.0
+        sobol = draw_sobol_samples(
+            bounds=std_bounds, n=self.n_sobol_init, q=1, seed=self.seed,
+        ).squeeze(1)
+        samples = unnormalize(sobol, bounds).round().clamp(1, self.max_rank).to(torch.int)
+
+        for i, x_int_flat in enumerate(samples):
+            row = self._observe(step=i, phase="sobol_init", x_int_flat=x_int_flat)
+            if self.verbose:
+                print(
+                    f"[Random Sobol init {i + 1}/{self.n_sobol_init}] "
+                    f"obj={row['objective']:.5f}  RSE={row['rse']:.5f}  CR={row['cr']:.5f}"
+                )
+            self._atomic_write(
+                progress_file,
+                {"phase": "sobol_init", "step": i + 1, "budget": self.n_sobol_init},
+            )
+
+    def _observe(self, *, step: int, phase: str, x_int_flat: Tensor | None = None) -> dict:
         t0 = time.time()
-        x_int_flat = self._sample_x_int()
+        if x_int_flat is None:
+            x_int_flat = self._sample_x_int()
         sample_time = time.time() - t0
         adj = _triu_to_full(x_int_flat, self.t_shape).int()
 
-        cr, rse, eval_time = _eval_tn(
+        cr, rse, eval_time, losses, ctn_stats = _eval_tn(
             self.target,
             adj,
             self.maxiter_tn,
@@ -169,7 +222,7 @@ class RandomSearch:
 
         row = {
             "step": step,
-            "phase": "random",
+            "phase": phase,
             "cr": cr,
             "rse": rse,
             "step_loss": rse,
@@ -181,8 +234,13 @@ class RandomSearch:
             "sample_time_s": sample_time,
             "suggest_time_s": sample_time,
             "step_time_s": sample_time + eval_time,
+            **contraction_scalar_row(ctn_stats),
         }
         self.rows.append(row)
+        self.decomp_traces.append({"step": step, "phase": phase, "losses": losses})
+        self.contraction_traces.append(
+            {"step": step, "phase": phase, **(ctn_stats or {})}
+        )
         self.train_X_int.append(x_int_flat)
         self.train_Y_rse.append(rse)
         self.train_Y_cr.append(cr)

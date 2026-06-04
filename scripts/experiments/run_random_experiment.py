@@ -61,6 +61,19 @@ def main() -> None:
     parser.add_argument("--momentum", type=float, default=0.5)
     parser.add_argument("--loss-patience", type=int, default=2500)
     parser.add_argument("--lr-patience", type=int, default=250)
+    parser.add_argument(
+        "--init-method",
+        type=str,
+        default="random",
+        choices=["random", "sobol"],
+        help="'random' = no separate init phase. 'sobol' = BOSS-style Sobol init before random samples.",
+    )
+    parser.add_argument(
+        "--n-sobol-init",
+        type=int,
+        default=10,
+        help="Number of Sobol candidates evaluated when --init-method=sobol.",
+    )
     parser.add_argument("--out-dir", type=str, required=True)
     parser.add_argument("--target-path", type=str, default=None)
     parser.add_argument("--adj-path", type=str, default=None)
@@ -91,6 +104,8 @@ def main() -> None:
         momentum=args.momentum,
         loss_patience=args.loss_patience,
         lr_patience=args.lr_patience,
+        init_method=args.init_method,
+        n_sobol_init=args.n_sobol_init,
         seed=args.seed,
         verbose=True,
     )
@@ -98,9 +113,9 @@ def main() -> None:
     t0 = time.time()
     progress_file.write_text(
         json.dumps({
-            "phase": "random",
+            "phase": "sobol_init" if args.init_method == "sobol" else "random",
             "step": 0,
-            "budget": args.budget,
+            "budget": args.budget + (args.n_sobol_init if args.init_method == "sobol" else 0),
             "started_at": t0,
         })
     )
@@ -114,6 +129,11 @@ def main() -> None:
     df["Algo"] = "random"
     df["Seed"] = args.seed
     df.to_csv(out_dir / "traces.csv", index=False)
+
+    with open(out_dir / "decomp_traces.json", "w") as f:
+        json.dump(algo.decomp_traces, f)
+    with open(out_dir / "contraction_traces.json", "w") as f:
+        json.dump(algo.contraction_traces, f)
 
     res = algo.get_results()
     np.savez(
@@ -129,6 +149,8 @@ def main() -> None:
         "algo": "random",
         "Seed": args.seed,
         "budget": args.budget,
+        "init_method": args.init_method,
+        "n_sobol_init": args.n_sobol_init if args.init_method == "sobol" else 0,
         "total_evals": summary.get("total_evals", len(rows)),
         "objective_lambda": args.lamda,
         "best_objective": float(summary.get("best_objective", float("nan"))),

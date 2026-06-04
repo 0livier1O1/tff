@@ -28,7 +28,7 @@ from app.algo_widgets import render_algo_configs
 from app.views.analyze import render_analyze_sidebar
 from app.utils import _list_tmux_sessions
 
-APP_MODES = ["Deployment", "Analyze"]
+APP_MODES = ["Deployment", "Analysis"]
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ def render_sidebar() -> SidebarConfig:
 
     st.sidebar.markdown("---")
 
-    if cfg.app_mode == "Analyze":
+    if cfg.app_mode == "Analysis":
         render_analyze_sidebar(cfg, ROOT)
         return cfg
 
@@ -56,7 +56,7 @@ def render_sidebar() -> SidebarConfig:
 
 def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
     cfg.extend_mode = st.sidebar.toggle(
-        "Extend existing run", value=False,
+        "Extend existing run", value=False, key="extend_mode_toggle",
         help="Add new algorithm configs (and optionally new seeds) to an existing run. "
              "The run's problem is locked.",
     )
@@ -74,7 +74,7 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
 
     st.sidebar.markdown("### General Settings")
     _sc1, _sc2 = st.sidebar.columns(2)
-    cfg.seeds_str = _sc1.text_input("Random Seeds (csv)", "1", help=SEEDS)
+    cfg.seeds_str = _sc1.text_input("Random Seeds (csv)", "1", key="seeds_str_input", help=SEEDS)
     cfg.cuda_device = _sc2.selectbox("CUDA Device", [0, 1], index=0, help=CUDA_DEVICE)
     if cfg.extend_mode:
         cfg.overwrite = st.sidebar.toggle(
@@ -92,7 +92,14 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
             help=RUN_NAME,
         )
 
-    st.sidebar.markdown("### Algorithms")
+    _algo_hdr, _algo_clear = st.sidebar.columns([2, 1], vertical_alignment="bottom")
+    _algo_hdr.markdown("### Algorithms")
+    if _algo_clear.button(
+        "Clear all", key="clear_all_algos", width="stretch", type="primary",
+        help="Remove all algorithm configs at once",
+    ):
+        st.session_state["algo_configs"] = []
+        st.rerun()
     render_algo_configs(cfg)
 
 

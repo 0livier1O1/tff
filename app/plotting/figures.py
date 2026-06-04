@@ -10,9 +10,12 @@ legend explains which line style is which.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
 from plotly.subplots import make_subplots
+from scipy.stats import spearmanr
 
 from app.plotting.colors import colors_for, rgba
 
@@ -143,12 +146,13 @@ def incumbent_cr_rse(
     *,
     use_efficiency: bool = False,
 ) -> go.Figure:
-    """2×2 — the incumbent's compression ratio (top row) and RSE (bottom row),
+    """2×2 — the incumbent's compression ratio (top row) and λ·RSE (bottom row),
     each vs number of function evaluations (left) and cumulative runtime (right).
     The incumbent is the structure achieving the running-best objective so far;
-    one line per config. Axes are shared (x down columns, y across rows) so the
-    four panels stay compact and read together. `use_efficiency` swaps the top
-    row from raw CR to efficiency (CR ÷ the generating structure's CR).
+    one line per config. The RSE row is weighted by the config's objective λ so
+    it reads on the same scale as its CR + λ·RSE contribution. Axes are shared
+    (x down columns, y across rows) so the four panels stay compact and read
+    together. `use_efficiency` swaps the top row from raw CR to efficiency.
     """
     fig = make_subplots(
         rows=2, cols=2, shared_xaxes=True, shared_yaxes=True,
@@ -163,8 +167,10 @@ def incumbent_cr_rse(
     palette = colors_for([family for *_, family in configs])
 
     for (run, config_id, label, _family), color in zip(configs, palette):
-        g = df[(df["run"] == run) & (df["config_id"] == config_id)].groupby("n_evals")
-        cr, rse = g[inc_col].mean(), g["inc_rse"].mean()
+        sel = df[(df["run"] == run) & (df["config_id"] == config_id)]
+        lam = float(sel["lambda_fitness"].iloc[0])
+        g = sel.groupby("n_evals")
+        cr, rse = g[inc_col].mean(), g["inc_rse"].mean() * lam
         x_e, x_t = cr.index.values, g["cum_time_s"].mean().values
         _line(fig, x_e, cr.values, color, label, row=1, col=1, showlegend=True)
         _line(fig, x_t, cr.values, color, label, row=1, col=2)
@@ -175,7 +181,7 @@ def incumbent_cr_rse(
     fig.update_xaxes(title_text="Function evaluations", row=2, col=1)
     fig.update_xaxes(title_text="Cumulative runtime (s)", row=2, col=2)
     fig.update_yaxes(title_text=cr_label, row=1, col=1)
-    fig.update_yaxes(title_text="RSE", row=2, col=1)
+    fig.update_yaxes(title_text="λ·RSE", row=2, col=1)
     fig.update_yaxes(rangemode="nonnegative")
     fig.update_yaxes(showgrid=False)
     fig.update_layout(
@@ -197,9 +203,10 @@ def cr_runtime_scatter(
     threshold_mode: str = "fade",
 ) -> go.Figure:
     """Scatter of final compression ratio (or efficiency) vs runtime-to-incumbent
-    — one marker per (config, seed), coloured by config. Marker size grows with
-    the incumbent RSE. Points whose RSE exceeds `loss_threshold` are either faded
-    (`threshold_mode="fade"`) or dropped (`"hide"`).
+    — one marker per (config, seed), coloured by config, with the seed number
+    printed inside. Marker size grows with the incumbent RSE. Points whose RSE
+    exceeds `loss_threshold` are either faded (`threshold_mode="fade"`) or
+    dropped (`"hide"`).
     """
     y_col = "inc_efficiency" if use_efficiency else "inc_cr"
     y_label = "Efficiency" if use_efficiency else "Compression ratio"
@@ -230,17 +237,20 @@ def cr_runtime_scatter(
     r_span = r_hi - r_lo
 
     def _sizes(values) -> list[float]:
-        """Marker diameter (px) ∝ RSE."""
+        """Marker diameter (px) ∝ RSE — floored well above the seed label's
+        size so even the smallest marker stays readable."""
         if r_span <= 0:
-            return [16.0] * len(values)
-        return [8.0 + 24.0 * (v - r_lo) / r_span for v in values]
+            return [24.0] * len(values)
+        return [18.0 + 22.0 * (v - r_lo) / r_span for v in values]
 
     for (run, config_id, label, _family), color in zip(configs, palette):
         sub = finals[(finals["run"] == run) & (finals["config_id"] == config_id)]
         opacity = [1.0 if r <= loss_threshold else 0.2 for r in sub["inc_rse"]]
         fig.add_trace(go.Scatter(
-            x=sub["runtime"], y=sub[y_col], mode="markers",
+            x=sub["runtime"], y=sub[y_col], mode="markers+text",
             name=label, legendgroup=label,
+            text=sub["seed"], textposition="middle center",
+            textfont=dict(color="white", size=10),
             marker=dict(color=color, size=_sizes(sub["inc_rse"]), opacity=opacity,
                         line=dict(width=0.5, color="white")),
             customdata=sub[["seed", "inc_rse"]],
@@ -305,4 +315,239 @@ def incumbent_vs_generating_cr(df: pd.DataFrame) -> go.Figure:
         template="plotly_white", height=_HEIGHT,
         margin=dict(l=0, r=0, t=20, b=0), hovermode="closest", legend=_LEGEND,
     )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Per-seed convergence (Diagnostics tab)
+# ---------------------------------------------------------------------------
+
+def seed_convergence(df: pd.DataFrame) -> go.Figure:
+    """One seed's convergence — best objective, incumbent CR and incumbent RSE
+    vs function evaluations, one line per config. `objective` is shown as the
+    running best (cumulative minimum) so the curve is monotone for every family.
+    """
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04)
+    if df.empty:
+        return fig
+
+    configs = _config_order(df)
+    palette = colors_for([family for *_, family in configs])
+    for (run, config_id, label, _family), color in zip(configs, palette):
+        g = df[(df["run"] == run) & (df["config_id"] == config_id)].sort_values("n_evals")
+        x = g["n_evals"].values
+        _line(fig, x, g["objective"].cummin().values, color, label,
+              col=1, row=1, showlegend=True)
+        _line(fig, x, g["inc_cr"].values, color, label, col=1, row=2)
+        _line(fig, x, g["inc_rse"].values, color, label, col=1, row=3)
+
+    fig.update_yaxes(title_text="best objective", row=1, col=1)
+    fig.update_yaxes(title_text="incumbent CR", row=2, col=1)
+    fig.update_yaxes(title_text="incumbent RSE", row=3, col=1)
+    fig.update_xaxes(title_text="Function evaluations", row=3, col=1, rangemode="tozero")
+    fig.update_yaxes(showgrid=False)
+    fig.update_layout(
+        template="plotly_white", height=560,
+        margin=dict(l=0, r=0, t=20, b=0), legend=_LEGEND,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# BOSS GP-surrogate diagnostics — fed by app.diagnostics cached frames
+# ---------------------------------------------------------------------------
+
+def gp_calibration(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
+    """One-step-ahead GP calibration — predicted mean ±2σ against the actual
+    target (top), and the standardised residual z = (actual − mean)/σ (bottom).
+    z within ±2 ≈ honest uncertainty."""
+    k = d["k"].values
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06)
+    fig.add_trace(go.Scatter(x=k, y=d["mu"] + 2 * d["sd"], mode="lines", line_width=0,
+                             showlegend=False, hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["mu"] - 2 * d["sd"], mode="lines", line_width=0,
+                             fill="tonexty", fillcolor="rgba(255,127,14,0.2)",
+                             name="±2σ", hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["mu"], mode="lines", name="GP mean",
+                             line=dict(color="#ff7f0e")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["y"], mode="markers", name="actual",
+                             marker_color="#1f77b4"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=(d["y"] - d["mu"]) / d["sd"], mode="markers",
+                             marker_color="#1f77b4", showlegend=False), row=2, col=1)
+    for v in (-2, 0, 2):
+        fig.add_hline(y=v, line_dash="dash", line_color="#999", row=2, col=1)
+    fig.update_yaxes(title_text=lab, row=1, col=1)
+    fig.update_yaxes(title_text="z = (y−μ)/σ", row=2, col=1)
+    fig.update_xaxes(title_text="BO step", row=2, col=1)
+    fig.update_yaxes(showgrid=False)
+    fig.update_layout(template="plotly_white", height=480,
+                      margin=dict(l=0, r=0, t=20, b=0), legend=_LEGEND)
+    return fig
+
+
+def gp_hyperparameters(d: pd.DataFrame) -> go.Figure:
+    """GP hyperparameter trajectories — ARD lengthscales per bond (heatmap) and
+    noise / outputscale (log axis), across BO steps."""
+    k = d["k"].values
+    ls = d[[c for c in d.columns if c.startswith("ls")]].values.T
+    fig = make_subplots(rows=2, cols=1, vertical_spacing=0.09, row_heights=[0.6, 0.4])
+    fig.add_trace(go.Heatmap(x=k, y=list(range(ls.shape[0])), z=ls, colorscale="Viridis",
+                             colorbar=dict(len=0.5, y=0.78)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["noise"], mode="lines", name="noise",
+                             line=dict(color="#d62728")), row=2, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["outputscale"], mode="lines", name="outputscale",
+                             line=dict(color="#9467bd")), row=2, col=1)
+    fig.update_yaxes(title_text="bond dim", row=1, col=1)
+    fig.update_yaxes(title_text="value", type="log", row=2, col=1)
+    fig.update_xaxes(title_text="BO step", row=2, col=1)
+    fig.update_layout(
+        template="plotly_white", height=480, margin=dict(l=0, r=0, t=20, b=0),
+        # Legend dropped to the lower (noise/outputscale) plot so it clears the
+        # heatmap's colorbar above.
+        legend=dict(orientation="v", x=1.01, xanchor="left", y=0.36,
+                    yanchor="top", font=dict(size=10)),
+    )
+    return fig
+
+
+def gp_acquisition(d: pd.DataFrame) -> go.Figure:
+    """Acquisition behaviour — log-EI at the chosen point (declining = search
+    maturing) and the GP σ there (explore ↔ exploit), across BO steps."""
+    k = d["k"].values
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06)
+    fig.add_trace(go.Scatter(x=k, y=d["lei"], mode="lines", line=dict(color="#8c564b")),
+                  row=1, col=1)
+    fig.add_trace(go.Scatter(x=k, y=d["sd"], mode="lines", line=dict(color="#17becf")),
+                  row=2, col=1)
+    fig.update_yaxes(title_text="log-EI at pick", row=1, col=1)
+    fig.update_yaxes(title_text="GP σ at pick", row=2, col=1)
+    fig.update_xaxes(title_text="BO step", row=2, col=1)
+    fig.update_yaxes(showgrid=False)
+    fig.update_layout(template="plotly_white", height=420, showlegend=False,
+                      margin=dict(l=0, r=0, t=20, b=0))
+    return fig
+
+
+def gp_parity(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
+    """One-step-ahead parity — GP-predicted vs actual target, one point per BO
+    step, with the y = x line. Spearman ρ quantifies how well the GP ranks."""
+    rho = spearmanr(d["y"], d["mu"])[0]
+    lo = float(min(d["y"].min(), d["mu"].min()))
+    hi = float(max(d["y"].max(), d["mu"].max()))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", showlegend=False,
+                             hoverinfo="skip", line=dict(color="#999", dash="dash")))
+    fig.add_trace(go.Scatter(x=d["y"], y=d["mu"], mode="markers",
+                             marker_color="#1f77b4", showlegend=False))
+    fig.update_xaxes(title_text=f"actual {lab}")
+    fig.update_yaxes(title_text=f"predicted {lab}", showgrid=False)
+    fig.update_layout(template="plotly_white", height=420,
+                      margin=dict(l=0, r=0, t=40, b=0),
+                      title=f"predicted vs actual  ·  Spearman ρ = {rho:.3f}")
+    return fig
+
+
+def rse_distributions(rse, cr, threshold=None) -> go.Figure:
+    """RSE landscape — RSE and log-RSE histograms, plus log-RSE against CR.
+    Shows whether log(RSE) has the dynamic range to be modelled, and whether
+    the RSE constraint is active in the low-CR search region.
+
+    `threshold` (a loss-threshold RSE value) is marked on every panel — raw on
+    the RSE histogram, log-transformed (vertical / horizontal) on the others.
+    """
+    lrse = np.log(np.clip(rse, 1e-12, None))
+    fig = make_subplots(rows=1, cols=3,
+                        subplot_titles=("RSE", "log RSE", "log RSE vs CR"))
+    fig.add_trace(go.Histogram(x=rse, nbinsx=40, marker_color="#1f77b4"), row=1, col=1)
+    fig.add_trace(go.Histogram(x=lrse, nbinsx=40, marker_color="#ff7f0e"), row=1, col=2)
+    fig.add_trace(go.Scatter(x=cr, y=lrse, mode="markers",
+                             marker=dict(size=5, color="#2ca02c")), row=1, col=3)
+    if threshold and threshold > 0:
+        kw = dict(line_color="#d62728", line_dash="dash", line_width=1.5)
+        fig.add_vline(x=threshold, row=1, col=1, **kw)
+        fig.add_vline(x=float(np.log(threshold)), row=1, col=2, **kw)
+        fig.add_hline(y=float(np.log(threshold)), row=1, col=3, **kw)
+    fig.update_xaxes(title_text="CR", row=1, col=3)
+    fig.update_yaxes(title_text="log RSE", row=1, col=3)
+    fig.update_layout(template="plotly_white", height=360, showlegend=False,
+                      margin=dict(l=0, r=0, t=30, b=0))
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# GP-fitting procedure report
+# ---------------------------------------------------------------------------
+
+def fit_report(do: pd.DataFrame, dr: pd.DataFrame) -> go.Figure:
+    """Secondary report on how the one-step-ahead GP refits behaved: which
+    optimizer each step landed on (L-BFGS first try, L-BFGS after a flaky
+    retry, or the Adam fallback) and the fitted per-point marginal
+    log-likelihood over the run. A higher, flatter MLL curve means the fit
+    converged consistently. Not a model-quality plot — fitting health only.
+    """
+    fig = make_subplots(
+        rows=1, cols=2, column_widths=[0.4, 0.6],
+        subplot_titles=("Optimizer per step", "Fit marginal log-likelihood"),
+    )
+    cats = ["L-BFGS", "L-BFGS (retried)", "Adam fallback"]
+    for df, name, color in ((do, "objective", "#1f77b4"), (dr, "log RSE", "#ff7f0e")):
+        opt, att = df["optimizer"], df["fit_attempts"]
+        counts = [int(((opt == "lbfgs") & (att == 1)).sum()),
+                  int(((opt == "lbfgs") & (att > 1)).sum()),
+                  int((opt == "adam").sum())]
+        fig.add_trace(go.Bar(x=cats, y=counts, name=name, legendgroup=name,
+                             marker_color=color, text=counts, textposition="auto"),
+                      row=1, col=1)
+        fig.add_trace(go.Scatter(x=df["k"], y=df["mll"], mode="lines", name=name,
+                                 legendgroup=name, showlegend=False,
+                                 line_color=color), row=1, col=2)
+    fig.update_yaxes(title_text="steps", row=1, col=1)
+    fig.update_xaxes(title_text="BO step", row=1, col=2)
+    fig.update_yaxes(title_text="MLL / point", row=1, col=2)
+    fig.update_layout(template="plotly_white", height=320, barmode="group",
+                      margin=dict(l=0, r=0, t=30, b=0), legend=_LEGEND)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Decomposition loss curves
+# ---------------------------------------------------------------------------
+
+def decomp_loss_curves(traces: list[dict],
+                       cr_by_step: dict[int, float] | None = None,
+                       log_y: bool = False) -> go.Figure:
+    """Tensor-decomposition loss curves — one line per evaluation, raw loss
+    against optimiser epoch. Lines are shaded along a sequential colorscale,
+    darker for later search steps, so the progression of the search reads at
+    a glance. No legend (one trace per evaluation).
+    If `cr_by_step` is given, the per-step CR is shown in the hover tooltip.
+    With `log_y`, the plotted values are log of the loss (better for losses
+    that span several orders of magnitude); otherwise the raw loss is plotted
+    on a linear axis anchored at zero.
+    """
+    fig = go.Figure()
+    n = len(traces)
+    shades = sample_colorscale(
+        "Blues", [0.3 + 0.7 * i / max(n - 1, 1) for i in range(n)])
+    for color, t in zip(shades, traces):
+        losses = t["losses"]
+        y = np.log(losses) if log_y else losses
+        cr_str = ""
+        if cr_by_step is not None:
+            cr = cr_by_step.get(int(t["step"]))
+            if cr is not None:
+                cr_str = f"<br>CR {cr:.4g}"
+        fig.add_trace(go.Scattergl(
+            x=list(range(len(losses))), y=y, mode="lines",
+            line=dict(color=color, width=1), showlegend=False,
+            hovertemplate=(f"step {t['step']}<br>epoch %{{x}}<br>"
+                           f"loss %{{y:.4g}}{cr_str}<extra></extra>"),
+        ))
+    fig.update_xaxes(title_text="Epoch", rangemode="tozero")
+    if log_y:
+        fig.update_yaxes(title_text="log10 Decomposition loss")
+    else:
+        fig.update_yaxes(title_text="Decomposition loss", rangemode="tozero")
+    fig.update_layout(template="plotly_white", height=_HEIGHT,
+                      margin=dict(l=0, r=0, t=20, b=0), showlegend=False)
     return fig

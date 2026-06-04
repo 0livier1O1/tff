@@ -10,6 +10,7 @@ import json
 import streamlit as st
 
 from app.sidebar import render_sidebar
+from app.algo_widgets import render_saved_library_section
 from app.runner import launch_run
 from app.jobs import render_job_status_panel
 from app.views.extend import render_extend_preview
@@ -27,6 +28,13 @@ st.markdown(
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
+
+    /* Hide only the expand/collapse chevron on popover buttons (its own
+       wrapper), keeping the button's own label icon. */
+    [data-testid="stPopoverButton"] [class*="e1jdirsb1"],
+    [data-testid="stPopoverButton"] [class*="e1jdirsb0"] > div:last-child {
+        display: none !important;
+    }
 
     div[data-testid="stTooltipContent"] {
         background-color: #ffffff !important;
@@ -57,7 +65,7 @@ cfg = render_sidebar()
 # Analyze mode — show the merged algorithms table and stop here
 # ---------------------------------------------------------------------------
 
-if cfg.app_mode == "Analyze":
+if cfg.app_mode == "Analysis":
     render_analyze_main(cfg, ROOT)
     st.stop()
 
@@ -72,6 +80,9 @@ st.markdown(
 if st.sidebar.button("Execute Tensor Evaluation", type="primary", width="stretch"):
     launch_run(cfg, ROOT)
     st.rerun()
+
+# Global saved-config library — its own section under the Execute button.
+render_saved_library_section()
 
 # Restore active runs from disk after browser reconnect
 if "active_runs" not in st.session_state:
