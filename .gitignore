@@ -9,7 +9,18 @@ results/
 README.md
 refs/
 artifacts/
-reports/
+reports/*
+!reports/cr_tensorization/
+!reports/cr_tensorization/**
+reports/cr_tensorization/**/__pycache__/
+reports/cr_tensorization/**/*.pyc
 .claude/
 decomp_tests/
 CLAUDE.md
+playground/
+
+# Context-only reference dirs (not real submodules; kept on disk for the agent)
+context/TnALE/
+context/TNLS/
+context/tensor_networks/
+overleaf/
