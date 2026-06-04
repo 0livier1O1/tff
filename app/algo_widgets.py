@@ -224,12 +224,12 @@ def _render_decomp(acfg: AlgoConfig) -> None:
 def _render_mabss(acfg: MABSSConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.mabss_budget = c1.number_input(
-        "Budget", min_value=1, max_value=10000, value=acfg.mabss_budget,
+    acfg.budget = c1.number_input(
+        "Budget", min_value=1, max_value=10000, value=acfg.budget,
         key=f"mabss_budget_{cid}", help=MABSS_BUDGET,
     )
-    acfg.mabss_max_rank = c2.number_input(
-        "Max Search Rank", min_value=2, max_value=100, value=acfg.mabss_max_rank,
+    acfg.max_rank = c2.number_input(
+        "Max Search Rank", min_value=2, max_value=100, value=acfg.max_rank,
         key=f"mabss_max_rank_{cid}", help=MABSS_MAX_RANK,
     )
 
@@ -251,12 +251,12 @@ def _render_mabss(acfg: MABSSConfig) -> None:
         st.markdown("*GP-UCB surrogate*")
         u1, u2 = st.columns(2)
         _ko = ["matern", "rbf"]
-        acfg.kernel_name = u1.selectbox(
-            "Kernel", _ko, index=_ko.index(acfg.kernel_name) if acfg.kernel_name in _ko else 0,
+        acfg.kernel = u1.selectbox(
+            "Kernel", _ko, index=_ko.index(acfg.kernel) if acfg.kernel in _ko else 0,
             key=f"kernel_{cid}", help=MABSS_GP_KERNEL,
         )
-        acfg.beta = u2.slider(
-            "Exploration β", 1.0, 10.0, float(acfg.beta), 0.5,
+        acfg.ucb_beta = u2.slider(
+            "Exploration β", 1.0, 10.0, float(acfg.ucb_beta), 0.5,
             key=f"beta_{cid}", help=MABSS_GP_BETA,
         )
         n1, n2 = st.columns(2)
@@ -345,35 +345,35 @@ def _render_mabss(acfg: MABSSConfig) -> None:
 def _render_boss(acfg: BOSSConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.boss_budget = c1.number_input(
-        "Budget", min_value=1, max_value=10000, value=acfg.boss_budget,
+    acfg.budget = c1.number_input(
+        "Budget", min_value=1, max_value=10000, value=acfg.budget,
         key=f"boss_budget_{cid}", help=BOSS_BUDGET,
     )
-    acfg.boss_max_bond = c2.number_input(
-        "Max Bond Rank", min_value=1, max_value=100, value=acfg.boss_max_bond,
+    acfg.max_rank = c2.number_input(
+        "Max Bond Rank", min_value=1, max_value=100, value=acfg.max_rank,
         key=f"boss_max_bond_{cid}", help=BOSS_MAX_BOND,
     )
-    acfg.boss_n_init = st.number_input(
-        "Init Points (n_init)", value=acfg.boss_n_init, min_value=2,
+    acfg.n_init = st.number_input(
+        "Init Points (n_init)", value=acfg.n_init, min_value=2,
         key=f"boss_n_init_{cid}", help=BOSS_N_INIT,
     )
     c3, c4 = st.columns(2)
-    acfg.boss_lambda_fitness = c3.number_input(
-        "λ fitness", value=acfg.boss_lambda_fitness, min_value=0.0, format="%f",
+    acfg.lambda_fitness = c3.number_input(
+        "λ fitness", value=acfg.lambda_fitness, min_value=0.0, format="%f",
         key=f"boss_lambda_{cid}", help=BOSS_LAMBDA_FITNESS,
     )
     if acfg.policy == "boss-ucb":
-        acfg.boss_ucb_beta = c4.slider(
-            "UCB β", 0.1, 10.0, float(acfg.boss_ucb_beta), 0.1,
+        acfg.ucb_beta = c4.slider(
+            "UCB β", 0.1, 10.0, float(acfg.ucb_beta), 0.1,
             key=f"boss_ucb_beta_{cid}", help=BOSS_UCB_BETA,
         )
     c5, c6 = st.columns(2)
-    acfg.boss_n_runs = c5.number_input(
-        "N runs", min_value=1, max_value=10, value=acfg.boss_n_runs,
+    acfg.n_runs = c5.number_input(
+        "N runs", min_value=1, max_value=10, value=acfg.n_runs,
         key=f"boss_n_runs_{cid}", help=BOSS_N_RUNS,
     )
-    acfg.boss_min_rse = c6.number_input(
-        "Min RSE", value=acfg.boss_min_rse, format="%e",
+    acfg.feasible_rse = c6.number_input(
+        "Feasible RSE", value=acfg.feasible_rse, format="%e",
         key=f"boss_min_rse_{cid}", help=BOSS_MIN_RSE_DECOMP,
     )
 
@@ -381,48 +381,44 @@ def _render_boss(acfg: BOSSConfig) -> None:
 def _render_cboss(acfg: CBOSSConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.cboss_budget = c1.number_input(
-        "Budget", min_value=1, max_value=10000, value=acfg.cboss_budget,
+    acfg.budget = c1.number_input(
+        "Budget", min_value=1, max_value=10000, value=acfg.budget,
         key=f"cboss_budget_{cid}", help="BO iterations after the initial design.",
     )
-    acfg.cboss_max_bond = c2.number_input(
-        "Max Bond Rank", min_value=1, max_value=100, value=acfg.cboss_max_bond,
+    acfg.max_rank = c2.number_input(
+        "Max Bond Rank", min_value=1, max_value=100, value=acfg.max_rank,
         key=f"cboss_max_bond_{cid}", help="Upper bound on each searched bond rank.",
     )
 
     c3, c4 = st.columns(2)
-    acfg.cboss_n_init = c3.number_input(
-        "Init Points (n_init)", value=acfg.cboss_n_init, min_value=2,
+    acfg.n_init = c3.number_input(
+        "Init Points (n_init)", value=acfg.n_init, min_value=2,
         key=f"cboss_n_init_{cid}", help="Initial design evaluations before BO.",
     )
     _id_opts = ["lhs", "sobol"]
-    acfg.cboss_init_design = c4.selectbox(
+    acfg.init_method = c4.selectbox(
         "Init Design", _id_opts,
-        index=_id_opts.index(acfg.cboss_init_design) if acfg.cboss_init_design in _id_opts else 0,
+        index=_id_opts.index(acfg.init_method) if acfg.init_method in _id_opts else 0,
         key=f"cboss_init_design_{cid}",
         help="'lhs' = Latin hypercube (better per-dim coverage, more likely to seed a "
              "feasible structure); 'sobol' = low-discrepancy.",
     )
 
-    c5, c6 = st.columns(2)
-    acfg.cboss_feasible_rse = c5.number_input(
-        "Feasible RSE", value=acfg.cboss_feasible_rse, format="%e",
+    acfg.feasible_rse = st.number_input(
+        "Feasible RSE", value=acfg.feasible_rse, format="%e",
         key=f"cboss_feasible_rse_{cid}",
-        help="Feasibility threshold: a structure is feasible iff best RSE < this.",
-    )
-    acfg.cboss_min_rse = c6.number_input(
-        "Min RSE (decomp)", value=acfg.cboss_min_rse, format="%e",
-        key=f"cboss_min_rse_{cid}", help="Decomposition early-stop threshold per eval.",
+        help="Feasibility threshold AND decomposition early-stop: a structure is "
+             "feasible iff best RSE < this; decomposition also stops once reached.",
     )
 
     c7, c8 = st.columns(2)
-    acfg.cboss_lambda_fitness = c7.number_input(
-        "λ fitness (plot)", value=acfg.cboss_lambda_fitness, min_value=0.0, format="%f",
+    acfg.lambda_fitness = c7.number_input(
+        "λ fitness (plot)", value=acfg.lambda_fitness, min_value=0.0, format="%f",
         key=f"cboss_lambda_{cid}",
         help="Only for the CR + λ·RSE comparison plot; cBOSS does not optimize this.",
     )
-    acfg.cboss_n_runs = c8.number_input(
-        "N runs", min_value=1, max_value=10, value=acfg.cboss_n_runs,
+    acfg.n_runs = c8.number_input(
+        "N runs", min_value=1, max_value=10, value=acfg.n_runs,
         key=f"cboss_n_runs_{cid}", help="Decomposition restarts per candidate (best RSE kept).",
     )
 
@@ -444,8 +440,8 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
     st.markdown("*Feasibility GP surrogate*")
     g1, g2 = st.columns(2)
     _ko = ["matern", "matern32", "rbf", "weighted_shortest_path"]
-    acfg.cboss_kernel = g1.selectbox(
-        "Kernel", _ko, index=_ko.index(acfg.cboss_kernel) if acfg.cboss_kernel in _ko else 0,
+    acfg.kernel = g1.selectbox(
+        "Kernel", _ko, index=_ko.index(acfg.kernel) if acfg.kernel in _ko else 0,
         key=f"cboss_kernel_{cid}", help="Feasibility-classifier kernel (ARD unless wsp).",
     )
     _vs = ["whitened", "unwhitened"]
@@ -454,7 +450,7 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
         index=_vs.index(acfg.cboss_var_strategy) if acfg.cboss_var_strategy in _vs else 0,
         key=f"cboss_var_strategy_{cid}", help="Variational strategy.",
     )
-    if acfg.cboss_kernel == "weighted_shortest_path":
+    if acfg.kernel == "weighted_shortest_path":
         _wm = ["matern", "bogrape", "soft", "ewsp"]
         acfg.cboss_wsp_mode = st.selectbox(
             "WSP mode", _wm,
@@ -506,39 +502,39 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
 def _render_random(acfg: RandomSearchConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.random_budget = c1.number_input(
-        "Budget", min_value=1, max_value=10000, value=acfg.random_budget,
+    acfg.budget = c1.number_input(
+        "Budget", min_value=1, max_value=10000, value=acfg.budget,
         key=f"random_budget_{cid}", help=RANDOM_BUDGET,
     )
-    acfg.random_max_bond = c2.number_input(
-        "Max Bond Rank", min_value=1, max_value=100, value=acfg.random_max_bond,
+    acfg.max_rank = c2.number_input(
+        "Max Bond Rank", min_value=1, max_value=100, value=acfg.max_rank,
         key=f"random_max_bond_{cid}", help=RANDOM_MAX_BOND,
     )
     c3, c4 = st.columns(2)
-    acfg.random_lambda_fitness = c3.number_input(
-        "λ fitness", value=acfg.random_lambda_fitness, min_value=0.0, format="%f",
+    acfg.lambda_fitness = c3.number_input(
+        "λ fitness", value=acfg.lambda_fitness, min_value=0.0, format="%f",
         key=f"random_lambda_{cid}", help=RANDOM_LAMBDA_FITNESS,
     )
-    acfg.random_n_runs = c4.number_input(
-        "N runs", min_value=1, max_value=10, value=acfg.random_n_runs,
+    acfg.n_runs = c4.number_input(
+        "N runs", min_value=1, max_value=10, value=acfg.n_runs,
         key=f"random_n_runs_{cid}", help=RANDOM_N_RUNS,
     )
-    acfg.random_min_rse = st.number_input(
-        "Min RSE", value=acfg.random_min_rse, format="%e",
+    acfg.feasible_rse = st.number_input(
+        "Feasible RSE", value=acfg.feasible_rse, format="%e",
         key=f"random_min_rse_{cid}", help=RANDOM_MIN_RSE_DECOMP,
     )
     c5, c6 = st.columns(2)
     _init_opts = ["random", "sobol"]
-    acfg.random_init_method = c5.selectbox(
+    acfg.init_method = c5.selectbox(
         "Init Method",
         _init_opts,
-        index=_init_opts.index(acfg.random_init_method)
-        if acfg.random_init_method in _init_opts else 0,
+        index=_init_opts.index(acfg.init_method)
+        if acfg.init_method in _init_opts else 0,
         key=f"random_init_method_{cid}",
         help=RANDOM_INIT_METHOD,
     )
-    acfg.random_n_sobol_init = c6.number_input(
-        "Sobol Init Samples", value=acfg.random_n_sobol_init, min_value=1, step=1,
+    acfg.n_init = c6.number_input(
+        "Sobol Init Samples", value=acfg.n_init, min_value=1, step=1,
         key=f"random_n_sobol_init_{cid}", help=RANDOM_N_SOBOL_INIT,
     )
 
@@ -546,12 +542,12 @@ def _render_random(acfg: RandomSearchConfig) -> None:
 def _render_tnale(acfg: TnALEConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.tnale_budget = c1.number_input(
-        "Budget", min_value=1, max_value=10000, value=acfg.tnale_budget,
+    acfg.budget = c1.number_input(
+        "Budget", min_value=1, max_value=10000, value=acfg.budget,
         key=f"tnale_budget_{cid}", help=TNALE_BUDGET,
     )
-    acfg.tnale_max_rank = c2.number_input(
-        "Max Search Rank", min_value=1, max_value=100, value=acfg.tnale_max_rank,
+    acfg.max_rank = c2.number_input(
+        "Max Search Rank", min_value=1, max_value=100, value=acfg.max_rank,
         key=f"tnale_max_rank_{cid}", help=TNALE_MAX_RANK,
     )
 
@@ -561,8 +557,8 @@ def _render_tnale(acfg: TnALEConfig) -> None:
         "Topology", _topos, index=_topos.index(acfg.tnale_topology),
         key=f"tnale_topology_{cid}", help=TNALE_TOPOLOGY,
     )
-    acfg.tnale_lambda_fitness = c4.number_input(
-        "λ fitness", value=acfg.tnale_lambda_fitness, min_value=0.0, step=1.0,
+    acfg.lambda_fitness = c4.number_input(
+        "λ fitness", value=acfg.lambda_fitness, min_value=0.0, step=1.0,
         key=f"tnale_lambda_{cid}", help=TNALE_LAMBDA_FITNESS,
     )
 
@@ -604,13 +600,13 @@ def _render_tnale(acfg: TnALEConfig) -> None:
 
     c11, c12 = st.columns(2)
     _im = ["sparse", "sobol"]
-    acfg.tnale_init_method = c11.selectbox(
-        "Init Method", _im, index=_im.index(acfg.tnale_init_method),
+    acfg.init_method = c11.selectbox(
+        "Init Method", _im, index=_im.index(acfg.init_method) if acfg.init_method in _im else 0,
         key=f"tnale_init_method_{cid}",
         help="'sparse' = single random sparse start. 'sobol' = BOSS-style Sobol init.",
     )
-    acfg.tnale_n_sobol_init = c12.number_input(
-        "Sobol Init Samples", value=acfg.tnale_n_sobol_init, min_value=1, step=1,
+    acfg.n_init = c12.number_input(
+        "Sobol Init Samples", value=acfg.n_init, min_value=1, step=1,
         key=f"tnale_n_sobol_init_{cid}",
         help="Number of Sobol candidates evaluated when Init Method = sobol.",
     )
@@ -628,11 +624,11 @@ def _render_tnale(acfg: TnALEConfig) -> None:
         )
 
     c15, c16 = st.columns(2)
-    acfg.tnale_n_runs = c15.number_input(
-        "N runs", min_value=1, max_value=10, value=acfg.tnale_n_runs,
+    acfg.n_runs = c15.number_input(
+        "N runs", min_value=1, max_value=10, value=acfg.n_runs,
         key=f"tnale_n_runs_{cid}", help=TNALE_N_RUNS,
     )
-    acfg.tnale_min_rse = c16.number_input(
-        "Min RSE", value=acfg.tnale_min_rse, format="%e",
+    acfg.feasible_rse = c16.number_input(
+        "Feasible RSE", value=acfg.feasible_rse, format="%e",
         key=f"tnale_min_rse_{cid}", help=TNALE_MIN_RSE_DECOMP,
     )

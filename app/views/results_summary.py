@@ -138,6 +138,20 @@ def render_results_summary(repo_root: Path) -> None:
         return
 
     controls = _render_controls(df)
+    render_summary_plots(df, controls, key_prefix="summary")
+
+
+# ---------------------------------------------------------------------------
+# Shared plotting — used by the Results Summary tab (all seeds) and the
+# per-seed Performance tab in Diagnostics (single seed). Adapts automatically:
+# the same charts simply contain one seed's traces.
+# ---------------------------------------------------------------------------
+
+def render_summary_plots(
+    df: pd.DataFrame, controls: SummaryControls, key_prefix: str = "",
+) -> None:
+    """Draw the results-summary charts for `df` (already derived + phase-filtered).
+    `key_prefix` keeps chart element-ids unique when rendered in several tabs."""
     cr_word = "efficiency" if controls.use_efficiency else "compression ratio"
 
     # MABSS and global/local search baselines optimise different objectives — RSE vs. CR + λ·RSE —
@@ -152,7 +166,7 @@ def render_results_summary(repo_root: Path) -> None:
                 mabss_df, y_title="Objective (RSE)", show_cr=True,
                 use_efficiency=controls.use_efficiency,
             ),
-            width="stretch",
+            width="stretch", key=f"{key_prefix}_mabss_obj",
         )
 
     if not search_df.empty:
@@ -163,7 +177,7 @@ def render_results_summary(repo_root: Path) -> None:
             figures.objective_curves(
                 search_df, y_title="Best objective (CR + λ·RSE)",
             ),
-            width="stretch",
+            width="stretch", key=f"{key_prefix}_search_obj",
         )
 
     if not search_df.empty:
@@ -172,7 +186,7 @@ def render_results_summary(repo_root: Path) -> None:
             figures.incumbent_cr_rse(
                 search_df, use_efficiency=controls.use_efficiency,
             ),
-            width="stretch",
+            width="stretch", key=f"{key_prefix}_inc_cr_rse",
         )
 
     scatter_caption = (
@@ -192,13 +206,41 @@ def render_results_summary(repo_root: Path) -> None:
         col_a, col_b = st.columns(2)
         with col_a:
             st.caption(scatter_caption)
-            st.plotly_chart(scatter_fig, width="stretch")
+            st.plotly_chart(scatter_fig, width="stretch", key=f"{key_prefix}_scatter")
         with col_b:
             st.caption("**BOSS / TnALE / Random** — best CR found vs. generating-structure CR.")
             st.plotly_chart(
                 figures.incumbent_vs_generating_cr(search_df),
-                width="stretch",
+                width="stretch", key=f"{key_prefix}_gen_cr",
             )
     else:
         st.caption(scatter_caption)
-        st.plotly_chart(scatter_fig, width="stretch")
+        st.plotly_chart(scatter_fig, width="stretch", key=f"{key_prefix}_scatter")
+
+
+def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
+    """Per-seed Performance view: the results-summary charts for one seed only
+    (no averaging). Reuses the global Graph-settings (loss threshold) where set;
+    phase filtering uses the default (Sobol init hidden)."""
+    raw_df = load_traces(repo_root, keys, derive=False)
+    raw_df = raw_df[raw_df["seed"] == seed]
+    if raw_df.empty:
+        st.info("No trace data for this seed.")
+        return
+
+    df_full = derive_trace_metrics(raw_df)
+    if df_full.empty:
+        st.info("No trace data for this seed.")
+        return
+
+    options = _phase_options(df_full["phase"])
+    selected = [p for p in options if p not in _INIT_PHASES] or options
+    df = _apply_phase_filter(df_full, selected)
+    if df.empty:
+        st.info("No trace rows for this seed after the default phase filter.")
+        return
+
+    controls = SummaryControls(
+        loss_threshold=float(st.session_state.get("loss_threshold", float("inf"))),
+    )
+    render_summary_plots(df, controls, key_prefix=f"perf_{seed}")

@@ -43,27 +43,27 @@ class _ObjSpec:
 def _boss_spec(a) -> _ObjSpec:
     return _ObjSpec(
         "from tnss.algo.boss.boss import BOSS", "BOSS", True, [],
-        [("budget", a.boss_budget), ("n_init", a.boss_n_init),
-         ("max_rank", a.boss_max_bond), ("min_rse", a.boss_min_rse),
-         ("maxiter_tn", a.decomp_epochs), ("lamda", a.boss_lambda_fitness),
-         ("n_runs", a.boss_n_runs), ("acqf", a.policy.split("-")[1]),
-         ("ucb_beta", a.boss_ucb_beta), ("decomp_method", a.decomp_method),
+        [("budget", a.budget), ("n_init", a.n_init),
+         ("max_rank", a.max_rank), ("min_rse", a.feasible_rse),
+         ("maxiter_tn", a.decomp_epochs), ("lamda", a.lambda_fitness),
+         ("n_runs", a.n_runs), ("acqf", a.policy.split("-")[1]),
+         ("ucb_beta", a.ucb_beta), ("decomp_method", a.decomp_method),
          ("init_lr", a.decomp_init_lr), ("momentum", a.decomp_momentum),
          ("loss_patience", a.decomp_loss_patience), ("lr_patience", a.decomp_lr_patience),
-         ("kernel", "matern")],  # run_boss --kernel default (not exposed in the dashboard)
+         ("kernel", a.kernel)],
     )
 
 
 def _cboss_spec(a) -> _ObjSpec:
     return _ObjSpec(
         "from tnss.algo.cboss import CBOSS", "CBOSS", True, [],
-        [("budget", a.cboss_budget), ("n_init", a.cboss_n_init),
-         ("init_design", a.cboss_init_design), ("max_rank", a.cboss_max_bond),
-         ("feasible_rse", a.cboss_feasible_rse), ("min_rse", a.cboss_min_rse),
-         ("maxiter_tn", a.decomp_epochs), ("n_runs", a.cboss_n_runs),
+        [("budget", a.budget), ("n_init", a.n_init),
+         ("init_design", a.init_method), ("max_rank", a.max_rank),
+         ("feasible_rse", a.feasible_rse), ("min_rse", a.feasible_rse),
+         ("maxiter_tn", a.decomp_epochs), ("n_runs", a.n_runs),
          ("acqf", a.policy.split("-")[1]), ("ficr_t", a.cboss_ficr_t),
-         ("lamda", a.cboss_lambda_fitness), ("seek_feasible_first", a.cboss_seek_feasible_first),
-         ("kernel", a.cboss_kernel), ("var_strategy", a.cboss_var_strategy),
+         ("lamda", a.lambda_fitness), ("seek_feasible_first", a.cboss_seek_feasible_first),
+         ("kernel", a.kernel), ("var_strategy", a.cboss_var_strategy),
          ("wsp_mode", a.cboss_wsp_mode), ("decomp_method", a.decomp_method),
          ("init_lr", a.decomp_init_lr), ("momentum", a.decomp_momentum),
          ("loss_patience", a.decomp_loss_patience), ("lr_patience", a.decomp_lr_patience),
@@ -77,13 +77,13 @@ def _cboss_spec(a) -> _ObjSpec:
 def _random_spec(a) -> _ObjSpec:
     return _ObjSpec(
         "from tnss.algo.random_search import RandomSearch", "RandomSearch", True, [],
-        [("budget", a.random_budget), ("max_rank", a.random_max_bond),
-         ("min_rse", a.random_min_rse), ("maxiter_tn", a.decomp_epochs),
-         ("lamda", a.random_lambda_fitness), ("n_runs", a.random_n_runs),
+        [("budget", a.budget), ("max_rank", a.max_rank),
+         ("min_rse", a.feasible_rse), ("maxiter_tn", a.decomp_epochs),
+         ("lamda", a.lambda_fitness), ("n_runs", a.n_runs),
          ("decomp_method", a.decomp_method), ("dtype", "float32"),
          ("init_lr", a.decomp_init_lr), ("momentum", a.decomp_momentum),
          ("loss_patience", a.decomp_loss_patience), ("lr_patience", a.decomp_lr_patience),
-         ("init_method", a.random_init_method), ("n_sobol_init", a.random_n_sobol_init)],
+         ("init_method", a.init_method), ("n_sobol_init", a.n_init)],
     )
 
 
@@ -94,18 +94,18 @@ def _tnale_spec(a) -> _ObjSpec:
         "from tnss.algo.tnale import TnALE", "TnALE", False,
         ["phys_dims = np.diag(adj_np).astype(int)"],
         [("target", _Raw("target_np")), ("phys_dims", _Raw("phys_dims")),
-         ("max_rank", a.tnale_max_rank), ("budget", a.tnale_budget),
+         ("max_rank", a.max_rank), ("budget", a.budget),
          ("topology", a.tnale_topology), ("n_perm_samples", n_perm),
          ("perm_radius", a.tnale_perm_radius), ("local_step_init", a.tnale_local_step_init),
          ("local_step_main", a.tnale_local_step_main), ("interp_on", a.tnale_interp_on),
          ("interp_iters", a.tnale_interp_iters), ("local_opt_iter", a.tnale_local_opt_iter),
-         ("init_sparsity", a.tnale_init_sparsity), ("lambda_fitness", a.tnale_lambda_fitness),
-         ("n_runs", a.tnale_n_runs), ("maxiter_tn", a.decomp_epochs),
-         ("min_rse", a.tnale_min_rse), ("decomp_method", a.decomp_method),
+         ("init_sparsity", a.tnale_init_sparsity), ("lambda_fitness", a.lambda_fitness),
+         ("n_runs", a.n_runs), ("maxiter_tn", a.decomp_epochs),
+         ("min_rse", a.feasible_rse), ("decomp_method", a.decomp_method),
          ("init_lr", a.decomp_init_lr), ("momentum", a.decomp_momentum),
          ("loss_patience", a.decomp_loss_patience), ("lr_patience", a.decomp_lr_patience),
-         ("phase_change_reset", a.tnale_phase_change_reset), ("init_method", a.tnale_init_method),
-         ("n_sobol_init", a.tnale_n_sobol_init), ("dtype", "float32")],
+         ("phase_change_reset", a.tnale_phase_change_reset), ("init_method", a.init_method),
+         ("n_sobol_init", a.n_init), ("dtype", "float32")],
     )
 
 
