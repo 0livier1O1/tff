@@ -207,8 +207,11 @@ class TnALEConfig(AlgoConfig):
 class RandomSearchConfig(AlgoConfig):
     family: str = "random"
 
-    init_method: str = "random"   # shared field, default differs
-    # max_rank, n_runs, feasible_rse, lambda_fitness, n_init: base defaults
+    # max_rank, n_runs, feasible_rse, lambda_fitness, n_init, init_method("sobol"):
+    # base defaults. Defaulting to the shared Sobol init means the baseline draws
+    # the same initial design as BOSS/CBOSS/TnALE — so on the plots its init phase
+    # is hidden alongside theirs and every method starts from the common anchor.
+    # ("random" is still selectable for a pure-uniform baseline with no init phase.)
 
 
 # ---------------------------------------------------------------------------

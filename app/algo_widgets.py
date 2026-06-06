@@ -538,7 +538,7 @@ def _render_random(acfg: RandomSearchConfig) -> None:
         key=f"random_min_rse_{cid}", help=RANDOM_MIN_RSE_DECOMP,
     )
     c5, c6 = st.columns(2)
-    _init_opts = ["random", "sobol"]
+    _init_opts = ["sobol", "random"]
     acfg.init_method = c5.selectbox(
         "Init Method",
         _init_opts,

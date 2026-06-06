@@ -26,20 +26,27 @@ class SummaryControls:
     # What "best"/incumbent means: "objective" (CR + λ·RSE) or "feasible_cr"
     # (lowest CR among evals with RSE < loss_threshold).
     best_by: str = "objective"
+    # Bottom row of the incumbent CR/RSE plot: show λ·RSE (objective contribution)
+    # or the raw RSE.
+    weight_rse: bool = True
 
 
 def _phase_options(phases: pd.Series) -> list[str]:
-    preferred = ["sobol_init", "lhs_init", "init", "interpolation", "bo", "main", "random"]
+    # "init" is the unified initial-design phase across all algos (legacy
+    # sobol_init/lhs_init are normalized to it on load in traces.py).
+    preferred = ["init", "interpolation", "bo", "main", "random"]
     present = set(phases.dropna().astype(str))
     ordered = [p for p in preferred if p in present]
     ordered.extend(sorted(present - set(ordered)))
     return ordered
 
 
-# Pre-search initialization is hidden by default: the Sobol/LHS design for
-# BOSS/CBOSS, and TnALE's "init" draw (renamed from "sobol_init"). TnALE's
-# "interpolation" and "main" phases are the actual search and stay visible.
-_INIT_PHASES = ("sobol_init", "lhs_init", "init")
+# Pre-search initialization, hidden by default: the unified "init" phase (the
+# Sobol/LHS initial design for BOSS/CBOSS/Random and TnALE's init draw). The
+# legacy sobol_init/lhs_init names are normalized to "init" on load (traces.py);
+# they stay listed here so any unnormalized frame is still treated as init.
+# TnALE's "interpolation" and "main" phases are the actual search and stay shown.
+_INIT_PHASES = ("init", "sobol_init", "lhs_init")
 
 
 def _render_phase_filter(df: pd.DataFrame) -> list[str]:
@@ -116,9 +123,14 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
         label_visibility="collapsed",
         help="Fade — show those points faintly. Hide — drop them entirely.",
     ).lower()
+    weight_rse = st.sidebar.radio(
+        "RSE term", ["λ·RSE", "RSE"], horizontal=True, key="rse_term",
+        help="Bottom row of the incumbent CR/RSE plot: show the raw RSE or its "
+             "λ-weighted contribution to the objective (CR + λ·RSE).",
+    ) == "λ·RSE"
     return SummaryControls(
         use_efficiency=use_efficiency, loss_threshold=float(loss_threshold),
-        threshold_mode=threshold_mode, best_by=best_by,
+        threshold_mode=threshold_mode, best_by=best_by, weight_rse=weight_rse,
     )
 
 
@@ -172,6 +184,7 @@ def render_summary_plots(
     `key_prefix` keeps chart element-ids unique when rendered in several tabs."""
     cr_word = "efficiency" if controls.use_efficiency else "compression ratio"
     inc_word = "best feasible-CR" if controls.best_by == "feasible_cr" else "best-objective"
+    rse_word = "λ·RSE" if controls.weight_rse else "RSE"
 
     # MABSS and global/local search baselines optimise different objectives — RSE vs. CR + λ·RSE —
     # so each family group gets its own chart.
@@ -200,10 +213,11 @@ def render_summary_plots(
         )
 
     if not search_df.empty:
-        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & λ·RSE of the {inc_word} structure so far.")
+        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & {rse_word} of the {inc_word} structure so far.")
         st.plotly_chart(
             figures.incumbent_cr_rse(
                 search_df, use_efficiency=controls.use_efficiency,
+                weight_rse=controls.weight_rse,
             ),
             width="stretch", key=f"{key_prefix}_inc_cr_rse",
         )
@@ -262,5 +276,8 @@ def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
         st.info("No trace rows for this seed after the default phase filter.")
         return
 
-    controls = SummaryControls(loss_threshold=threshold, best_by=best_by)
+    weight_rse = st.session_state.get("rse_term", "λ·RSE") == "λ·RSE"
+    controls = SummaryControls(
+        loss_threshold=threshold, best_by=best_by, weight_rse=weight_rse,
+    )
     render_summary_plots(df, controls, key_prefix=f"perf_{seed}")

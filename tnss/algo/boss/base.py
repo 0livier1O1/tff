@@ -269,7 +269,9 @@ class BOSSBase:
     def _init_phase(self, progress_file):
         """Evaluate the initial design; return (X, Y_rse, Y_cr, Y_feas, T)."""
         X = self._init_points()
-        phase = f"{self.init_design}_init"
+        # Tag the initial design "init" (consistent across all algos; the design
+        # method — sobol/lhs — is recorded in the config, not the phase label).
+        phase = "init"
         rse_l, cr_l, feas_l, t_l = [], [], [], []
         for i, x in enumerate(X):
             row = self._observe(x.unsqueeze(0), step=i, phase=phase)

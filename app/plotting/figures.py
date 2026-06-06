@@ -145,14 +145,16 @@ def incumbent_cr_rse(
     df: pd.DataFrame,
     *,
     use_efficiency: bool = False,
+    weight_rse: bool = True,
 ) -> go.Figure:
-    """2×2 — the incumbent's compression ratio (top row) and λ·RSE (bottom row),
+    """2×2 — the incumbent's compression ratio (top row) and RSE (bottom row),
     each vs number of function evaluations (left) and cumulative runtime (right).
     The incumbent is the structure achieving the running-best objective so far;
-    one line per config. The RSE row is weighted by the config's objective λ so
-    it reads on the same scale as its CR + λ·RSE contribution. Axes are shared
-    (x down columns, y across rows) so the four panels stay compact and read
-    together. `use_efficiency` swaps the top row from raw CR to efficiency.
+    one line per config. When `weight_rse` the RSE row is multiplied by the
+    config's objective λ so it reads on the same scale as its CR + λ·RSE
+    contribution; otherwise the raw RSE is shown. Axes are shared (x down columns,
+    y across rows) so the four panels stay compact and read together.
+    `use_efficiency` swaps the top row from raw CR to efficiency.
     """
     fig = make_subplots(
         rows=2, cols=2, shared_xaxes=True, shared_yaxes=True,
@@ -168,7 +170,7 @@ def incumbent_cr_rse(
 
     for (run, config_id, label, _family), color in zip(configs, palette):
         sel = df[(df["run"] == run) & (df["config_id"] == config_id)]
-        lam = float(sel["lambda_fitness"].iloc[0])
+        lam = float(sel["lambda_fitness"].iloc[0]) if weight_rse else 1.0
         g = sel.groupby("n_evals")
         cr, rse = g[inc_col].mean(), g["inc_rse"].mean() * lam
         x_e, x_t = cr.index.values, g["cum_time_s"].mean().values
@@ -181,7 +183,7 @@ def incumbent_cr_rse(
     fig.update_xaxes(title_text="Function evaluations", row=2, col=1)
     fig.update_xaxes(title_text="Cumulative runtime (s)", row=2, col=2)
     fig.update_yaxes(title_text=cr_label, row=1, col=1)
-    fig.update_yaxes(title_text="λ·RSE", row=2, col=1)
+    fig.update_yaxes(title_text="λ·RSE" if weight_rse else "RSE", row=2, col=1)
     fig.update_yaxes(rangemode="nonnegative")
     fig.update_yaxes(showgrid=False)
     fig.update_layout(

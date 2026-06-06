@@ -303,6 +303,30 @@ def _merge_algo_configs(existing: list[dict], new: list[dict]) -> list[dict]:
     return existing + [d for d in new if d["config_id"] not in seen]
 
 
+def _write_manifest(path: Path, pid_file: Path, root: Path, jobs: list[dict]) -> None:
+    """(Over)write a fresh dispatch manifest atomically."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(
+        {"pid_file": str(pid_file), "cwd": str(root), "jobs": jobs}, indent=2,
+    ))
+    tmp.replace(path)
+
+
+def _append_manifest_jobs(path: Path, new_jobs: list[dict]) -> None:
+    """Append jobs to a live dispatcher's manifest (atomic, dedup by algo_dir).
+
+    The running dispatcher re-reads the manifest each loop, so the appended jobs
+    are picked up without a restart."""
+    data = json.loads(path.read_text())
+    have = {j["algo_dir"] for j in data.get("jobs", [])}
+    data["jobs"] = data.get("jobs", []) + [
+        j for j in new_jobs if j["algo_dir"] not in have
+    ]
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(path)
+
+
 # ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
@@ -321,11 +345,6 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
     if len(labels) != len(set(labels)):
         st.sidebar.error("Algorithm config labels must be unique.")
         st.stop()
-
-    for _er in st.session_state.get("active_runs", []):
-        if _er["run_name"] == cfg.run_name and _script_alive(Path(_er["pid_file"])) is not False:
-            st.sidebar.error(f"`{cfg.run_name}` is already running. Refresh to check its status.")
-            st.stop()
 
     seeds = parse_seeds(cfg.seeds_str)
     if not seeds:
@@ -401,41 +420,67 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         st.sidebar.warning("All requested seed/config combinations are already complete. Nothing to run.")
         st.stop()
 
-    # One dispatcher per run distributes these jobs across the free GPUs
-    # (one job per GPU) and writes run.pid itself. Replaces the old run.sh.
+    # One dispatcher per run distributes these jobs across the free GPUs (one job
+    # per GPU) and writes run.pid itself. If that dispatcher is still alive we
+    # just append the new jobs to its manifest — it re-reads it each loop and
+    # picks them up, no restart needed. Otherwise we (over)write the manifest and
+    # spawn a fresh dispatcher.
     pid_file = out_dir / "run.pid"
-    pid_file.unlink(missing_ok=True)
     manifest_path = out_dir / "dispatch.json"
-    manifest_path.write_text(json.dumps(
-        {"pid_file": str(pid_file), "cwd": str(ROOT), "jobs": manifest_jobs}, indent=2,
-    ))
+    dispatcher_alive = _script_alive(pid_file)
 
-    if cfg.use_tmux and cfg.tmux_session:
-        dispatch = (
-            f"cd {shlex.quote(str(ROOT))} && "
-            f"{shlex.quote(sys.executable)} -m app.gpu_dispatch {shlex.quote(str(manifest_path))}"
-        )
-        subprocess.run(
-            ["tmux", "send-keys", "-t", cfg.tmux_session, dispatch, "Enter"],
-            check=True,
-        )
-    else:
-        with open(out_dir / "run.log", "w") as log:
-            subprocess.Popen(
-                [sys.executable, "-m", "app.gpu_dispatch", str(manifest_path)],
-                cwd=str(ROOT),
-                stdout=log,
-                stderr=log,
+    appended = False
+    if dispatcher_alive and manifest_path.exists():
+        _append_manifest_jobs(manifest_path, manifest_jobs)
+        # If it exited between the check and the append, fall through and take
+        # over the manifest (which now holds these jobs; completed ones are
+        # skipped by the dispatcher's .done check).
+        appended = _script_alive(pid_file)
+
+    if not appended:
+        pid_file.unlink(missing_ok=True)
+        # Write a fresh manifest for a brand-new dispatcher. If we appended to a
+        # manifest whose dispatcher then died, keep it (old+new; .done skipped).
+        if not dispatcher_alive or not manifest_path.exists():
+            _write_manifest(manifest_path, pid_file, ROOT, manifest_jobs)
+        if cfg.use_tmux and cfg.tmux_session:
+            dispatch = (
+                f"cd {shlex.quote(str(ROOT))} && "
+                f"{shlex.quote(sys.executable)} -m app.gpu_dispatch {shlex.quote(str(manifest_path))}"
             )
+            subprocess.run(
+                ["tmux", "send-keys", "-t", cfg.tmux_session, dispatch, "Enter"],
+                check=True,
+            )
+        else:
+            with open(out_dir / "run.log", "w") as log:
+                subprocess.Popen(
+                    [sys.executable, "-m", "app.gpu_dispatch", str(manifest_path)],
+                    cwd=str(ROOT),
+                    stdout=log,
+                    stderr=log,
+                )
 
+    # Merge into the Active Runs record (existing jobs + new, dedup by algo_dir)
+    # so an appended batch shows alongside the in-flight ones.
+    prev = next((r for r in st.session_state.get("active_runs", [])
+                 if r["run_name"] == cfg.run_name), None)
+    new_dirs = {j["algo_dir"] for j in jobs}
+    merged_jobs = ([j for j in prev["jobs"] if j["algo_dir"] not in new_dirs] + jobs
+                   if prev else jobs)
     run_record = {
         "run_name": cfg.run_name,
         "problem_id": problem.problem_id,
-        "jobs": jobs,
+        "jobs": merged_jobs,
         "pid_file": str(pid_file),
-        "submitted_at": time.time(),
+        "submitted_at": prev.get("submitted_at") if prev else time.time(),
     }
     with open(out_dir / "session_state.json", "w") as f:
         json.dump(run_record, f)
     _existing = [r for r in st.session_state.get("active_runs", []) if r["run_name"] != cfg.run_name]
     st.session_state["active_runs"] = _existing + [run_record]
+
+    if appended:
+        st.sidebar.success(
+            f"Added {len(manifest_jobs)} job(s) to the running `{cfg.run_name}`."
+        )

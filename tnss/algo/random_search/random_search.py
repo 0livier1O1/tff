@@ -187,7 +187,7 @@ class RandomSearch:
         samples = unnormalize(sobol, bounds).round().clamp(1, self.max_rank).to(torch.int)
 
         for i, x_int_flat in enumerate(samples):
-            row = self._observe(step=i, phase="sobol_init", x_int_flat=x_int_flat)
+            row = self._observe(step=i, phase="init", x_int_flat=x_int_flat)
             if self.verbose:
                 print(
                     f"[Random Sobol init {i + 1}/{self.n_sobol_init}] "
@@ -195,7 +195,7 @@ class RandomSearch:
                 )
             self._atomic_write(
                 progress_file,
-                {"phase": "sobol_init", "step": i + 1, "budget": self.n_sobol_init},
+                {"phase": "init", "step": i + 1, "budget": self.n_sobol_init},
             )
 
     def _observe(self, *, step: int, phase: str, x_int_flat: Tensor | None = None) -> dict:

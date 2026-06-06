@@ -39,9 +39,13 @@ def render_sidebar() -> SidebarConfig:
     """Render all sidebar widgets and return a fully populated SidebarConfig."""
     cfg = SidebarConfig()
 
+    # Initialize once in session_state rather than passing a default, so code
+    # (e.g. the rerun-stale prefill) can set the value via the Session State API
+    # without the "default value + Session State" conflict warning.
+    if "app_mode" not in st.session_state:
+        st.session_state["app_mode"] = "Deployment"
     cfg.app_mode = st.sidebar.segmented_control(
-        "Mode", APP_MODES, default="Deployment",
-        key="app_mode", label_visibility="collapsed",
+        "Mode", APP_MODES, key="app_mode", label_visibility="collapsed",
     ) or "Deployment"
 
     st.sidebar.markdown("---")
@@ -55,8 +59,12 @@ def render_sidebar() -> SidebarConfig:
 
 
 def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
+    # Initialized in session_state (no `value=`) so the rerun-stale prefill can
+    # flip it on via the Session State API without a default-conflict warning.
+    if "extend_mode_toggle" not in st.session_state:
+        st.session_state["extend_mode_toggle"] = False
     cfg.extend_mode = st.sidebar.toggle(
-        "Extend existing run", value=False, key="extend_mode_toggle",
+        "Extend existing run", key="extend_mode_toggle",
         help="Add new algorithm configs (and optionally new seeds) to an existing run. "
              "The run's problem is locked.",
     )
@@ -73,7 +81,9 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
         render_problem_section(cfg, ROOT)
 
     st.sidebar.markdown("### General Settings")
-    cfg.seeds_str = st.sidebar.text_input("Random Seeds (csv)", "1", key="seeds_str_input", help=SEEDS)
+    if "seeds_str_input" not in st.session_state:
+        st.session_state["seeds_str_input"] = "1"
+    cfg.seeds_str = st.sidebar.text_input("Random Seeds (csv)", key="seeds_str_input", help=SEEDS)
     _all, _free = all_gpus(), free_gpus()
     _busy = [g for g in _all if g not in _free]
     st.sidebar.caption(

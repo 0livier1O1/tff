@@ -73,6 +73,10 @@ def _read_trace_csv(path: str) -> pd.DataFrame:
     df = df.reset_index(drop=True)
     if "phase" not in df.columns:
         df["phase"] = "main"
+    # Canonicalize the initial-design phase: all algos now tag it "init", but
+    # older runs wrote "sobol_init"/"lhs_init". Collapse them so every method's
+    # init lines up under one phase in the analysis (filter + plots).
+    df["phase"] = df["phase"].replace({"sobol_init": "init", "lhs_init": "init"})
     df["target_cr"] = float("nan")
     return df[_RAW_COLS].reset_index(drop=True)
 

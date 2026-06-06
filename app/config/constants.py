@@ -275,7 +275,7 @@ RANDOM_LAMBDA_FITNESS = (
 RANDOM_INIT_METHOD = (
     "Initialization strategy before random search. "
     "random = start directly with independent random samples. "
-    "sobol = first evaluate the same BOSS-style Sobol candidates and tag them as sobol_init."
+    "sobol = first evaluate the same BOSS-style Sobol candidates and tag them as the shared init phase."
 )
 
 RANDOM_N_SOBOL_INIT = (

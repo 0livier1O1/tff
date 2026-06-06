@@ -27,6 +27,8 @@ from app.diagnostics import (
 from app.plotting import figures
 from app.plotting.traces import load_traces
 from app.problem_io import load_problem
+from app.rename_label import rename_config_label
+from app.purge import purge_configs
 from app.views.extend import order_columns, render_problem_seed_tabs
 from app.views.results_summary import render_results_summary, render_seed_performance
 
@@ -134,6 +136,8 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
         df,
         column_config={
             "selected": st.column_config.CheckboxColumn("✓", default=True, width="small"),
+            # Keep the algorithm label visible while scrolling the parameter columns.
+            "label": st.column_config.TextColumn("label", pinned=True),
         },
         hide_index=True,
         width="stretch",
@@ -161,6 +165,8 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
         if skipped:
             st.warning(f"{skipped} checked row(s) have no completed seeds — excluded from plots.")
 
+    _render_row_actions(repo_root, records)
+
     # -----------------------------------------------------------------------
     # Tabs: problem description, results summary, per-seed diagnostics
     # -----------------------------------------------------------------------
@@ -179,6 +185,101 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
 
     with tab_debug:
         _render_debug_instance(repo_root)
+
+
+# ---------------------------------------------------------------------------
+# Row actions — compact Rename / Delete popovers above the results table
+# ---------------------------------------------------------------------------
+
+def _render_row_actions(repo_root: Path, records: list[dict]) -> None:
+    """Two small popovers: rename a config's label, or purge config results."""
+    c_rename, c_delete, _ = st.columns([1.4, 1.4, 7])
+    with c_rename:
+        _render_label_rename(repo_root, records)
+    with c_delete:
+        _render_delete_results(repo_root, records)
+
+
+def _render_label_rename(repo_root: Path, records: list[dict]) -> None:
+    """Rename a config's display label everywhere its config_id appears.
+
+    The label is display-only, so this just rewrites the `label` field in every
+    run's config.json (and the matching saved-algos entry); plots/tables pick up
+    the new name on the rerun triggered below.
+    """
+    # One option per distinct config_id (a config reused across runs is renamed
+    # together). Prefill shows the current label.
+    options: dict[str, str] = {}
+    current: dict[str, str] = {}
+    for r in records:
+        cid = r["config_id"]
+        options.setdefault(cid, f'{r["label"]}  ·  {r["policy"]}')
+        current.setdefault(cid, r["label"])
+
+    with st.popover("Rename label", use_container_width=True):
+        st.caption(
+            "Renames the label everywhere this config appears — across all runs "
+            "and the saved-algos library. Run directories and traces are untouched."
+        )
+        cid = st.selectbox(
+            "Config", list(options), format_func=lambda c: options[c],
+            key="rename_label_cid",
+        )
+        new_label = st.text_input(
+            "New label", value=current[cid], key=f"rename_label_new_{cid}",
+        )
+        if st.button("Rename", key="rename_label_btn", type="primary"):
+            try:
+                changes = rename_config_label(repo_root, cid, new_label)
+            except ValueError as e:
+                st.warning(str(e))
+                return
+            if changes:
+                st.toast(f"Renamed in {len(changes)} place(s).", icon="✏️")
+                st.rerun()
+            else:
+                st.info("Nothing to change — that label is already set everywhere.")
+
+
+def _render_delete_results(repo_root: Path, records: list[dict]) -> None:
+    """Move the output results for selected table rows to artifacts/trash.
+
+    Each row is a (run, config_id); purging moves its per-seed output dirs into a
+    timestamped trash folder and drops it from the run's config.json (moving the
+    whole run if it empties). Nothing is deleted — you remove trash by hand.
+    """
+    # One entry per table row; index keys avoid collisions across runs.
+    items = [(f'{r["Run"]}  ·  {r["label"]}  ·  {r["policy"]}', r["Run"], r["config_id"])
+             for r in records]
+
+    with st.popover("Delete results", use_container_width=True):
+        st.caption(
+            "Moves the output results for the selected runs into "
+            "`artifacts/trash/` (gitignored) — not deleted, so you can restore or "
+            "remove them yourself."
+        )
+        chosen = st.multiselect(
+            "Runs to purge", range(len(items)),
+            format_func=lambda i: items[i][0], key="purge_select",
+        )
+        confirm = st.checkbox("Move these results to trash", key="purge_confirm")
+        if st.button(
+            "Purge", key="purge_btn", type="primary",
+            disabled=not (chosen and confirm),
+        ):
+            targets = [(items[i][1], items[i][2]) for i in chosen]
+            purged, skipped, trash_root = purge_configs(repo_root, targets)
+            if purged:
+                st.toast(
+                    f"Moved {len(purged)} run result(s) to {trash_root.as_posix()}",
+                    icon="🗑️",
+                )
+            if skipped:
+                st.warning(
+                    "Skipped (still running): " + ", ".join(sorted(set(skipped)))
+                )
+            if purged:
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------

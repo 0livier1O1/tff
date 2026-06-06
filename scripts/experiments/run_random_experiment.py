@@ -113,7 +113,7 @@ def main() -> None:
     t0 = time.time()
     progress_file.write_text(
         json.dumps({
-            "phase": "sobol_init" if args.init_method == "sobol" else "random",
+            "phase": "init" if args.init_method == "sobol" else "random",
             "step": 0,
             "budget": args.budget + (args.n_sobol_init if args.init_method == "sobol" else 0),
             "started_at": t0,

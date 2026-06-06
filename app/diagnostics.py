@@ -67,8 +67,9 @@ def generate_gp_diagnostics(
     Y_obj = torch.tensor(z["Y_objective"], dtype=torch.double)
     Y_rse = torch.tensor(z["Y_rse"], dtype=torch.double)
     traces = pd.read_csv(config_dir / "traces.csv")
-    # Count the initial design (sobol_init or lhs_init — BOSS now supports both).
-    ninit = int(traces["phase"].astype(str).str.endswith("_init").sum())
+    # Count the initial design. All algos now tag it "init"; older runs used
+    # "sobol_init"/"lhs_init", so accept any of them.
+    ninit = int(traces["phase"].astype(str).isin(("init", "sobol_init", "lhs_init")).sum())
     d, n = X.shape[1], len(X)
 
     def _fit(xk, yk):
