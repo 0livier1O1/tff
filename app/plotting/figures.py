@@ -356,7 +356,7 @@ def seed_convergence(df: pd.DataFrame) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
-# BOSS GP-surrogate diagnostics — fed by app.diagnostics cached frames
+# BOSS GP-surrogate diagnostics — fed by app.analysis.diagnostics cached frames
 # ---------------------------------------------------------------------------
 
 def gp_calibration(d: pd.DataFrame, lab: str = "objective") -> go.Figure:

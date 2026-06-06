@@ -5,7 +5,7 @@ Replaces the old sequential `run.sh`. Launched once per run (in tmux, or as a
 child of the dashboard) and stays alive until every job has finished, so the
 dashboard tracks its PID as the run's liveness sentinel.
 
-Manifest (written by app.runner.launch_run):
+Manifest (written by app.orchestration.runner.launch_run):
     {
       "pid_file": "<run>/run.pid",
       "cwd": "<repo root>",
@@ -42,7 +42,7 @@ import time
 from pathlib import Path
 
 from app.utils import all_gpus, free_gpus
-from app.notify import notify_on_completion
+from app.orchestration.notify import notify_on_completion
 
 # Idle loops (each ~2s) to keep polling the manifest after the queue drains,
 # so jobs appended just as the last one finished are still caught before exit.

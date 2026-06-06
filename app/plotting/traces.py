@@ -31,6 +31,7 @@ import pandas as pd
 import streamlit as st
 
 from app.problem_io import load_problem, seed_dir
+from app.phases import LEGACY_INIT
 
 _TRACE_COLS = ("step", "objective", "rse", "cr", "step_time_s", "phase")
 _RAW_COLS = ["step", "phase", "objective", "cr", "rse", "target_cr", "step_time_s"]
@@ -76,7 +77,7 @@ def _read_trace_csv(path: str) -> pd.DataFrame:
     # Canonicalize the initial-design phase: all algos now tag it "init", but
     # older runs wrote "sobol_init"/"lhs_init". Collapse them so every method's
     # init lines up under one phase in the analysis (filter + plots).
-    df["phase"] = df["phase"].replace({"sobol_init": "init", "lhs_init": "init"})
+    df["phase"] = df["phase"].replace(LEGACY_INIT)
     df["target_cr"] = float("nan")
     return df[_RAW_COLS].reset_index(drop=True)
 

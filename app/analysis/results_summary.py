@@ -15,6 +15,7 @@ import streamlit as st
 
 from app.plotting import figures
 from app.plotting.traces import derive_trace_metrics, load_traces
+from app.phases import INIT_PHASES, PHASE_ORDER
 
 
 @dataclass
@@ -32,21 +33,11 @@ class SummaryControls:
 
 
 def _phase_options(phases: pd.Series) -> list[str]:
-    # "init" is the unified initial-design phase across all algos (legacy
-    # sobol_init/lhs_init are normalized to it on load in traces.py).
-    preferred = ["init", "interpolation", "bo", "main", "random"]
+    # PHASE_ORDER puts the unified "init" phase first; anything else trails sorted.
     present = set(phases.dropna().astype(str))
-    ordered = [p for p in preferred if p in present]
+    ordered = [p for p in PHASE_ORDER if p in present]
     ordered.extend(sorted(present - set(ordered)))
     return ordered
-
-
-# Pre-search initialization, hidden by default: the unified "init" phase (the
-# Sobol/LHS initial design for BOSS/CBOSS/Random and TnALE's init draw). The
-# legacy sobol_init/lhs_init names are normalized to "init" on load (traces.py);
-# they stay listed here so any unnormalized frame is still treated as init.
-# TnALE's "interpolation" and "main" phases are the actual search and stay shown.
-_INIT_PHASES = ("init", "sobol_init", "lhs_init")
 
 
 def _render_phase_filter(df: pd.DataFrame) -> list[str]:
@@ -55,7 +46,7 @@ def _render_phase_filter(df: pd.DataFrame) -> list[str]:
     # structures that blow up the y-axis. This is a *display* filter only:
     # best-so-far and incumbent metrics are derived over the full run before
     # this filter is applied, so hiding init never changes the curves' values.
-    default = [p for p in options if p not in _INIT_PHASES] or options
+    default = [p for p in options if p not in INIT_PHASES] or options
     st.sidebar.markdown("### Trace phases")
     selected = st.sidebar.multiselect(
         "Include phases",
@@ -77,7 +68,7 @@ def _apply_phase_filter(df: pd.DataFrame, selected: list[str]) -> pd.DataFrame:
     curve visibly starts from the common point before the methods diverge.
     """
     keep = df["phase"].isin(selected)
-    hidden_init = [p for p in _INIT_PHASES if p not in selected]
+    hidden_init = [p for p in INIT_PHASES if p not in selected]
     if hidden_init:
         init_rows = df[df["phase"].isin(hidden_init)]
         if not init_rows.empty:
@@ -270,7 +261,7 @@ def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
         return
 
     options = _phase_options(df_full["phase"])
-    selected = [p for p in options if p not in _INIT_PHASES] or options
+    selected = [p for p in options if p not in INIT_PHASES] or options
     df = _apply_phase_filter(df_full, selected)
     if df.empty:
         st.info("No trace rows for this seed after the default phase filter.")

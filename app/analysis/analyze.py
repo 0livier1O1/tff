@@ -19,18 +19,18 @@ import pandas as pd
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
-from app.cboss_diagnostics import generate_cboss_diagnostics, has_cboss_diagnostics
-from app.debug_script import write_debug_script, SUPPORTED_FAMILIES
-from app.diagnostics import (
+from app.analysis.cboss_diagnostics import generate_cboss_diagnostics, has_cboss_diagnostics
+from app.analysis.debug_script import write_debug_script, SUPPORTED_FAMILIES
+from app.analysis.diagnostics import (
     generate_gp_diagnostics, has_gp_diagnostics, load_gp_diagnostics, load_rse_cr,
 )
 from app.plotting import figures
 from app.plotting.traces import load_traces
 from app.problem_io import load_problem
-from app.rename_label import rename_config_label
-from app.purge import purge_configs
-from app.views.extend import order_columns, render_problem_seed_tabs
-from app.views.results_summary import render_results_summary, render_seed_performance
+from app.orchestration.rename_label import rename_config_label
+from app.orchestration.purge import purge_configs
+from app.analysis.extend import order_columns, render_problem_seed_tabs
+from app.analysis.results_summary import render_results_summary, render_seed_performance
 
 
 # ---------------------------------------------------------------------------

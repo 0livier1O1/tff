@@ -110,7 +110,7 @@ def _script_alive(pid_file: Path) -> bool:
 def _job_gpu(job: dict) -> str:
     """GPU index the dispatcher assigned this job, or "" if not yet launched.
 
-    Written to `<algo_dir>/gpu` by app.gpu_dispatch just before the job starts.
+    Written to `<algo_dir>/gpu` by app.orchestration.gpu_dispatch just before the job starts.
     """
     gpu_file = Path(job.get("algo_dir", "")) / "gpu"
     if gpu_file.exists():

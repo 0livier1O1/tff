@@ -1,6 +1,27 @@
+import json
+from pathlib import Path
+
 import torch
 from torch import Tensor
 from botorch.models.transforms import Round, Normalize, ChainedInputTransform
+
+
+def atomic_write_json(path: Path | None, data: dict) -> None:
+    """Atomically write `data` as JSON to `path` (tmp file + replace); no-op if
+    `path` is None. A previously-written `started_at` is preserved when `data`
+    doesn't carry one, so progress files keep the run's original start time."""
+    if path is None:
+        return
+    path = Path(path)
+    try:
+        prev = json.loads(path.read_text())
+        if "started_at" in prev and "started_at" not in data:
+            data["started_at"] = prev["started_at"]
+    except Exception:
+        pass
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(path)
 
 
 def triu_to_adj_matrix(triu: Tensor, diag: Tensor):

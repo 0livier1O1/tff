@@ -28,15 +28,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.utils import _job_status, _job_gpu, _script_alive
+from app.phases import pretty_phase
 
 _DEFAULT_RECIPIENT = "o.mulkin@outlook.com"
 _SENDMAIL = shutil.which("sendmail") or "/usr/sbin/sendmail"
 
-# Pretty labels for progress.json "phase" (mirrors app/jobs.py).
-_PHASE_LABELS = {
-    "init": "Init", "sobol_init": "Init", "lhs_init": "Init", "bo": "BO",
-    "interpolation": "Interpolation", "main": "Main", "random": "Random",
-}
 _BAD = ("Failed", "Interrupted", "Cancelled")
 
 
@@ -101,8 +97,7 @@ def _job_row(job: dict) -> dict:
         try:
             pg = json.loads(pf.read_text())
             started = pg.get("started_at")
-            raw = pg.get("phase", "")
-            phase = _PHASE_LABELS.get(raw, raw.capitalize() if raw else "")
+            phase = pretty_phase(pg.get("phase", ""))
         except Exception:
             pass
     done_f = algo_dir / ".done"

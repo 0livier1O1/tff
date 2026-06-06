@@ -24,6 +24,7 @@ from tnss.algo.tnale.neighborhood import (
     full_bonds,
 )
 from tnss.algo.tnale.interpolation import interpolate_rse
+from tnss.utils import atomic_write_json
 
 
 
@@ -192,7 +193,7 @@ class TnALE:
                     f"evals={self.eval_count}  "
                     f"phase={'interpolation' if self._in_init_phase else 'main'}"
                 )
-            self._atomic_write(progress_file, {
+            atomic_write_json(progress_file, {
                 "phase": "interpolation" if self._in_init_phase else "main",
                 "step": step + 1, "budget": self.budget,
             })
@@ -631,7 +632,7 @@ class TnALE:
             if obj < best_obj:
                 best_obj = obj
                 best_ranks = ranks.copy()
-            self._atomic_write(progress_file, {
+            atomic_write_json(progress_file, {
                 "phase": "init", "step": i + 1, "budget": self.n_sobol_init,
             })
         self._in_sobol_init = False
@@ -688,22 +689,6 @@ class TnALE:
             {"step": self.eval_count, "phase": phase, **(contraction_stats or {})}
         )
 
-
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _atomic_write(path: Path | None, data: dict) -> None:
-        if path is None:
-            return
-        try:
-            prev = json.loads(path.read_text())
-            if "started_at" in prev and "started_at" not in data:
-                data["started_at"] = prev["started_at"]
-        except Exception:
-            pass
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(path)
 
 
 if __name__ == "__main__":

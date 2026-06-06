@@ -23,9 +23,9 @@ import streamlit as st
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import algo_config_from_dict
 from app.config.constants import SEEDS, TMUX_SESSION, RUN_NAME
-from app.problem import render_problem_section, _render_problem_summary
-from app.algo_widgets import render_algo_configs
-from app.views.analyze import render_analyze_sidebar
+from app.inputs.problem import render_problem_section, _render_problem_summary
+from app.inputs.algo_widgets import render_algo_configs
+from app.analysis.analyze import render_analyze_sidebar
 from app.utils import _list_tmux_sessions, all_gpus, free_gpus
 
 APP_MODES = ["Deployment", "Analysis"]

@@ -9,12 +9,12 @@ import json
 
 import streamlit as st
 
-from app.sidebar import render_sidebar
-from app.algo_widgets import render_saved_library_section
-from app.runner import launch_run
-from app.jobs import render_job_status_panel
-from app.views.extend import render_extend_preview
-from app.views.analyze import render_analyze_main
+from app.inputs.sidebar import render_sidebar
+from app.inputs.algo_widgets import render_saved_library_section
+from app.orchestration.runner import launch_run
+from app.orchestration.jobs import render_job_status_panel
+from app.analysis.extend import render_extend_preview
+from app.analysis.analyze import render_analyze_main
 from app.utils import _artifact_fully_done
 
 # ---------------------------------------------------------------------------

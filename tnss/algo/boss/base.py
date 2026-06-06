@@ -33,7 +33,7 @@ from botorch.utils.transforms import unnormalize
 from scipy.stats import qmc
 
 from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
-from tnss.utils import triu_to_adj_matrix
+from tnss.utils import triu_to_adj_matrix, atomic_write_json
 
 
 def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
@@ -192,7 +192,7 @@ class BOSSBase:
             surrogate = self._post_observe(surrogate, X, Y_rse, Y_cr, Y_feas, b)
             self._log_step(b, row, X, Y_rse, Y_cr, Y_feas)
 
-            self._atomic_write(progress_file, {"phase": "bo", "step": b + 1,
+            atomic_write_json(progress_file, {"phase": "bo", "step": b + 1,
                                                "budget": self.budget})
             gc.collect()
             if torch.cuda.is_available():
@@ -240,7 +240,7 @@ class BOSSBase:
         x_int_flat = self._to_int(x_std).squeeze(0)
         A_int = _triu_to_full(x_int_flat, self.t_shape).int()
         cr, rse, eval_time, _, losses, ctn_stats = self._evaluate(A_int)
-        feasible = int(rse < self.feasible_rse)
+        feasible = int(rse <= self.feasible_rse)
 
         row = {
             "step": step,
@@ -280,7 +280,7 @@ class BOSSBase:
             if self.verbose:
                 print(f"[Init {i+1}/{self.n_init}] CR={row['cr']:.5f}  "
                       f"RSE={row['rse']:.5f}  feas={row['feasible']}  obj={row['objective']:.5f}")
-            self._atomic_write(progress_file, {"phase": "init", "step": i + 1,
+            atomic_write_json(progress_file, {"phase": "init", "step": i + 1,
                                                "budget": self.n_init})
         return (X,
                 torch.tensor(rse_l, dtype=torch.double).unsqueeze(1),
@@ -308,22 +308,3 @@ class BOSSBase:
 
     def _log_step(self, b, row, X, Y_rse, Y_cr, Y_feas):
         pass
-
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _atomic_write(path: Path | None, data: dict):
-        if path is None:
-            return
-        path = Path(path)
-        # Preserve started_at written before run() was called.
-        try:
-            prev = json.loads(path.read_text())
-            if "started_at" in prev and "started_at" not in data:
-                data["started_at"] = prev["started_at"]
-        except Exception:
-            pass
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        tmp.replace(path)

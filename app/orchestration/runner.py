@@ -19,9 +19,7 @@ from pathlib import Path
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
-from app.config.algo_config import (
-    AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, TnALEConfig, RandomSearchConfig,
-)
+from app.config.algo_config import AlgoConfig, MABSSConfig
 from app.config.problem_config import ProblemConfig, mint_problem_id, now_iso
 from app.problem_io import load_problem, save_problem, runs_root, target_path_for, adj_path_for
 from app.utils import _script_alive
@@ -122,148 +120,29 @@ def mabss_cmd(acfg: MABSSConfig, problem: ProblemConfig, seed: int, algo_dir: Pa
     return cmd
 
 
-def boss_cmd(acfg: BOSSConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    acqf = acfg.policy.split("-")[1]  # boss-ei → ei
-    cmd = [
+def unified_cmd(acfg: AlgoConfig, seed: int, algo_dir: Path) -> list[str]:
+    """Single entrypoint for the non-MABSS families (boss/cboss/tnale/random).
+
+    run_experiment.py reconstructs the AlgoConfig from the run's config.json and
+    builds the algorithm via app.algos.registry — so the per-family parameter
+    mapping lives in one place, not in a CLI builder per family."""
+    run_config = algo_dir.parents[1] / "config.json"  # runs/<run>/config.json
+    return [
         "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_boss_experiment.py",
-        "--n-cores",     str(problem.n_cores),
-        "--max-rank",    str(problem.max_rank),
+        "python", "scripts/experiments/run_experiment.py",
+        "--run-config",  str(run_config),
+        "--config-id",   acfg.config_id,
         "--seed",        str(seed),
-        "--budget",      str(acfg.budget),
-        "--n-init",      str(acfg.n_init),
-        "--init-design", acfg.init_method,
-        "--max-bond",    str(acfg.max_rank),
-        "--n-runs",      str(acfg.n_runs),
-        "--feasible-rse", str(acfg.feasible_rse),
-        "--min-rse",     str(acfg.feasible_rse),
-        "--freq-update", str(acfg.freq_update),
-        "--maxiter-tn",  str(acfg.decomp_epochs),
-        "--acqf",        acqf,
-        "--kernel",      acfg.kernel,
-        "--lamda",       str(acfg.lambda_fitness),
         "--out-dir",     str(algo_dir),
     ]
-    cmd += _decomp_flags(acfg)
-
-    if acfg.policy == "boss-ucb":
-        cmd += ["--ucb-beta", str(acfg.ucb_beta)]
-
-    return cmd
-
-
-def cboss_cmd(acfg: CBOSSConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    acqf = acfg.policy.split("-")[1]  # cboss-cei → cei
-    cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_cboss_experiment.py",
-        "--n-cores",       str(problem.n_cores),
-        "--max-rank",      str(problem.max_rank),
-        "--seed",          str(seed),
-        "--budget",        str(acfg.budget),
-        "--n-init",        str(acfg.n_init),
-        "--init-design",   acfg.init_method,
-        "--max-bond",      str(acfg.max_rank),
-        "--n-runs",        str(acfg.n_runs),
-        "--feasible-rse",  str(acfg.feasible_rse),
-        "--min-rse",       str(acfg.feasible_rse),
-        "--maxiter-tn",    str(acfg.decomp_epochs),
-        "--acqf",          acqf,
-        "--lamda",         str(acfg.lambda_fitness),
-        "--kernel",        acfg.kernel,
-        "--var-strategy",  acfg.cboss_var_strategy,
-        "--wsp-mode",      acfg.cboss_wsp_mode,
-        "--gp-epochs",     str(acfg.cboss_gp_epochs),
-        "--freq-update",   str(acfg.freq_update),
-        "--gp-refine-epochs", str(acfg.cboss_gp_refine_epochs),
-        "--gp-tol",        str(acfg.cboss_gp_tol),
-        "--gp-patience",   str(acfg.cboss_gp_patience),
-        "--mc-samples",    str(acfg.cboss_mc_samples),
-        "--raw-samples",   str(acfg.cboss_raw_samples),
-        "--num-restarts",  str(acfg.cboss_num_restarts),
-        "--out-dir",       str(algo_dir),
-    ]
-    cmd += _decomp_flags(acfg)
-
-    if acfg.policy == "cboss-ficr":
-        cmd += ["--ficr-t", str(acfg.cboss_ficr_t)]
-    if not acfg.cboss_seek_feasible_first:
-        cmd.append("--no-seek-feasible-first")
-    return cmd
-
-
-def tnale_cmd(acfg: TnALEConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_tnale_experiment.py",
-        "--budget",          str(acfg.budget),
-        "--n-cores",         str(problem.n_cores),
-        "--max-rank",        str(problem.max_rank),
-        "--max-search-rank", str(acfg.max_rank),
-        "--maxiter-tn",      str(acfg.decomp_epochs),
-        "--n-runs",          str(acfg.n_runs),
-        "--min-rse",         str(acfg.feasible_rse),
-        "--topology",        acfg.tnale_topology,
-        "--local-step-init", str(acfg.tnale_local_step_init),
-        "--local-step-main", str(acfg.tnale_local_step_main),
-        "--interp-iters",    str(acfg.tnale_interp_iters),
-        "--local-opt-iter",  str(acfg.tnale_local_opt_iter),
-        "--init-sparsity",   str(acfg.tnale_init_sparsity),
-        "--lambda-fitness",  str(acfg.lambda_fitness),
-        "--init-method",     acfg.init_method,
-        "--n-sobol-init",    str(acfg.n_init),
-        "--seed",            str(seed),
-        "--out-dir",         str(algo_dir),
-    ]
-    cmd += _decomp_flags(acfg)
-
-    if acfg.tnale_topology == "ring":
-        cmd += [
-            "--n-perm-samples", str(acfg.tnale_n_perm_samples),
-            "--perm-radius",    str(acfg.tnale_perm_radius),
-        ]
-    if not acfg.tnale_interp_on:
-        cmd.append("--no-interp")
-    if not acfg.tnale_phase_change_reset:
-        cmd.append("--no-phase-change-reset")
-    return cmd
-
-
-def random_cmd(acfg: RandomSearchConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_random_experiment.py",
-        "--n-cores",    str(problem.n_cores),
-        "--max-rank",   str(problem.max_rank),
-        "--seed",       str(seed),
-        "--budget",     str(acfg.budget),
-        "--max-bond",   str(acfg.max_rank),
-        "--n-runs",     str(acfg.n_runs),
-        "--min-rse",    str(acfg.feasible_rse),
-        "--maxiter-tn", str(acfg.decomp_epochs),
-        "--lamda",      str(acfg.lambda_fitness),
-        "--init-method", acfg.init_method,
-        "--n-sobol-init", str(acfg.n_init),
-        "--out-dir",    str(algo_dir),
-    ]
-    cmd += _decomp_flags(acfg)
-    return cmd
 
 
 def build_cmd(acfg: AlgoConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    """Dispatch on the concrete subclass. A wrong-family config raises here
-    instead of silently using defaults from another family."""
+    """MABSS keeps its bespoke CLI; every other family goes through the unified
+    config-driven entrypoint."""
     if isinstance(acfg, MABSSConfig):
         return mabss_cmd(acfg, problem, seed, algo_dir)
-    if isinstance(acfg, BOSSConfig):
-        return boss_cmd(acfg, problem, seed, algo_dir)
-    if isinstance(acfg, CBOSSConfig):
-        return cboss_cmd(acfg, problem, seed, algo_dir)
-    if isinstance(acfg, TnALEConfig):
-        return tnale_cmd(acfg, problem, seed, algo_dir)
-    if isinstance(acfg, RandomSearchConfig):
-        return random_cmd(acfg, problem, seed, algo_dir)
-    raise TypeError(f"Unknown AlgoConfig subclass: {type(acfg).__name__}")
+    return unified_cmd(acfg, seed, algo_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +325,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         if cfg.use_tmux and cfg.tmux_session:
             dispatch = (
                 f"cd {shlex.quote(str(ROOT))} && "
-                f"{shlex.quote(sys.executable)} -m app.gpu_dispatch {shlex.quote(str(manifest_path))}"
+                f"{shlex.quote(sys.executable)} -m app.orchestration.gpu_dispatch {shlex.quote(str(manifest_path))}"
             )
             subprocess.run(
                 ["tmux", "send-keys", "-t", cfg.tmux_session, dispatch, "Enter"],
@@ -455,7 +334,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         else:
             with open(out_dir / "run.log", "w") as log:
                 subprocess.Popen(
-                    [sys.executable, "-m", "app.gpu_dispatch", str(manifest_path)],
+                    [sys.executable, "-m", "app.orchestration.gpu_dispatch", str(manifest_path)],
                     cwd=str(ROOT),
                     stdout=log,
                     stderr=log,

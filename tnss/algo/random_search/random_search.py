@@ -12,7 +12,7 @@ from torch import Tensor
 import cupy as cp
 
 from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
-from tnss.utils import triu_to_adj_matrix
+from tnss.utils import triu_to_adj_matrix, atomic_write_json
 
 
 def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
@@ -134,7 +134,7 @@ class RandomSearch:
         step_offset = len(self.rows)
         for step in range(self.budget):
             row = self._observe(step=step_offset + step, phase="random")
-            self._atomic_write(
+            atomic_write_json(
                 progress_file,
                 {"phase": "random", "step": step + 1, "budget": self.budget},
             )
@@ -193,7 +193,7 @@ class RandomSearch:
                     f"[Random Sobol init {i + 1}/{self.n_sobol_init}] "
                     f"obj={row['objective']:.5f}  RSE={row['rse']:.5f}  CR={row['cr']:.5f}"
                 )
-            self._atomic_write(
+            atomic_write_json(
                 progress_file,
                 {"phase": "init", "step": i + 1, "budget": self.n_sobol_init},
             )
@@ -246,17 +246,3 @@ class RandomSearch:
         self.train_Y_cr.append(cr)
         self.train_t.append(eval_time)
         return row
-
-    @staticmethod
-    def _atomic_write(path: Path | None, data: dict) -> None:
-        if path is None:
-            return
-        try:
-            prev = json.loads(path.read_text())
-            if "started_at" in prev and "started_at" not in data:
-                data["started_at"] = prev["started_at"]
-        except Exception:
-            pass
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(path)

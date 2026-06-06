@@ -17,17 +17,10 @@ import streamlit as st
 
 from app.config.algo_config import algo_config_from_dict
 from app.utils import _script_alive, _job_status, _job_gpu
+from app.phases import pretty_phase
 
 
 _STALE = ("Failed", "Interrupted", "Cancelled")
-
-# Pretty labels for the progress.json "phase" field (written by the algos).
-# init/sobol_init → the design phase (step counts to n_init/n_sobol_init);
-# bo → BO search; TnALE adds interpolation → main. Unknown/absent → blank.
-_PHASE_LABELS = {
-    "init": "Init", "sobol_init": "Init", "bo": "BO",
-    "interpolation": "Interpolation", "main": "Main", "random": "Random",
-}
 
 
 def _prefill_rerun_stale(ROOT: Path, rname: str,
@@ -120,8 +113,7 @@ def _auto_refresh_panel(ROOT: Path) -> None:
                 try:
                     pg = json.loads(pf.read_text())
                     started_at = pg.get("started_at")
-                    raw = pg.get("phase", "")
-                    phase = _PHASE_LABELS.get(raw, raw.capitalize() if raw else "")
+                    phase = pretty_phase(pg.get("phase", ""))
                 except Exception:
                     pass
             completed_at = done_f.stat().st_mtime if done_f.exists() else None
