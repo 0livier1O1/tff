@@ -561,12 +561,15 @@ def _render_tnale(acfg: TnALEConfig) -> None:
          f"tnale_phase_reset_{cid}", help=TNALE_PHASE_CHANGE_RESET)
 
     c11, c12 = st.columns(2)
-    _sel(c11, acfg, "init_method", "Init Method", ["sparse", "sobol"],
+    _sel(c11, acfg, "init_method", "Init Method", ["sparse"] + BO_INIT_DESIGNS,
          f"tnale_init_method_{cid}",
-         help="'sparse' = single random sparse start. 'sobol' = BOSS-style Sobol init.")
-    _num(c12, acfg, "n_init", "Sobol Init Samples", f"tnale_n_sobol_init_{cid}",
+         help="'sparse' = single random sparse start (TnALE-specific). The rest are the "
+              "shared pooled inits: " + BO_INIT_DESIGN_HELP)
+    _num(c12, acfg, "n_init", "Init Pool Samples", f"tnale_n_sobol_init_{cid}",
          min_value=1, step=1,
-         help="Number of Sobol candidates evaluated when Init Method = sobol.")
+         help="Number of candidates drawn + evaluated for sobol/lhs/cr_stratified init "
+              "(the best becomes TnALE's starting structure).")
+    _render_cr_stratified_opts(acfg, f"tnale_{cid}")
 
     if acfg.tnale_topology == "ring":
         st.markdown("*Permutation search*")

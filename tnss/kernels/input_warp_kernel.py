@@ -140,3 +140,11 @@ class InputWarpKernel(Kernel):
     ) -> torch.Tensor:
         """Warp both inputs, then delegate to the base kernel's ``forward``."""
         return self.base_kernel.forward(self._warp(x1), self._warp(x2), diag=diag, **params)
+
+
+def maybe_warp(base_kernel: Kernel, D: int, enabled: bool) -> Kernel:
+    """Optionally wrap ``base_kernel`` with per-dimension input warping (learned
+    Kumaraswamy ``(a_d, b_d)``, identity at init). Returns the base kernel unchanged
+    when ``enabled`` is False — the single switch shared by BOSS and cBOSS so the
+    'Use Input Warping' toggle applies to whichever base kernel is selected."""
+    return InputWarpKernel(base_kernel, ard_num_dims=D) if enabled else base_kernel

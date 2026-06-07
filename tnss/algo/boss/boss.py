@@ -32,6 +32,8 @@ from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from tnss.algo.boss.base import BOSSBase, _eval_tn, _triu_to_full  # noqa: F401 (re-exported)
+from tnss.algo.boss.means import make_mean, MEANS
+from tnss.kernels.input_warp_kernel import maybe_warp
 from tnss.kernels.weighted_shortest_path import WeightedShortestPathKernel
 
 
@@ -48,7 +50,9 @@ class BOSS(BOSSBase):
     acqf          : 'ei' (LogExpectedImprovement) or 'ucb' (UpperConfidenceBound)
     ucb_beta      : exploration weight for UCB
     kernel        : 'matern' (ARD) or 'weighted_shortest_path'
+    mean          : GP mean — 'constant' or a learned 'linear' trend in the ranks
     wsp_mode      : shortest-path kernel variant ('matern'/'bogrape'/'soft'/'ewsp')
+    input_warp    : wrap the kernel in a learned per-dim input warp (Kumaraswamy CDF)
     acqf_optimizer: 'mip' (discrete local search; default) or 'gradient' (L-BFGS-B)
     """
 
@@ -59,6 +63,8 @@ class BOSS(BOSSBase):
         budget: int = 200,
         n_init: int = 10,
         init_design: str = "sobol",
+        cr_warp_lambda: float = 0.0,
+        cr_pool_bias: float = 1.0,
         max_rank: int = 10,
         feasible_rse: float = 0.01,
         min_rse: float | None = None,
@@ -76,13 +82,16 @@ class BOSS(BOSSBase):
         raw_samples: int = 256,
         num_restarts: int = 10,
         kernel: str = "matern",
+        mean: str = "constant",
         wsp_mode: str = "matern",
+        input_warp: bool = False,
         acqf_optimizer: str = "mip",
         seed: int | None = None,
         verbose: bool = True,
     ):
         super().__init__(
             target, budget=budget, n_init=n_init, init_design=init_design,
+            cr_warp_lambda=cr_warp_lambda, cr_pool_bias=cr_pool_bias,
             max_rank=max_rank, feasible_rse=feasible_rse, min_rse=min_rse,
             maxiter_tn=maxiter_tn, n_runs=n_runs, lamda=lamda,
             decomp_method=decomp_method, init_lr=init_lr, momentum=momentum,
@@ -92,6 +101,7 @@ class BOSS(BOSSBase):
         )
 
         assert acqf in ("ei", "ucb"), f"acqf must be 'ei' or 'ucb', got {acqf!r}"
+        assert mean in MEANS, f"mean must be one of {MEANS}, got {mean!r}"
         assert kernel in ("matern", "weighted_shortest_path", "weighted_sp"), (
             f"kernel must be 'matern' or 'weighted_shortest_path', got {kernel!r}")
         assert wsp_mode in ("matern", "bogrape", "soft", "ewsp"), (
@@ -101,20 +111,23 @@ class BOSS(BOSSBase):
         self.acqf = acqf
         self.ucb_beta = ucb_beta
         self.kernel = kernel
+        self.mean = mean
         self.wsp_mode = wsp_mode
+        self.input_warp = input_warp
         self.acqf_optimizer = acqf_optimizer
 
-        # Kernel factory over the normalized upper-triangular rank vector.
+        # Mean factory over the normalized rank vector (fresh module per GP build).
+        self._mean = lambda: make_mean(
+            self.mean, self.D, N=self.N, max_rank=self.max_rank, t_shape=self.t_shape)
+
+        # Kernel factory over the normalized upper-triangular rank vector; optionally
+        # wrapped in a learned per-dim input warp (Kumaraswamy CDF).
         if kernel == "matern":
-            self._kernel = lambda: ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=self.D))
+            base = lambda: MaternKernel(nu=2.5, ard_num_dims=self.D)
         else:
-            self._kernel = lambda: ScaleKernel(
-                WeightedShortestPathKernel(
-                    num_nodes=self.N,
-                    weight_bounds=(1.0, float(self.max_rank)),
-                    mode=self.wsp_mode,
-                )
-            )
+            base = lambda: WeightedShortestPathKernel(
+                num_nodes=self.N, weight_bounds=(1.0, float(self.max_rank)), mode=self.wsp_mode)
+        self._kernel = lambda: ScaleKernel(maybe_warp(base(), self.D, self.input_warp))
         self._gp_state = None
 
     # ------------------------------------------------------------------
@@ -185,6 +198,7 @@ class BOSS(BOSSBase):
         gp = SingleTaskGP(
             X[mask], Y[mask],
             outcome_transform=Standardize(m=1),
+            mean_module=self._mean(),
             covar_module=self._kernel(),
         )
         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
@@ -207,7 +221,8 @@ class BOSS(BOSSBase):
         frozen at their last fit — no mll optimization. The outcome Standardize
         is recomputed from the current Y (it's a data normalization, not a hyper)."""
         gp = SingleTaskGP(
-            X, Y, outcome_transform=Standardize(m=1), covar_module=self._kernel(),
+            X, Y, outcome_transform=Standardize(m=1),
+            mean_module=self._mean(), covar_module=self._kernel(),
         )
         if self._gp_state is not None:
             dst = gp.state_dict()

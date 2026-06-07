@@ -20,6 +20,8 @@ from gpytorch.likelihoods import BernoulliLikelihood
 from gpytorch.mlls import VariationalELBO
 from gpytorch.variational import VariationalStrategy, UnwhitenedVariationalStrategy
 
+from tnss.algo.boss.means import make_mean
+from tnss.kernels.input_warp_kernel import maybe_warp
 from tnss.kernels.weighted_shortest_path import WeightedShortestPathKernel
 
 STRATEGIES = {"whitened": VariationalStrategy, "unwhitened": UnwhitenedVariationalStrategy}
@@ -32,9 +34,11 @@ _NU = {"matern": 2.5, "matern52": 2.5, "matern32": 1.5}
 _FIT_THREADS = 8
 
 
-def make_kernel(name: str, D: int, N: int, max_rank: int, wsp_mode: str = "matern"):
+def make_kernel(name: str, D: int, N: int, max_rank: int, wsp_mode: str = "matern",
+                input_warp: bool = False):
     """ScaleKernel over the rank vector. matern52/matern32/rbf are ARD; the
-    weighted-shortest-path kernel is topology-aware over the N-core bond graph."""
+    weighted-shortest-path kernel is topology-aware over the N-core bond graph.
+    With ``input_warp`` the base kernel is wrapped in a learned per-dim warp."""
     if name in _NU:
         base = MaternKernel(nu=_NU[name], ard_num_dims=D)
     elif name == "rbf":
@@ -44,7 +48,7 @@ def make_kernel(name: str, D: int, N: int, max_rank: int, wsp_mode: str = "mater
             num_nodes=N, weight_bounds=(1.0, float(max_rank)), mode=wsp_mode)
     else:
         raise ValueError(f"unknown kernel {name!r}")
-    return ScaleKernel(base)
+    return ScaleKernel(maybe_warp(base, D, input_warp))
 
 
 class FeasibilityGP(SingleTaskVariationalGP):
@@ -54,7 +58,8 @@ class FeasibilityGP(SingleTaskVariationalGP):
     ----------
     train_X, train_Y : training inputs (normalized ranks) and 0/1 feasibility
     D, N, max_rank   : search-space dims, cores, rank bound
-    kernel, var_strategy, wsp_mode : surrogate configuration
+    t_shape          : physical mode sizes (needed only by the 'log_size' mean)
+    kernel, mean, var_strategy, wsp_mode, input_warp : surrogate configuration
     full_epochs      : max epochs for the *initialization* fit (hyperparameters +
                        variational distribution)
     refine_epochs    : max epochs for a :meth:`refit` refresh (variational
@@ -63,24 +68,26 @@ class FeasibilityGP(SingleTaskVariationalGP):
                        < ``tol`` for ``patience`` consecutive epochs)
     """
 
-    def __init__(self, train_X, train_Y, *, D, N, max_rank,
-                 kernel="matern", var_strategy="whitened", wsp_mode="matern",
-                 full_epochs=400, refine_epochs=60,
+    def __init__(self, train_X, train_Y, *, D, N, max_rank, t_shape=None,
+                 kernel="matern", mean="constant", var_strategy="whitened", wsp_mode="matern",
+                 input_warp=False, full_epochs=400, refine_epochs=60,
                  lr=0.1, tol=1e-4, patience=10):
         if var_strategy not in STRATEGIES:
             raise ValueError(f"var_strategy must be one of {list(STRATEGIES)}")
         super().__init__(
             train_X, train_Y,
             likelihood=BernoulliLikelihood(),
-            covar_module=make_kernel(kernel, D, N, max_rank, wsp_mode),
+            mean_module=make_mean(mean, D, N=N, max_rank=max_rank, t_shape=t_shape),
+            covar_module=make_kernel(kernel, D, N, max_rank, wsp_mode, input_warp),
             variational_strategy=STRATEGIES[var_strategy],
             inducing_points=train_X,
             learn_inducing_points=False,
         )
         self._X, self._Y = train_X, train_Y
         # config carried to rebuilt instances on refit
-        self._cfg = dict(D=D, N=N, max_rank=max_rank, kernel=kernel,
-                         var_strategy=var_strategy, wsp_mode=wsp_mode,
+        self._cfg = dict(D=D, N=N, max_rank=max_rank, t_shape=t_shape,
+                         kernel=kernel, mean=mean,
+                         var_strategy=var_strategy, wsp_mode=wsp_mode, input_warp=input_warp,
                          full_epochs=full_epochs, refine_epochs=refine_epochs,
                          lr=lr, tol=tol, patience=patience)
         self.full_epochs = full_epochs

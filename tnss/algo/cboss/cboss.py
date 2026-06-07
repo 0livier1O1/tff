@@ -32,7 +32,6 @@ from tnss.algo.cboss.acquisitions import (
     MaxFeasibility, PFWeightedImprovement, FeasibilityInterpolatedCR,
     build_constrained_ei,
 )
-from tnss.utils import triu_to_adj_matrix
 
 
 class CBOSS(BOSSBase):
@@ -48,7 +47,9 @@ class CBOSS(BOSSBase):
     seek_feasible_first : while no feasible point exists, use a pure feasibility-
                     seeking acquisition (maximize P(feasible))
     kernel        : feasibility-GP kernel ('matern'/'matern52'/'matern32'/'rbf'/'weighted_shortest_path')
+    mean          : feasibility-GP latent mean ('constant' or learned 'linear' in the ranks)
     var_strategy  : 'whitened' or 'unwhitened' variational strategy
+    input_warp    : wrap the kernel in a learned per-dim input warp (Kumaraswamy CDF)
     wsp_mode      : shortest-path kernel variant (only for the wsp kernel)
     gp_epochs     : max Adam epochs for the full ELBO fit at init
     gp_refine_epochs / gp_tol / gp_patience : per-refresh budget + ELBO early-stop
@@ -62,6 +63,8 @@ class CBOSS(BOSSBase):
         budget: int = 100,
         n_init: int = 20,
         init_design: str = "lhs",
+        cr_warp_lambda: float = 0.0,
+        cr_pool_bias: float = 1.0,
         max_rank: int = 10,
         feasible_rse: float = 1e-3,
         min_rse: float | None = None,
@@ -77,8 +80,10 @@ class CBOSS(BOSSBase):
         loss_patience: int = 2500,
         lr_patience: int = 250,
         kernel: str = "matern",
+        mean: str = "constant",
         var_strategy: str = "whitened",
         wsp_mode: str = "matern",
+        input_warp: bool = False,
         gp_epochs: int = 400,
         freq_update: int = 5,
         gp_refine_epochs: int = 60,
@@ -92,6 +97,7 @@ class CBOSS(BOSSBase):
     ):
         super().__init__(
             target, budget=budget, n_init=n_init, init_design=init_design,
+            cr_warp_lambda=cr_warp_lambda, cr_pool_bias=cr_pool_bias,
             max_rank=max_rank, feasible_rse=feasible_rse, min_rse=min_rse,
             maxiter_tn=maxiter_tn, n_runs=n_runs, lamda=lamda,
             decomp_method=decomp_method, init_lr=init_lr, momentum=momentum,
@@ -105,8 +111,10 @@ class CBOSS(BOSSBase):
         self.ficr_t = ficr_t
         self.seek_feasible_first = seek_feasible_first
         self.kernel = kernel
+        self.mean = mean
         self.var_strategy = var_strategy
         self.wsp_mode = wsp_mode
+        self.input_warp = input_warp
         self.gp_epochs = gp_epochs
         self.gp_refine_epochs = gp_refine_epochs
         self.gp_tol = gp_tol
@@ -120,16 +128,12 @@ class CBOSS(BOSSBase):
     def _neg_cr(self, X: Tensor) -> Tensor:
         """Deterministic objective: -CR for each normalized rank vector in X.
 
-        CR = (sum_i prod_j A_ij) / prod_i diag_i, computed directly from the
-        adjacency matrix (no decomposition). Handles arbitrary leading dims so it
-        can wrap a BoTorch ``GenericDeterministicModel``.
+        CR is computed in closed form from the adjacency (see ``BOSSBase._cr``);
+        this handles arbitrary leading dims so it can wrap a BoTorch
+        ``GenericDeterministicModel``.
         """
         lead = X.shape[:-1]
-        x_int = self._to_int(X.reshape(-1, self.D))
-        A = triu_to_adj_matrix(x_int.double(), diag=self.t_shape).squeeze(1)  # (m, N, N)
-        net = A.prod(dim=-1).sum(dim=-1)
-        cr = net / self.t_shape.prod()
-        return (-cr).reshape(*lead, 1)
+        return (-self._cr(X)).reshape(*lead, 1)
 
     @staticmethod
     def _best_feasible_cr(Y_cr: Tensor, Y_feas: Tensor) -> float:
@@ -145,8 +149,9 @@ class CBOSS(BOSSBase):
         # The only full (hyperparameter) fit happens here, on the init data.
         t0 = time.time()
         feas = FeasibilityGP(
-            X, Y_feas, D=self.D, N=self.N, max_rank=self.max_rank,
-            kernel=self.kernel, var_strategy=self.var_strategy, wsp_mode=self.wsp_mode,
+            X, Y_feas, D=self.D, N=self.N, max_rank=self.max_rank, t_shape=self.t_shape,
+            kernel=self.kernel, mean=self.mean, var_strategy=self.var_strategy, wsp_mode=self.wsp_mode,
+            input_warp=self.input_warp,
             full_epochs=self.gp_epochs, refine_epochs=self.gp_refine_epochs,
             tol=self.gp_tol, patience=self.gp_patience,
         ).fit(epochs=self.gp_epochs, freeze_hypers=False)

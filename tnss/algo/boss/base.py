@@ -2,7 +2,7 @@
 base.py — shared core for BO-based TN structure search (the BOSS family).
 
 `BOSSBase` holds everything BOSS (unconstrained) and CBOSS (constrained) share:
-the search-space encoding, TN evaluation, init sampling (sobol/lhs), per-step
+the search-space encoding, TN evaluation, init sampling (sobol/lhs/cr_stratified), per-step
 row/trace bookkeeping, feasibility tagging, and the BO-loop skeleton. Subclasses
 supply only the *surrogate*, the *acquisition*, and (CBOSS) seek-feasible-first,
 through a small set of hooks:
@@ -28,11 +28,11 @@ import cupy as cp
 import torch
 from torch import Tensor
 
-from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize
-from scipy.stats import qmc
 
 from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
+from tnss.algo.boss.means import make_mean  # noqa: F401 (re-exported for back-compat)
+from tnss.algo.init_designs import sample_init_points
 from tnss.utils import triu_to_adj_matrix, atomic_write_json
 
 
@@ -99,6 +99,8 @@ class BOSSBase:
         budget: int,
         n_init: int,
         init_design: str,
+        cr_warp_lambda: float = 0.0,
+        cr_pool_bias: float = 1.0,
         max_rank: int,
         feasible_rse: float,
         min_rse: float | None,
@@ -116,8 +118,8 @@ class BOSSBase:
         seed: int | None,
         verbose: bool,
     ):
-        assert init_design in ("lhs", "sobol"), (
-            f"init_design must be 'lhs' or 'sobol', got {init_design!r}")
+        assert init_design in ("lhs", "sobol", "cr_stratified"), (
+            f"init_design must be 'lhs', 'sobol', or 'cr_stratified', got {init_design!r}")
         self.target = target
         self.t_shape = torch.tensor(target.shape, dtype=torch.double)
         self.N = target.dim()
@@ -126,6 +128,9 @@ class BOSSBase:
         self.budget = budget
         self.n_init = n_init
         self.init_design = init_design
+        # cr_stratified shaping knobs (ignored by lhs/sobol).
+        self.cr_warp_lambda = cr_warp_lambda
+        self.cr_pool_bias = cr_pool_bias
         # feasible_rse is the feasibility threshold AND the decomposition
         # early-stop (min_rse) unless min_rse is given explicitly.
         self.feasible_rse = feasible_rse
@@ -213,6 +218,15 @@ class BOSSBase:
         """Map [0,1]^D -> {1,...,max_rank}^D (integer ranks)."""
         return unnormalize(x_std, self.bounds_int).round().clamp(1, self.max_rank).to(torch.int)
 
+    def _cr(self, X: Tensor) -> Tensor:
+        """Deterministic compression ratio for each normalized rank vector in X
+        (flattened to ``(m, D)``): ``CR = (sum_i prod_j A_ij) / prod_i diag_i``,
+        straight from the adjacency — no decomposition. Shared by CBOSS's objective
+        and the CR-aware init design."""
+        x_int = self._to_int(X.reshape(-1, self.D))
+        A = triu_to_adj_matrix(x_int.double(), diag=self.t_shape).squeeze(1)  # (m, N, N)
+        return A.prod(dim=-1).sum(dim=-1) / self.t_shape.prod()
+
     def _evaluate(self, A_int: Tensor):
         """Evaluate one candidate structure with cuTensorNetwork."""
         return _eval_tn(
@@ -222,15 +236,12 @@ class BOSSBase:
         )
 
     def _init_points(self) -> Tensor:
-        """Initial design in [0,1]^D. 'lhs' (Latin hypercube) gives per-dimension
-        stratification — raising the chance of seeding a feasible (high-rank)
-        structure — while 'sobol' is the low-discrepancy alternative."""
-        if self.init_design == "sobol":
-            return draw_sobol_samples(
-                bounds=self.std_bounds, n=self.n_init, q=1, seed=self.seed
-            ).squeeze(1).to(torch.double)
-        lhs = qmc.LatinHypercube(d=self.D, seed=self.seed).random(self.n_init)
-        return torch.as_tensor(lhs, dtype=torch.double)
+        """Initial design in [0,1]^D via the shared :func:`sample_init_points`
+        ('sobol' / 'lhs' / 'cr_stratified'). cr_stratified injects this class's
+        deterministic CR (:meth:`_cr`) and the two shaping knobs."""
+        return sample_init_points(
+            self.init_design, n=self.n_init, D=self.D, seed=self.seed, cr_fn=self._cr,
+            cr_warp_lambda=self.cr_warp_lambda, cr_pool_bias=self.cr_pool_bias)
 
     def _observe(self, x_std: Tensor, *, step: int, phase: str,
                  gp_fit_time: float = 0.0, suggest_time: float = 0.0,
@@ -270,7 +281,7 @@ class BOSSBase:
         """Evaluate the initial design; return (X, Y_rse, Y_cr, Y_feas, T)."""
         X = self._init_points()
         # Tag the initial design "init" (consistent across all algos; the design
-        # method — sobol/lhs — is recorded in the config, not the phase label).
+        # method — sobol/lhs/cr_stratified — is recorded in the config, not the phase label).
         phase = "init"
         rse_l, cr_l, feas_l, t_l = [], [], [], []
         for i, x in enumerate(X):
