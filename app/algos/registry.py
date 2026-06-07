@@ -99,7 +99,7 @@ def _build_tnale(acfg, adj_np, target_np, seed):
         local_opt_iter=acfg.tnale_local_opt_iter, init_sparsity=acfg.tnale_init_sparsity,
         lambda_fitness=acfg.lambda_fitness, n_runs=acfg.n_runs, min_rse=acfg.feasible_rse,
         phase_change_reset=acfg.tnale_phase_change_reset, init_method=acfg.init_method,
-        n_sobol_init=acfg.n_init, cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
+        n_init=acfg.n_init, cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
         seed=seed, dtype="float32", verbose=True,
         **_decomp_kwargs(acfg),
     )
@@ -110,7 +110,8 @@ def _build_random(acfg, adj_np, target_np, seed):
         _target_torch(target_np),
         budget=acfg.budget, max_rank=acfg.max_rank, min_rse=acfg.feasible_rse,
         lamda=acfg.lambda_fitness, n_runs=acfg.n_runs, dtype="float32",
-        init_method=acfg.init_method, n_sobol_init=acfg.n_init,
+        init_method=acfg.init_method, n_init=acfg.n_init,
+        cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
         seed=seed, verbose=True, **_decomp_kwargs(acfg),
     )
 

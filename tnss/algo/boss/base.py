@@ -32,8 +32,8 @@ from botorch.utils.transforms import unnormalize
 
 from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
 from tnss.algo.boss.means import make_mean  # noqa: F401 (re-exported for back-compat)
-from tnss.algo.init_designs import sample_init_points
-from tnss.utils import triu_to_adj_matrix, atomic_write_json
+from tnss.algo.init_designs import sample_init_points, INIT_DESIGNS
+from tnss.utils import triu_to_adj_matrix, cr_of_normalized, atomic_write_json
 
 
 def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
@@ -118,8 +118,8 @@ class BOSSBase:
         seed: int | None,
         verbose: bool,
     ):
-        assert init_design in ("lhs", "sobol", "cr_stratified"), (
-            f"init_design must be 'lhs', 'sobol', or 'cr_stratified', got {init_design!r}")
+        assert init_design in INIT_DESIGNS, (
+            f"init_design must be one of {INIT_DESIGNS}, got {init_design!r}")
         self.target = target
         self.t_shape = torch.tensor(target.shape, dtype=torch.double)
         self.N = target.dim()
@@ -220,12 +220,9 @@ class BOSSBase:
 
     def _cr(self, X: Tensor) -> Tensor:
         """Deterministic compression ratio for each normalized rank vector in X
-        (flattened to ``(m, D)``): ``CR = (sum_i prod_j A_ij) / prod_i diag_i``,
-        straight from the adjacency — no decomposition. Shared by CBOSS's objective
-        and the CR-aware init design."""
-        x_int = self._to_int(X.reshape(-1, self.D))
-        A = triu_to_adj_matrix(x_int.double(), diag=self.t_shape).squeeze(1)  # (m, N, N)
-        return A.prod(dim=-1).sum(dim=-1) / self.t_shape.prod()
+        (flattened to ``(m, D)``) — see :func:`tnss.utils.cr_of_normalized`. Used by
+        CBOSS's objective and the cr_stratified init scorer."""
+        return cr_of_normalized(X, self.max_rank, self.t_shape)
 
     def _evaluate(self, A_int: Tensor):
         """Evaluate one candidate structure with cuTensorNetwork."""

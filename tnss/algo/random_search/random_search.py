@@ -12,7 +12,8 @@ from torch import Tensor
 import cupy as cp
 
 from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
-from tnss.utils import triu_to_adj_matrix, atomic_write_json
+from tnss.algo.init_designs import sample_init_points, INIT_DESIGNS
+from tnss.utils import triu_to_adj_matrix, cr_of_normalized, to_int_ranks, atomic_write_json
 
 
 def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
@@ -88,7 +89,9 @@ class RandomSearch:
         loss_patience: int = 2500,
         lr_patience: int = 250,
         init_method: str = "random",
-        n_sobol_init: int = 10,
+        n_init: int = 10,
+        cr_warp_lambda: float = 0.0,
+        cr_pool_bias: float = 1.0,
         seed: int | None = None,
         verbose: bool = True,
     ) -> None:
@@ -108,10 +111,13 @@ class RandomSearch:
         self.momentum = momentum
         self.loss_patience = loss_patience
         self.lr_patience = lr_patience
-        if init_method not in ("random", "sobol"):
-            raise ValueError(f"init_method must be 'random' or 'sobol', got {init_method!r}")
+        if init_method not in ("random",) + INIT_DESIGNS:
+            raise ValueError(
+                f"init_method must be 'random' or one of {INIT_DESIGNS}, got {init_method!r}")
         self.init_method = init_method
-        self.n_sobol_init = n_sobol_init
+        self.n_init = n_init
+        self.cr_warp_lambda = cr_warp_lambda
+        self.cr_pool_bias = cr_pool_bias
         self.seed = seed
         self.verbose = verbose
 
@@ -128,8 +134,8 @@ class RandomSearch:
         self.train_t: list[float] = []
 
     def run(self, progress_file: Path | None = None) -> list[dict]:
-        if self.init_method == "sobol":
-            self._sobol_init(progress_file)
+        if self.init_method in INIT_DESIGNS:
+            self._pooled_init(progress_file)
 
         step_offset = len(self.rows)
         for step in range(self.budget):
@@ -171,31 +177,27 @@ class RandomSearch:
         vals = self.rng.integers(1, self.max_rank + 1, size=self.D, dtype=np.int64)
         return torch.tensor(vals, dtype=torch.int)
 
-    def _sobol_init(self, progress_file: Path | None) -> None:
-        from botorch.utils.sampling import draw_sobol_samples
-        from botorch.utils.transforms import unnormalize
-
-        bounds = torch.stack([
-            torch.ones(self.D, dtype=torch.double),
-            torch.full((self.D,), float(self.max_rank), dtype=torch.double),
-        ])
-        std_bounds = torch.zeros_like(bounds)
-        std_bounds[1] = 1.0
-        sobol = draw_sobol_samples(
-            bounds=std_bounds, n=self.n_sobol_init, q=1, seed=self.seed,
-        ).squeeze(1)
-        samples = unnormalize(sobol, bounds).round().clamp(1, self.max_rank).to(torch.int)
+    def _pooled_init(self, progress_file: Path | None) -> None:
+        """Shared pooled init (sobol/lhs/cr_stratified): draw n_init candidates via
+        :func:`sample_init_points`, evaluate each as an 'init'-phase row. Lets the
+        baseline draw the *same* initial design as BOSS/cBOSS/TnALE so every method
+        starts from the common anchor."""
+        pts = sample_init_points(
+            self.init_method, n=self.n_init, D=self.D, seed=self.seed,
+            cr_fn=lambda X: cr_of_normalized(X, self.max_rank, self.t_shape),
+            cr_warp_lambda=self.cr_warp_lambda, cr_pool_bias=self.cr_pool_bias)
+        samples = to_int_ranks(pts, self.max_rank)
 
         for i, x_int_flat in enumerate(samples):
             row = self._observe(step=i, phase="init", x_int_flat=x_int_flat)
             if self.verbose:
                 print(
-                    f"[Random Sobol init {i + 1}/{self.n_sobol_init}] "
+                    f"[Random {self.init_method} init {i + 1}/{self.n_init}] "
                     f"obj={row['objective']:.5f}  RSE={row['rse']:.5f}  CR={row['cr']:.5f}"
                 )
             atomic_write_json(
                 progress_file,
-                {"phase": "init", "step": i + 1, "budget": self.n_sobol_init},
+                {"phase": "init", "step": i + 1, "budget": self.n_init},
             )
 
     def _observe(self, *, step: int, phase: str, x_int_flat: Tensor | None = None) -> dict:

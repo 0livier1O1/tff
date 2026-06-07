@@ -35,7 +35,7 @@ from app.config.constants import (
     MABSS_EXP3_LOSS_CAP, MABSS_EXP3_LOG_CR_CAP, MABSS_DTYPE,
     BOSS_BUDGET, BOSS_MAX_BOND, BOSS_N_INIT, BOSS_LAMBDA_FITNESS, BOSS_UCB_BETA,
     RANDOM_BUDGET, RANDOM_MAX_BOND, RANDOM_N_RUNS, RANDOM_MIN_RSE_DECOMP,
-    RANDOM_LAMBDA_FITNESS, RANDOM_INIT_METHOD, RANDOM_N_SOBOL_INIT,
+    RANDOM_LAMBDA_FITNESS, RANDOM_N_INIT,
     TNALE_BUDGET, TNALE_MAX_RANK, TNALE_TOPOLOGY, TNALE_LAMBDA_FITNESS,
     TNALE_LOCAL_STEP_INIT, TNALE_LOCAL_STEP_MAIN, TNALE_INTERP_ON, TNALE_INTERP_ITERS,
     TNALE_LOCAL_OPT_ITER, TNALE_INIT_SPARSITY, TNALE_PHASE_CHANGE_RESET,
@@ -519,10 +519,13 @@ def _render_random(acfg: RandomSearchConfig) -> None:
     _num(st, acfg, "feasible_rse", "Feasible RSE", f"random_min_rse_{cid}",
          format="%e", help=RANDOM_MIN_RSE_DECOMP)
     c5, c6 = st.columns(2)
-    _sel(c5, acfg, "init_method", "Init Method", ["sobol", "random"],
-         f"random_init_method_{cid}", help=RANDOM_INIT_METHOD)
-    _num(c6, acfg, "n_init", "Sobol Init Samples", f"random_n_sobol_init_{cid}",
-         min_value=1, step=1, help=RANDOM_N_SOBOL_INIT)
+    _sel(c5, acfg, "init_method", "Init Method", ["random"] + BO_INIT_DESIGNS,
+         f"random_init_method_{cid}",
+         help="'random' = pure uniform baseline, no init phase. The rest are the shared "
+              "pooled inits (a common init anchor with the other algos): " + BO_INIT_DESIGN_HELP)
+    _num(c6, acfg, "n_init", "Init Pool Samples", f"random_n_init_{cid}",
+         min_value=1, step=1, help=RANDOM_N_INIT)
+    _render_cr_stratified_opts(acfg, f"random_{cid}")
 
 
 def _render_tnale(acfg: TnALEConfig) -> None:
@@ -565,7 +568,7 @@ def _render_tnale(acfg: TnALEConfig) -> None:
          f"tnale_init_method_{cid}",
          help="'sparse' = single random sparse start (TnALE-specific). The rest are the "
               "shared pooled inits: " + BO_INIT_DESIGN_HELP)
-    _num(c12, acfg, "n_init", "Init Pool Samples", f"tnale_n_sobol_init_{cid}",
+    _num(c12, acfg, "n_init", "Init Pool Samples", f"tnale_n_init_{cid}",
          min_value=1, step=1,
          help="Number of candidates drawn + evaluated for sobol/lhs/cr_stratified init "
               "(the best becomes TnALE's starting structure).")

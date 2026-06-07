@@ -104,7 +104,7 @@ class TnALE:
         lr_patience: int = 250,
         phase_change_reset: bool = True,
         init_method: str = "sparse",
-        n_sobol_init: int = 10,
+        n_init: int = 10,
         cr_warp_lambda: float = 0.0,
         cr_pool_bias: float = 1.0,
         seed: int | None = None,
@@ -157,7 +157,7 @@ class TnALE:
             raise ValueError(
                 f"init_method must be 'sparse' or one of {INIT_DESIGNS}, got {init_method!r}")
         self.init_method = init_method
-        self.n_sobol_init = n_sobol_init
+        self.n_init = n_init
         self.cr_warp_lambda = cr_warp_lambda
         self.cr_pool_bias = cr_pool_bias
         self.seed = seed
@@ -629,7 +629,7 @@ class TnALE:
         return torch.tensor(crs, dtype=torch.double)
 
     def _run_pooled_init(self, progress_file: Path | None = None) -> np.ndarray:
-        """Draw n_sobol_init candidates via the shared init design (sobol/lhs/
+        """Draw n_init candidates via the shared init design (sobol/lhs/
         cr_stratified), evaluate each, and return the ranks of the best.
 
         Bit-identical samples to BOSS for design='sobol' when topology='full', same
@@ -637,7 +637,7 @@ class TnALE:
         _last_row_time; these evaluations are tagged phase='init' in the trace.
         """
         pts = sample_init_points(
-            self.init_method, n=self.n_sobol_init, D=self.D, seed=self.seed,
+            self.init_method, n=self.n_init, D=self.D, seed=self.seed,
             cr_fn=self._cr_of_normalized,
             cr_warp_lambda=self.cr_warp_lambda, cr_pool_bias=self.cr_pool_bias)
         samples = self._to_int_ranks(pts)
@@ -653,7 +653,7 @@ class TnALE:
                 best_obj = obj
                 best_ranks = ranks.copy()
             atomic_write_json(progress_file, {
-                "phase": "init", "step": i + 1, "budget": self.n_sobol_init,
+                "phase": "init", "step": i + 1, "budget": self.n_init,
             })
         self._in_pooled_init = False
 
