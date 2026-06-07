@@ -13,7 +13,7 @@ configs of the same policy with different params don't collide.
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass, field, asdict, replace
+from dataclasses import dataclass, field, asdict, replace, fields
 from typing import Any
 
 
@@ -65,6 +65,9 @@ class AlgoConfig:
     max_rank: int = 10
     n_init: int = 20
     init_method: str = "sobol"
+    # cr_stratified init shaping knobs (ignored by lhs/sobol):
+    cr_warp_lambda: float = 0.0     # Box-Cox exponent for CR spacing (0=log, <0=more low-CR)
+    cr_pool_bias: float = 1.0       # low-rank pool bias x**bias (1=uniform, >1=more low-CR candidates)
     n_runs: int = 1
     # Doubles as the decomposition early-stop threshold AND (for cBOSS) the
     # feasibility threshold — a structure is feasible iff best RSE < this, and
@@ -72,6 +75,8 @@ class AlgoConfig:
     feasible_rse: float = 1e-2
     lambda_fitness: float = 10.0
     kernel: str = "matern"
+    mean: str = "constant"          # GP mean for the BO families: 'constant' | 'linear' | 'log_size'
+    input_warp: bool = False        # wrap the BO-family kernel in a learned per-dim input warp
     ucb_beta: float = 2.0
     # Surrogate refresh cadence for the BO families (BOSS/cBOSS): re-fit the GP
     # (hyperparameters for BOSS, variational dist for cBOSS) every N steps.
@@ -79,7 +84,7 @@ class AlgoConfig:
 
     # Decomposition (every family runs a TN decomposition under the hood)
     decomp_method: str = "adam"
-    decomp_epochs: int = 2000
+    decomp_epochs: int = 1000
     decomp_init_lr: float | None = 0.01
     decomp_momentum: float = 0.9
     decomp_loss_patience: int = 500
@@ -162,7 +167,8 @@ class CBOSSConfig(AlgoConfig):
     cboss_ficr_t: float = 1.0               # interpolation exponent (cboss-ficr only)
     cboss_seek_feasible_first: bool = True
 
-    # Feasibility GP surrogate (var_strategy/wsp_mode are cBOSS-specific)
+    # Feasibility GP surrogate (var_strategy/wsp_mode are cBOSS-specific; the
+    # constant/linear `mean` is a shared base field)
     cboss_var_strategy: str = "whitened"    # whitened | unwhitened
     cboss_wsp_mode: str = "matern"          # only for the wsp kernel
     cboss_gp_epochs: int = 400              # full fit at init
@@ -251,7 +257,11 @@ def algo_config_from_dict(d: dict[str, Any]) -> AlgoConfig:
     if fam is None:
         raise ValueError("Config dict missing 'family' discriminator")
     cls = _CONFIG_CLS[fam]
-    return cls(**d)
+    # Drop keys that aren't fields of this subclass: serialized configs from
+    # earlier schema versions (e.g. a since-renamed `cboss_mean`) would otherwise
+    # crash reconstruction. Unknown keys fall back to the field's current default.
+    valid = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in d.items() if k in valid})
 
 
 def _is_auto_label(acfg: AlgoConfig) -> bool:

@@ -60,10 +60,11 @@ def _build_boss(acfg, adj_np, target_np, seed):
     return BOSS(
         _target_torch(target_np),
         budget=acfg.budget, n_init=acfg.n_init, init_design=acfg.init_method,
+        cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
         max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
         freq_update=acfg.freq_update, lamda=acfg.lambda_fitness, n_runs=acfg.n_runs,
-        acqf=_acqf(acfg), ucb_beta=acfg.ucb_beta, kernel=acfg.kernel,
-        seed=seed, verbose=True, **_decomp_kwargs(acfg),
+        acqf=_acqf(acfg), ucb_beta=acfg.ucb_beta, kernel=acfg.kernel, mean=acfg.mean,
+        input_warp=acfg.input_warp, seed=seed, verbose=True, **_decomp_kwargs(acfg),
     )
 
 
@@ -71,10 +72,12 @@ def _build_cboss(acfg, adj_np, target_np, seed):
     return CBOSS(
         _target_torch(target_np),
         budget=acfg.budget, n_init=acfg.n_init, init_design=acfg.init_method,
+        cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
         max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
         n_runs=acfg.n_runs, acqf=_acqf(acfg), ficr_t=acfg.cboss_ficr_t,
         lamda=acfg.lambda_fitness, seek_feasible_first=acfg.cboss_seek_feasible_first,
-        kernel=acfg.kernel, var_strategy=acfg.cboss_var_strategy, wsp_mode=acfg.cboss_wsp_mode,
+        kernel=acfg.kernel, mean=acfg.mean, var_strategy=acfg.cboss_var_strategy,
+        wsp_mode=acfg.cboss_wsp_mode, input_warp=acfg.input_warp,
         gp_epochs=acfg.cboss_gp_epochs, freq_update=acfg.freq_update,
         gp_refine_epochs=acfg.cboss_gp_refine_epochs, gp_tol=acfg.cboss_gp_tol,
         gp_patience=acfg.cboss_gp_patience, mc_samples=acfg.cboss_mc_samples,

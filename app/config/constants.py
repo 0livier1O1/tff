@@ -11,8 +11,9 @@ Import specific strings by name into sidebar.py.
 # ---------------------------------------------------------------------------
 
 SEEDS = (
-    "Comma-separated integers. Each seed runs the full set of selected algorithms "
-    "independently, allowing statistical aggregation (mean ± std) across runs."
+    "Comma-separated integers, with inclusive ranges via `-` "
+    "(e.g. `1, 3-5, 7` → 1, 3, 4, 5, 7). Each seed runs the full set of selected "
+    "algorithms independently, allowing statistical aggregation (mean ± std) across runs."
 )
 
 TMUX_SESSION = (

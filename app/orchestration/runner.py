@@ -30,17 +30,20 @@ from app.utils import _script_alive
 # ---------------------------------------------------------------------------
 
 def parse_seeds(seeds_str: str) -> list[int]:
-    """Parse a CSV seed string with optional range notation ("1, ..., 5")."""
-    parts = [s.strip() for s in seeds_str.split(",")]
+    """Parse a comma-separated seed string with inclusive range notation:
+    "1, 3-5, 7" -> [1, 3, 4, 5, 7]. Order preserved, duplicates dropped;
+    malformed parts are ignored."""
     raw: list[int] = []
-    for i, p in enumerate(parts):
-        if p.isdigit():
-            raw.append(int(p))
-        elif p == "..." and 0 < i < len(parts) - 1:
-            if parts[i - 1].isdigit() and parts[i + 1].isdigit():
-                prev, nxt = int(parts[i - 1]), int(parts[i + 1])
-                if prev < nxt:
-                    raw.extend(range(prev + 1, nxt))
+    for part in seeds_str.split(","):
+        part = part.strip()
+        if part.isdigit():
+            raw.append(int(part))
+        elif "-" in part:
+            lo_s, _, hi_s = part.partition("-")
+            lo_s, hi_s = lo_s.strip(), hi_s.strip()
+            if lo_s.isdigit() and hi_s.isdigit():
+                lo, hi = int(lo_s), int(hi_s)
+                raw.extend(range(lo, hi + 1) if lo <= hi else range(lo, hi - 1, -1))
     return list(dict.fromkeys(raw))
 
 
@@ -66,8 +69,8 @@ def mabss_cmd(acfg: MABSSConfig, problem: ProblemConfig, seed: int, algo_dir: Pa
     sub-policy are appended — no silent passthrough of unused params."""
     p = acfg.policy
     cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_mabss_experiment.py",
+        "conda", "run", "--no-capture-output", "-n", "tensors",
+        "python", "-u", "scripts/experiments/run_mabss_experiment.py",
         "--budget",             str(acfg.budget),
         "--warm-start-epochs",  str(acfg.decomp_epochs),
         "--n-cores",            str(problem.n_cores),
@@ -128,8 +131,8 @@ def unified_cmd(acfg: AlgoConfig, seed: int, algo_dir: Path) -> list[str]:
     mapping lives in one place, not in a CLI builder per family."""
     run_config = algo_dir.parents[1] / "config.json"  # runs/<run>/config.json
     return [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_experiment.py",
+        "conda", "run", "--no-capture-output", "-n", "tensors",
+        "python", "-u", "scripts/experiments/run_experiment.py",
         "--run-config",  str(run_config),
         "--config-id",   acfg.config_id,
         "--seed",        str(seed),

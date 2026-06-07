@@ -46,6 +46,29 @@ ENGINES = ["sgd", "adam", "pam", "als"]
 
 
 # ---------------------------------------------------------------------------
+# Widget binders — read acfg.<field> for the value, write the result back, in one
+# call. `key` is passed explicitly so existing widget keys are preserved exactly.
+# ---------------------------------------------------------------------------
+
+def _num(col, acfg, field: str, label: str, key: str, *, help=None, **kw):
+    """number_input bound to acfg.<field>."""
+    setattr(acfg, field, col.number_input(label, value=getattr(acfg, field),
+                                          key=key, help=help, **kw))
+
+
+def _sel(col, acfg, field: str, label: str, options: list, key: str, *, help=None):
+    """selectbox bound to acfg.<field> (falls back to index 0 if value not an option)."""
+    cur = getattr(acfg, field)
+    idx = options.index(cur) if cur in options else 0
+    setattr(acfg, field, col.selectbox(label, options, index=idx, key=key, help=help))
+
+
+def _chk(col, acfg, field: str, label: str, key: str, *, help=None):
+    """checkbox bound to acfg.<field>."""
+    setattr(acfg, field, col.checkbox(label, value=getattr(acfg, field), key=key, help=help))
+
+
+# ---------------------------------------------------------------------------
 # Public entry
 # ---------------------------------------------------------------------------
 
@@ -136,9 +159,9 @@ def render_saved_library_section() -> None:
 # ---------------------------------------------------------------------------
 
 def _ensure_default_configs() -> list[AlgoConfig]:
-    """Seed st.session_state with one config on first render."""
+    """Start a new run with no configs — the user adds them explicitly."""
     if "algo_configs" not in st.session_state:
-        st.session_state["algo_configs"] = [new_algo_config("mabss-greedy")]
+        st.session_state["algo_configs"] = []
     return st.session_state["algo_configs"]
 
 
@@ -188,37 +211,26 @@ def _render_one_config(acfg: AlgoConfig) -> None:
 def _render_decomp(acfg: AlgoConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.decomp_epochs = c1.number_input(
-        "Epochs", min_value=10, max_value=50000, value=acfg.decomp_epochs, step=10,
-        key=f"decomp_epochs_{cid}", help=DECOMP_EPOCHS,
-    )
-    _ei = ENGINES.index(acfg.decomp_method) if acfg.decomp_method in ENGINES else 0
-    acfg.decomp_method = c2.selectbox(
-        "Engine", ENGINES, index=_ei, key=f"decomp_method_{cid}", help=DECOMP_ENGINE,
-    )
+    _num(c1, acfg, "decomp_epochs", "Epochs", f"decomp_epochs_{cid}",
+         min_value=10, max_value=50000, step=10, help=DECOMP_EPOCHS)
+    _sel(c2, acfg, "decomp_method", "Engine", ENGINES, f"decomp_method_{cid}", help=DECOMP_ENGINE)
 
     c3, c4 = st.columns(2)
+    # init_lr stays bespoke: 0 in the UI means "auto" (stored as None).
     _lr = c3.number_input(
         "Init LR", min_value=0.0, max_value=1.0,
         value=acfg.decomp_init_lr or 0.0, step=0.001, format="%.4f",
         key=f"decomp_init_lr_{cid}", help=DECOMP_INIT_LR,
     )
     acfg.decomp_init_lr = _lr if _lr > 0 else None
-    acfg.decomp_momentum = c4.number_input(
-        "Momentum", min_value=0.0, max_value=1.0,
-        value=acfg.decomp_momentum, step=0.05, format="%.2f",
-        key=f"decomp_momentum_{cid}", help=DECOMP_MOMENTUM,
-    )
+    _num(c4, acfg, "decomp_momentum", "Momentum", f"decomp_momentum_{cid}",
+         min_value=0.0, max_value=1.0, step=0.05, format="%.2f", help=DECOMP_MOMENTUM)
 
     c5, c6 = st.columns(2)
-    acfg.decomp_loss_patience = c5.number_input(
-        "Loss Pat.", min_value=10, max_value=50000, value=acfg.decomp_loss_patience, step=100,
-        key=f"decomp_loss_patience_{cid}", help=DECOMP_LOSS_PATIENCE,
-    )
-    acfg.decomp_lr_patience = c6.number_input(
-        "LR Pat.", min_value=10, max_value=10000, value=acfg.decomp_lr_patience, step=50,
-        key=f"decomp_lr_patience_{cid}", help=DECOMP_LR_PATIENCE,
-    )
+    _num(c5, acfg, "decomp_loss_patience", "Loss Pat.", f"decomp_loss_patience_{cid}",
+         min_value=10, max_value=50000, step=100, help=DECOMP_LOSS_PATIENCE)
+    _num(c6, acfg, "decomp_lr_patience", "LR Pat.", f"decomp_lr_patience_{cid}",
+         min_value=10, max_value=10000, step=50, help=DECOMP_LR_PATIENCE)
 
 
 def _render_mabss(acfg: MABSSConfig) -> None:
@@ -342,99 +354,105 @@ def _render_mabss(acfg: MABSSConfig) -> None:
     )
 
 
+# Init designs shared by the BO families (boss/cboss both use BOSSBase._init_points,
+# differing only in the acquisition). Keep the option list/help in one place so the
+# choices stay uniform across the family.
+BO_INIT_DESIGNS = ["lhs", "sobol", "cr_stratified"]
+BO_INIT_DESIGN_HELP = (
+    "'lhs' = Latin hypercube; 'sobol' = low-discrepancy (both uniform in rank, so "
+    "biased to high CR). 'cr_stratified' spreads the init evenly in log-CR, seeding "
+    "low-CR boundary anchors (both feasible and infeasible structures)."
+)
+BO_MEANS = ["constant", "linear", "log_size"]
+BO_MEAN_HELP = (
+    "GP prior mean (learned during the hyperparameter fit). 'constant' = gpytorch "
+    "default (reverts to one constant away from data); 'linear' = learned w·x+b over "
+    "the ranks; 'log_size' = learned a·log(TN parameter count)+b — a monotone capacity "
+    "trend (∝ log-CR) that extrapolates sanely and lets the kernel model the boundary residual."
+)
+BO_INPUT_WARP_HELP = (
+    "Wrap the kernel in a learned per-dimension input warp (Kumaraswamy CDF, identity "
+    "at init). Lets a stationary kernel model non-stationarity — sharper at the "
+    "feasibility boundary, where the un-warped kernel tends to be over-smooth."
+)
+
+
+def _render_cr_stratified_opts(acfg, key_prefix: str) -> None:
+    """The two shaping knobs for the 'cr_stratified' init design — shown only when
+    it is selected. Shared by the BOSS and cBOSS widgets so they stay uniform."""
+    if acfg.init_method != "cr_stratified":
+        return
+    a, b = st.columns(2)
+    _num(a, acfg, "cr_warp_lambda", "CR warp λ", f"{key_prefix}_cr_lam",
+         format="%.2f", step=0.5,
+         help="Box-Cox exponent for spacing init points across CR. 0 = even in log-CR "
+              "(default); λ<0 packs in more low-CR points (−1 = even in 1/CR).")
+    _num(b, acfg, "cr_pool_bias", "Low-rank pool bias", f"{key_prefix}_cr_bias",
+         min_value=1.0, format="%.2f", step=0.5,
+         help="Raise the candidate pool toward low ranks via x**bias before scoring CR. "
+              "1 = uniform (default); >1 generates more genuinely low-CR candidates to pick from.")
+
+
 def _render_boss(acfg: BOSSConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.budget = c1.number_input(
-        "Budget", min_value=1, max_value=10000, value=acfg.budget,
-        key=f"boss_budget_{cid}", help=BOSS_BUDGET,
-    )
-    acfg.max_rank = c2.number_input(
-        "Max Bond Rank", min_value=1, max_value=100, value=acfg.max_rank,
-        key=f"boss_max_bond_{cid}", help=BOSS_MAX_BOND,
-    )
+    _num(c1, acfg, "budget", "Budget", f"boss_budget_{cid}",
+         min_value=1, max_value=10000, help=BOSS_BUDGET)
+    _num(c2, acfg, "max_rank", "Max Bond Rank", f"boss_max_bond_{cid}",
+         min_value=1, max_value=100, help=BOSS_MAX_BOND)
     ni, idz = st.columns(2)
-    acfg.n_init = ni.number_input(
-        "Init Points (n_init)", value=acfg.n_init, min_value=2,
-        key=f"boss_n_init_{cid}", help=BOSS_N_INIT,
-    )
-    _id_opts = ["sobol", "lhs"]
-    acfg.init_method = idz.selectbox(
-        "Init Design", _id_opts,
-        index=_id_opts.index(acfg.init_method) if acfg.init_method in _id_opts else 0,
-        key=f"boss_init_design_{cid}",
-        help="'sobol' = low-discrepancy; 'lhs' = Latin hypercube (better per-dim coverage).",
-    )
+    _num(ni, acfg, "n_init", "Init Points (n_init)", f"boss_n_init_{cid}",
+         min_value=2, help=BOSS_N_INIT)
+    _sel(idz, acfg, "init_method", "Init Design", BO_INIT_DESIGNS, f"boss_init_design_{cid}",
+         help=BO_INIT_DESIGN_HELP)
+    _render_cr_stratified_opts(acfg, f"boss_{cid}")
     c3, c4 = st.columns(2)
-    acfg.lambda_fitness = c3.number_input(
-        "λ fitness", value=acfg.lambda_fitness, min_value=0.0, format="%f",
-        key=f"boss_lambda_{cid}", help=BOSS_LAMBDA_FITNESS,
-    )
+    _num(c3, acfg, "lambda_fitness", "λ fitness", f"boss_lambda_{cid}",
+         min_value=0.0, format="%f", help=BOSS_LAMBDA_FITNESS)
     if acfg.policy == "boss-ucb":
         acfg.ucb_beta = c4.slider(
             "UCB β", 0.1, 10.0, float(acfg.ucb_beta), 0.1,
             key=f"boss_ucb_beta_{cid}", help=BOSS_UCB_BETA,
         )
     c5, c6 = st.columns(2)
-    acfg.n_runs = c5.number_input(
-        "N runs", min_value=1, max_value=10, value=acfg.n_runs,
-        key=f"boss_n_runs_{cid}", help=BOSS_N_RUNS,
-    )
-    acfg.feasible_rse = c6.number_input(
-        "Feasible RSE", value=acfg.feasible_rse, format="%e",
-        key=f"boss_min_rse_{cid}", help=BOSS_MIN_RSE_DECOMP,
-    )
-    acfg.freq_update = st.number_input(
-        "Freq update (GP hyper-refit)", min_value=1, max_value=1000, value=acfg.freq_update,
-        key=f"boss_freq_update_{cid}",
-        help="Re-optimize GP hyperparameters every N BO steps; the GP still conditions "
-             "on all observed data each step in between.",
-    )
+    _num(c5, acfg, "n_runs", "N runs", f"boss_n_runs_{cid}",
+         min_value=1, max_value=10, help=BOSS_N_RUNS)
+    _num(c6, acfg, "feasible_rse", "Feasible RSE", f"boss_min_rse_{cid}",
+         format="%e", help=BOSS_MIN_RSE_DECOMP)
+    _sel(st, acfg, "mean", "GP mean function", BO_MEANS, f"boss_mean_{cid}", help=BO_MEAN_HELP)
+    _chk(st, acfg, "input_warp", "Use Input Warping", f"boss_input_warp_{cid}", help=BO_INPUT_WARP_HELP)
+    _num(st, acfg, "freq_update", "Freq update (GP hyper-refit)", f"boss_freq_update_{cid}",
+         min_value=1, max_value=1000,
+         help="Re-optimize GP hyperparameters every N BO steps; the GP still conditions "
+              "on all observed data each step in between.")
 
 
 def _render_cboss(acfg: CBOSSConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.budget = c1.number_input(
-        "Budget", min_value=1, max_value=10000, value=acfg.budget,
-        key=f"cboss_budget_{cid}", help="BO iterations after the initial design.",
-    )
-    acfg.max_rank = c2.number_input(
-        "Max Bond Rank", min_value=1, max_value=100, value=acfg.max_rank,
-        key=f"cboss_max_bond_{cid}", help="Upper bound on each searched bond rank.",
-    )
+    _num(c1, acfg, "budget", "Budget", f"cboss_budget_{cid}",
+         min_value=1, max_value=10000, help="BO iterations after the initial design.")
+    _num(c2, acfg, "max_rank", "Max Bond Rank", f"cboss_max_bond_{cid}",
+         min_value=1, max_value=100, help="Upper bound on each searched bond rank.")
 
     c3, c4 = st.columns(2)
-    acfg.n_init = c3.number_input(
-        "Init Points (n_init)", value=acfg.n_init, min_value=2,
-        key=f"cboss_n_init_{cid}", help="Initial design evaluations before BO.",
-    )
-    _id_opts = ["lhs", "sobol"]
-    acfg.init_method = c4.selectbox(
-        "Init Design", _id_opts,
-        index=_id_opts.index(acfg.init_method) if acfg.init_method in _id_opts else 0,
-        key=f"cboss_init_design_{cid}",
-        help="'lhs' = Latin hypercube (better per-dim coverage, more likely to seed a "
-             "feasible structure); 'sobol' = low-discrepancy.",
-    )
+    _num(c3, acfg, "n_init", "Init Points (n_init)", f"cboss_n_init_{cid}",
+         min_value=2, help="Initial design evaluations before BO.")
+    _sel(c4, acfg, "init_method", "Init Design", BO_INIT_DESIGNS, f"cboss_init_design_{cid}",
+         help=BO_INIT_DESIGN_HELP)
+    _render_cr_stratified_opts(acfg, f"cboss_{cid}")
 
-    acfg.feasible_rse = st.number_input(
-        "Feasible RSE", value=acfg.feasible_rse, format="%e",
-        key=f"cboss_feasible_rse_{cid}",
-        help="Feasibility threshold AND decomposition early-stop: a structure is "
-             "feasible iff best RSE < this; decomposition also stops once reached.",
-    )
+    _num(st, acfg, "feasible_rse", "Feasible RSE", f"cboss_feasible_rse_{cid}",
+         format="%e",
+         help="Feasibility threshold AND decomposition early-stop: a structure is "
+              "feasible iff best RSE < this; decomposition also stops once reached.")
 
     c7, c8 = st.columns(2)
-    acfg.lambda_fitness = c7.number_input(
-        "λ fitness (plot)", value=acfg.lambda_fitness, min_value=0.0, format="%f",
-        key=f"cboss_lambda_{cid}",
-        help="Only for the CR + λ·RSE comparison plot; cBOSS does not optimize this.",
-    )
-    acfg.n_runs = c8.number_input(
-        "N runs", min_value=1, max_value=10, value=acfg.n_runs,
-        key=f"cboss_n_runs_{cid}", help="Decomposition restarts per candidate (best RSE kept).",
-    )
+    _num(c7, acfg, "lambda_fitness", "λ fitness (plot)", f"cboss_lambda_{cid}",
+         min_value=0.0, format="%f",
+         help="Only for the CR + λ·RSE comparison plot; cBOSS does not optimize this.")
+    _num(c8, acfg, "n_runs", "N runs", f"cboss_n_runs_{cid}",
+         min_value=1, max_value=10, help="Decomposition restarts per candidate (best RSE kept).")
 
     if acfg.policy == "cboss-ficr":
         acfg.cboss_ficr_t = st.select_slider(
@@ -443,206 +461,123 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
             key=f"cboss_ficr_t_{cid}",
             help="Exponent t in α=(1-ct)·UCB + ct·P(feasible), c=infeasible fraction.",
         )
-    acfg.cboss_seek_feasible_first = st.checkbox(
-        "Seek feasibility first", value=acfg.cboss_seek_feasible_first,
-        key=f"cboss_seek_{cid}",
-        help="Until a feasible point is found, maximize P(feasible) instead of the "
-             "constrained acquisition (gives the acqf a feasible anchor).",
-    )
+    _chk(st, acfg, "cboss_seek_feasible_first", "Seek feasibility first", f"cboss_seek_{cid}",
+         help="Until a feasible point is found, maximize P(feasible) instead of the "
+              "constrained acquisition (gives the acqf a feasible anchor).")
 
     st.markdown("---")
     st.markdown("*Feasibility GP surrogate*")
     g1, g2 = st.columns(2)
-    _ko = ["matern", "matern32", "rbf", "weighted_shortest_path"]
-    acfg.kernel = g1.selectbox(
-        "Kernel", _ko, index=_ko.index(acfg.kernel) if acfg.kernel in _ko else 0,
-        key=f"cboss_kernel_{cid}", help="Feasibility-classifier kernel (ARD unless wsp).",
-    )
-    _vs = ["whitened", "unwhitened"]
-    acfg.cboss_var_strategy = g2.selectbox(
-        "Var. strategy", _vs,
-        index=_vs.index(acfg.cboss_var_strategy) if acfg.cboss_var_strategy in _vs else 0,
-        key=f"cboss_var_strategy_{cid}", help="Variational strategy.",
-    )
+    _sel(g1, acfg, "kernel", "Kernel",
+         ["matern", "matern32", "rbf", "weighted_shortest_path"], f"cboss_kernel_{cid}",
+         help="Feasibility-classifier kernel (ARD unless wsp).")
+    _sel(g2, acfg, "cboss_var_strategy", "Var. strategy", ["whitened", "unwhitened"],
+         f"cboss_var_strategy_{cid}", help="Variational strategy.")
+    _sel(st, acfg, "mean", "Mean function", BO_MEANS, f"cboss_mean_{cid}", help=BO_MEAN_HELP)
+    _chk(st, acfg, "input_warp", "Use Input Warping", f"cboss_input_warp_{cid}", help=BO_INPUT_WARP_HELP)
     if acfg.kernel == "weighted_shortest_path":
-        _wm = ["matern", "bogrape", "soft", "ewsp"]
-        acfg.cboss_wsp_mode = st.selectbox(
-            "WSP mode", _wm,
-            index=_wm.index(acfg.cboss_wsp_mode) if acfg.cboss_wsp_mode in _wm else 0,
-            key=f"cboss_wsp_mode_{cid}", help="Shortest-path kernel variant.",
-        )
+        _sel(st, acfg, "cboss_wsp_mode", "WSP mode", ["matern", "bogrape", "soft", "ewsp"],
+             f"cboss_wsp_mode_{cid}", help="Shortest-path kernel variant.")
 
     g3, g4 = st.columns(2)
-    acfg.cboss_gp_epochs = g3.number_input(
-        "GP epochs (init fit)", min_value=10, max_value=20000, value=acfg.cboss_gp_epochs, step=10,
-        key=f"cboss_gp_epochs_{cid}", help="Max epochs for the one-off full fit at init.",
-    )
-    acfg.freq_update = g4.number_input(
-        "Freq update", min_value=1, max_value=1000, value=acfg.freq_update,
-        key=f"cboss_freq_update_{cid}",
-        help="Refresh the variational dist every N steps (hyperparameters stay frozen).",
-    )
+    _num(g3, acfg, "cboss_gp_epochs", "GP epochs (init fit)", f"cboss_gp_epochs_{cid}",
+         min_value=10, max_value=20000, step=10, help="Max epochs for the one-off full fit at init.")
+    _num(g4, acfg, "freq_update", "Freq update", f"cboss_freq_update_{cid}",
+         min_value=1, max_value=1000,
+         help="Refresh the variational dist every N steps (hyperparameters stay frozen).")
     g5, g6 = st.columns(2)
-    acfg.cboss_gp_refine_epochs = g5.number_input(
-        "GP refine epochs", min_value=1, max_value=5000, value=acfg.cboss_gp_refine_epochs,
-        key=f"cboss_gp_refine_{cid}", help="Max epochs per frozen-hyperparameter refresh.",
-    )
-    acfg.cboss_gp_patience = g6.number_input(
-        "GP patience", min_value=1, max_value=1000, value=acfg.cboss_gp_patience,
-        key=f"cboss_gp_patience_{cid}", help="ELBO convergence patience (epochs).",
-    )
+    _num(g5, acfg, "cboss_gp_refine_epochs", "GP refine epochs", f"cboss_gp_refine_{cid}",
+         min_value=1, max_value=5000, help="Max epochs per frozen-hyperparameter refresh.")
+    _num(g6, acfg, "cboss_gp_patience", "GP patience", f"cboss_gp_patience_{cid}",
+         min_value=1, max_value=1000, help="ELBO convergence patience (epochs).")
     g7, g8 = st.columns(2)
-    acfg.cboss_gp_tol = g7.number_input(
-        "GP tol", value=acfg.cboss_gp_tol, format="%e",
-        key=f"cboss_gp_tol_{cid}", help="ELBO convergence tolerance.",
-    )
-    acfg.cboss_mc_samples = g8.number_input(
-        "MC samples (cei)", min_value=1, max_value=4096, value=acfg.cboss_mc_samples,
-        key=f"cboss_mc_{cid}", help="MC samples for the constrained-EI acquisition.",
-    )
+    _num(g7, acfg, "cboss_gp_tol", "GP tol", f"cboss_gp_tol_{cid}",
+         format="%e", help="ELBO convergence tolerance.")
+    _num(g8, acfg, "cboss_mc_samples", "MC samples (cei)", f"cboss_mc_{cid}",
+         min_value=1, max_value=4096, help="MC samples for the constrained-EI acquisition.")
 
     st.markdown("*Acquisition optimizer*")
     a1, a2 = st.columns(2)
-    acfg.cboss_raw_samples = a1.number_input(
-        "Raw samples", min_value=1, max_value=8192, value=acfg.cboss_raw_samples,
-        key=f"cboss_raw_{cid}", help="Discrete local-search initial candidates.",
-    )
-    acfg.cboss_num_restarts = a2.number_input(
-        "Num restarts", min_value=1, max_value=512, value=acfg.cboss_num_restarts,
-        key=f"cboss_restarts_{cid}", help="Discrete local-search restarts.",
-    )
+    _num(a1, acfg, "cboss_raw_samples", "Raw samples", f"cboss_raw_{cid}",
+         min_value=1, max_value=8192, help="Discrete local-search initial candidates.")
+    _num(a2, acfg, "cboss_num_restarts", "Num restarts", f"cboss_restarts_{cid}",
+         min_value=1, max_value=512, help="Discrete local-search restarts.")
 
 
 def _render_random(acfg: RandomSearchConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.budget = c1.number_input(
-        "Budget", min_value=1, max_value=10000, value=acfg.budget,
-        key=f"random_budget_{cid}", help=RANDOM_BUDGET,
-    )
-    acfg.max_rank = c2.number_input(
-        "Max Bond Rank", min_value=1, max_value=100, value=acfg.max_rank,
-        key=f"random_max_bond_{cid}", help=RANDOM_MAX_BOND,
-    )
+    _num(c1, acfg, "budget", "Budget", f"random_budget_{cid}",
+         min_value=1, max_value=10000, help=RANDOM_BUDGET)
+    _num(c2, acfg, "max_rank", "Max Bond Rank", f"random_max_bond_{cid}",
+         min_value=1, max_value=100, help=RANDOM_MAX_BOND)
     c3, c4 = st.columns(2)
-    acfg.lambda_fitness = c3.number_input(
-        "λ fitness", value=acfg.lambda_fitness, min_value=0.0, format="%f",
-        key=f"random_lambda_{cid}", help=RANDOM_LAMBDA_FITNESS,
-    )
-    acfg.n_runs = c4.number_input(
-        "N runs", min_value=1, max_value=10, value=acfg.n_runs,
-        key=f"random_n_runs_{cid}", help=RANDOM_N_RUNS,
-    )
-    acfg.feasible_rse = st.number_input(
-        "Feasible RSE", value=acfg.feasible_rse, format="%e",
-        key=f"random_min_rse_{cid}", help=RANDOM_MIN_RSE_DECOMP,
-    )
+    _num(c3, acfg, "lambda_fitness", "λ fitness", f"random_lambda_{cid}",
+         min_value=0.0, format="%f", help=RANDOM_LAMBDA_FITNESS)
+    _num(c4, acfg, "n_runs", "N runs", f"random_n_runs_{cid}",
+         min_value=1, max_value=10, help=RANDOM_N_RUNS)
+    _num(st, acfg, "feasible_rse", "Feasible RSE", f"random_min_rse_{cid}",
+         format="%e", help=RANDOM_MIN_RSE_DECOMP)
     c5, c6 = st.columns(2)
-    _init_opts = ["sobol", "random"]
-    acfg.init_method = c5.selectbox(
-        "Init Method",
-        _init_opts,
-        index=_init_opts.index(acfg.init_method)
-        if acfg.init_method in _init_opts else 0,
-        key=f"random_init_method_{cid}",
-        help=RANDOM_INIT_METHOD,
-    )
-    acfg.n_init = c6.number_input(
-        "Sobol Init Samples", value=acfg.n_init, min_value=1, step=1,
-        key=f"random_n_sobol_init_{cid}", help=RANDOM_N_SOBOL_INIT,
-    )
+    _sel(c5, acfg, "init_method", "Init Method", ["sobol", "random"],
+         f"random_init_method_{cid}", help=RANDOM_INIT_METHOD)
+    _num(c6, acfg, "n_init", "Sobol Init Samples", f"random_n_sobol_init_{cid}",
+         min_value=1, step=1, help=RANDOM_N_SOBOL_INIT)
 
 
 def _render_tnale(acfg: TnALEConfig) -> None:
     cid = acfg.config_id
     c1, c2 = st.columns(2)
-    acfg.budget = c1.number_input(
-        "Budget", min_value=1, max_value=10000, value=acfg.budget,
-        key=f"tnale_budget_{cid}", help=TNALE_BUDGET,
-    )
-    acfg.max_rank = c2.number_input(
-        "Max Search Rank", min_value=1, max_value=100, value=acfg.max_rank,
-        key=f"tnale_max_rank_{cid}", help=TNALE_MAX_RANK,
-    )
+    _num(c1, acfg, "budget", "Budget", f"tnale_budget_{cid}",
+         min_value=1, max_value=10000, help=TNALE_BUDGET)
+    _num(c2, acfg, "max_rank", "Max Search Rank", f"tnale_max_rank_{cid}",
+         min_value=1, max_value=100, help=TNALE_MAX_RANK)
 
     c3, c4 = st.columns(2)
-    _topos = ["ring", "full"]
-    acfg.tnale_topology = c3.selectbox(
-        "Topology", _topos, index=_topos.index(acfg.tnale_topology),
-        key=f"tnale_topology_{cid}", help=TNALE_TOPOLOGY,
-    )
-    acfg.lambda_fitness = c4.number_input(
-        "λ fitness", value=acfg.lambda_fitness, min_value=0.0, step=1.0,
-        key=f"tnale_lambda_{cid}", help=TNALE_LAMBDA_FITNESS,
-    )
+    _sel(c3, acfg, "tnale_topology", "Topology", ["ring", "full"],
+         f"tnale_topology_{cid}", help=TNALE_TOPOLOGY)
+    _num(c4, acfg, "lambda_fitness", "λ fitness", f"tnale_lambda_{cid}",
+         min_value=0.0, step=1.0, help=TNALE_LAMBDA_FITNESS)
 
     c5, c6 = st.columns(2)
-    acfg.tnale_local_step_init = c5.number_input(
-        "Step Init", value=acfg.tnale_local_step_init, min_value=1, step=1,
-        key=f"tnale_step_init_{cid}", help=TNALE_LOCAL_STEP_INIT,
-    )
-    acfg.tnale_local_step_main = c6.number_input(
-        "Step Main", value=acfg.tnale_local_step_main, min_value=1, step=1,
-        key=f"tnale_step_main_{cid}", help=TNALE_LOCAL_STEP_MAIN,
-    )
+    _num(c5, acfg, "tnale_local_step_init", "Step Init", f"tnale_step_init_{cid}",
+         min_value=1, step=1, help=TNALE_LOCAL_STEP_INIT)
+    _num(c6, acfg, "tnale_local_step_main", "Step Main", f"tnale_step_main_{cid}",
+         min_value=1, step=1, help=TNALE_LOCAL_STEP_MAIN)
 
     c7, c8 = st.columns(2)
-    acfg.tnale_interp_on = c7.checkbox(
-        "Interpolation", value=acfg.tnale_interp_on,
-        key=f"tnale_interp_on_{cid}", help=TNALE_INTERP_ON,
-    )
-    acfg.tnale_interp_iters = c8.number_input(
-        "Interp Iters", value=acfg.tnale_interp_iters, min_value=1, step=1,
-        key=f"tnale_interp_iters_{cid}", help=TNALE_INTERP_ITERS,
-    )
+    _chk(c7, acfg, "tnale_interp_on", "Interpolation", f"tnale_interp_on_{cid}",
+         help=TNALE_INTERP_ON)
+    _num(c8, acfg, "tnale_interp_iters", "Interp Iters", f"tnale_interp_iters_{cid}",
+         min_value=1, step=1, help=TNALE_INTERP_ITERS)
 
     c9, c10 = st.columns(2)
-    acfg.tnale_local_opt_iter = c9.number_input(
-        "Local Opt Iter", value=acfg.tnale_local_opt_iter, min_value=1, step=1,
-        key=f"tnale_local_opt_iter_{cid}", help=TNALE_LOCAL_OPT_ITER,
-    )
-    acfg.tnale_init_sparsity = c10.number_input(
-        "Init Sparsity", value=acfg.tnale_init_sparsity,
-        min_value=0.0, max_value=1.0, step=0.05, format="%.2f",
-        key=f"tnale_init_sparsity_{cid}", help=TNALE_INIT_SPARSITY,
-    )
+    _num(c9, acfg, "tnale_local_opt_iter", "Local Opt Iter", f"tnale_local_opt_iter_{cid}",
+         min_value=1, step=1, help=TNALE_LOCAL_OPT_ITER)
+    _num(c10, acfg, "tnale_init_sparsity", "Init Sparsity", f"tnale_init_sparsity_{cid}",
+         min_value=0.0, max_value=1.0, step=0.05, format="%.2f", help=TNALE_INIT_SPARSITY)
 
-    acfg.tnale_phase_change_reset = st.checkbox(
-        "Phase Change Reset", value=acfg.tnale_phase_change_reset,
-        key=f"tnale_phase_reset_{cid}", help=TNALE_PHASE_CHANGE_RESET,
-    )
+    _chk(st, acfg, "tnale_phase_change_reset", "Phase Change Reset",
+         f"tnale_phase_reset_{cid}", help=TNALE_PHASE_CHANGE_RESET)
 
     c11, c12 = st.columns(2)
-    _im = ["sparse", "sobol"]
-    acfg.init_method = c11.selectbox(
-        "Init Method", _im, index=_im.index(acfg.init_method) if acfg.init_method in _im else 0,
-        key=f"tnale_init_method_{cid}",
-        help="'sparse' = single random sparse start. 'sobol' = BOSS-style Sobol init.",
-    )
-    acfg.n_init = c12.number_input(
-        "Sobol Init Samples", value=acfg.n_init, min_value=1, step=1,
-        key=f"tnale_n_sobol_init_{cid}",
-        help="Number of Sobol candidates evaluated when Init Method = sobol.",
-    )
+    _sel(c11, acfg, "init_method", "Init Method", ["sparse", "sobol"],
+         f"tnale_init_method_{cid}",
+         help="'sparse' = single random sparse start. 'sobol' = BOSS-style Sobol init.")
+    _num(c12, acfg, "n_init", "Sobol Init Samples", f"tnale_n_sobol_init_{cid}",
+         min_value=1, step=1,
+         help="Number of Sobol candidates evaluated when Init Method = sobol.")
 
     if acfg.tnale_topology == "ring":
         st.markdown("*Permutation search*")
         c13, c14 = st.columns(2)
-        acfg.tnale_n_perm_samples = c13.number_input(
-            "Perm Samples", value=acfg.tnale_n_perm_samples, min_value=0, step=1,
-            key=f"tnale_perm_samples_{cid}", help=TNALE_PERM_SAMPLES,
-        )
-        acfg.tnale_perm_radius = c14.number_input(
-            "Perm Radius", value=acfg.tnale_perm_radius, min_value=1, step=1,
-            key=f"tnale_perm_radius_{cid}", help=TNALE_PERM_RADIUS,
-        )
+        _num(c13, acfg, "tnale_n_perm_samples", "Perm Samples", f"tnale_perm_samples_{cid}",
+             min_value=0, step=1, help=TNALE_PERM_SAMPLES)
+        _num(c14, acfg, "tnale_perm_radius", "Perm Radius", f"tnale_perm_radius_{cid}",
+             min_value=1, step=1, help=TNALE_PERM_RADIUS)
 
     c15, c16 = st.columns(2)
-    acfg.n_runs = c15.number_input(
-        "N runs", min_value=1, max_value=10, value=acfg.n_runs,
-        key=f"tnale_n_runs_{cid}", help=TNALE_N_RUNS,
-    )
-    acfg.feasible_rse = c16.number_input(
-        "Feasible RSE", value=acfg.feasible_rse, format="%e",
-        key=f"tnale_min_rse_{cid}", help=TNALE_MIN_RSE_DECOMP,
-    )
+    _num(c15, acfg, "n_runs", "N runs", f"tnale_n_runs_{cid}",
+         min_value=1, max_value=10, help=TNALE_N_RUNS)
+    _num(c16, acfg, "feasible_rse", "Feasible RSE", f"tnale_min_rse_{cid}",
+         format="%e", help=TNALE_MIN_RSE_DECOMP)
