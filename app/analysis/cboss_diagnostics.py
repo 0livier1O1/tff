@@ -1,28 +1,36 @@
 """
-cboss_diagnostics.py — feasibility-classifier diagnostics for a cBOSS run.
+cboss_diagnostics.py — replay-based feasibility-classifier diagnostics for cBOSS.
 
-Everything is built from artifacts written during the run, so no GP is retrained:
-the predicted P(feasible) at each BO step (`pf_pred`) is already a genuine
-one-step-ahead prediction (made before the point was decomposed), and the
-realized `feasible` label is the truth. The ARD lengthscale evolution comes from
-the per-refit `gp_states.pt` snapshots. The feasibility threshold shown is the
-one the algorithm actually used (`feasible_rse` from the run's config.json).
+Unlike the old version (which trusted the per-step predictions saved during the
+run), this *replays* the run: it rebuilds the `FeasibilityGP` step by step from
+`cboss_results.npz` (see `cboss_replay`), and scores each refit on a shared,
+held-out 500-structure out-of-sample (OOS) test set decomposed with the run's own
+settings (see `cboss_oos`). It then caches the computed data (CSV/npz under
+`<config_dir>/analysis/cboss/`) — mirroring how BOSS caches `gp_diag.csv` — and the
+dashboard builds plotly figures from it. No PNGs.
 
-`generate_cboss_diagnostics(config_dir)` writes the figures under
-`<config_dir>/analysis/cboss/`. Reuses app/plotting/classification_figures.py.
+OOS structures that coincide with the run's own training set are excluded from
+scoring; the kept/excluded counts are recorded in `meta.json`.
 """
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn.functional as F
+from scipy.stats import spearmanr
+from sklearn.metrics import roc_auc_score
 
-from app.plotting import classification_figures as cf
-from app.plotting import acquisition_figures as af
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.analysis.cboss_oos import load_or_build_oos, _load_target, _target_path
+from app.analysis.cboss_replay import replay, train_overlap_mask
+
+N_OOS = 500
 
 
 def _diag_dir(config_dir: Path) -> Path:
@@ -30,126 +38,109 @@ def _diag_dir(config_dir: Path) -> Path:
 
 
 def has_cboss_diagnostics(config_dir: Path) -> bool:
-    # rse_distribution + acqf_value_trace are produced for every run; the rest
-    # are conditional (one feasibility class, kernel without a lengthscale, …).
     d = _diag_dir(config_dir)
-    return (d / "rse_distribution.png").exists() and (d / "acqf_value_trace.png").exists()
-
-
-def _edge_labels(n_cores: int) -> list:
-    return [f"({i},{j})" for i in range(n_cores) for j in range(i + 1, n_cores)]
-
-
-def _lengthscale_matrix(gp_states: list, n_edges: int):
-    """(n_edges, n_snapshots) ARD lengthscales (softplus of raw) + step labels.
-    Returns (None, None) for kernels without a lengthscale (e.g. shortest-path)."""
-    cols, labels = [], []
-    for snap in gp_states:
-        key = next((k for k in snap["state_dict"] if "raw_lengthscale" in k), None)
-        if key is None:
-            return None, None
-        ls = F.softplus(snap["state_dict"][key]).detach().reshape(-1).numpy()
-        if ls.size != n_edges:
-            return None, None
-        cols.append(ls)
-        labels.append(f"{snap['phase']}@{snap['step']}")
-    return np.stack(cols, axis=1), labels
+    return all((d / f).exists() for f in ("oos_metrics.csv", "oos_eval.npz", "meta.json"))
 
 
 def _algo_config(config_dir: Path) -> dict:
     """The algo-config dict for this result dir, from the run's config.json.
-
-    `config_dir` is `runs/<run>/seed_<k>/<config_id>_<policy>`; config.json sits at
-    `runs/<run>/config.json` and the leading token of the dir name is the config_id."""
+    `config_dir` is `runs/<run>/seed_<k>/<config_id>_<policy>`."""
     cfg = json.loads((config_dir.parents[1] / "config.json").read_text())
     cid = config_dir.name.split("_")[0]
     return next(a for a in cfg["algo_configs"] if a["config_id"] == cid)
 
 
+def load_cboss_diagnostics(config_dir: Path):
+    """(metrics_df, oos_eval_npz, acqf_trace_npz, meta_dict) from the cache."""
+    d = _diag_dir(config_dir)
+    return (pd.read_csv(d / "oos_metrics.csv"),
+            np.load(d / "oos_eval.npz"),
+            np.load(d / "acqf_trace.npz", allow_pickle=True),
+            json.loads((d / "meta.json").read_text()))
+
+
+def _auc(y, p) -> float:
+    """ROC-AUC, or NaN when only one class is present."""
+    return float(roc_auc_score(y, p)) if np.min(y) != np.max(y) else float("nan")
+
+
 def generate_cboss_diagnostics(config_dir: Path) -> Path:
-    """Build and save all cBOSS feasibility-classifier figures. Returns the dir."""
+    """Replay the run's feasibility GP, score every refit on the shared OOS set,
+    and cache the computed data. Returns the diagnostics dir."""
     config_dir = Path(config_dir)
-    # Run metadata comes from the run's config.json (no per-run summary file).
     algo = _algo_config(config_dir)
     feasible_rse = float(algo["feasible_rse"])
-    n_init = int(algo["n_init"])
     max_rank = int(algo["max_rank"])
-    acqf = algo["policy"].split("-")[1]               # cboss-ficr -> ficr
+    acqf = algo["policy"].split("-")[1]              # cboss-ficr -> ficr
     ficr_t = float(algo.get("cboss_ficr_t", 1.0))
+    seed = int(config_dir.parent.name.split("_")[1])
+    problem_id = json.loads((config_dir.parents[1] / "config.json").read_text())["problem_id"]
 
-    traces = pd.read_csv(config_dir / "traces.csv")
-    rse_all = traces["rse"].to_numpy(float)
+    # Shared OOS test set (decomposed with the run's settings; builds on first use).
+    oos = load_or_build_oos(ROOT, problem_id, seed, algo, n=N_OOS)
+    target = _load_target(_target_path(ROOT, problem_id, seed))
 
-    # one-step-ahead set: BO rows carry pf_pred (init rows have no surrogate yet)
-    bo = traces[traces["phase"] == "bo"].reset_index(drop=True)
-    y = (bo["rse"].to_numpy(float) < feasible_rse).astype(int)
-    p = bo["pf_pred"].to_numpy(float)
-    cr = bo["cr"].to_numpy(float)
-    valid = np.isfinite(p)
-    y, p, cr = y[valid], p[valid], cr[valid]
+    # Replay the feasibility GP step by step and score each refit on OOS.
+    rr = replay(config_dir, algo, target, oos["X"])
+    X_std_train = np.load(config_dir / "cboss_results.npz")["X_std"]
+    keep, n_scored, n_excluded = train_overlap_mask(oos["X"], X_std_train, max_rank)
 
-    # ||X|| of the reconstructed integer ranks for the BO points
-    z = np.load(config_dir / "cboss_results.npz")
-    # N cores from the search-space width D = N(N-1)/2.
-    n_cores = int(round((1 + (1 + 8 * z["X_std"].shape[1]) ** 0.5) / 2))
-    X_bo = z["X_std"][n_init:n_init + len(bo)][valid]
-    ranks = np.round(X_bo * (max_rank - 1) + 1)
-    xnorm = np.linalg.norm(ranks, axis=1)
-    rse_bo = bo["rse"].to_numpy(float)[valid]
+    y = (oos["rse"] < feasible_rse).astype(int)
+    xnorm = np.linalg.norm(oos["X"].astype(float), axis=1)
+    yk = y[keep]
+    p_post, p_final = rr.post_init_proba_oos[keep], rr.final_proba_oos[keep]
+
+    metrics = [
+        dict(step=int(step),
+             accuracy=float(((p_all[keep] >= 0.5).astype(int) == yk).mean()),
+             roc_auc=_auc(yk, p_all[keep]))
+        for step, p_all in zip(rr.steps, rr.proba_oos)
+    ]
 
     out = _diag_dir(config_dir)
     out.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(metrics).to_csv(out / "oos_metrics.csv", index=False)
+    np.savez(out / "oos_eval.npz",
+             y=yk, cr=oos["cr"][keep], xnorm=xnorm[keep], rse=oos["rse"][keep],
+             rse_all=oos["rse"], p_post=p_post, p_final=p_final,
+             ls=(rr.final_lengthscales if rr.final_lengthscales is not None
+                 else np.array([])))
 
-    def _save(name, fig):
-        fig.savefig(out / f"{name}.png", dpi=130)
-        import matplotlib.pyplot as plt
-        plt.close(fig)
+    # Acquisition trace — saved run data (the acqf the run actually used).
+    bo = pd.read_csv(config_dir / "traces.csv")
+    bo = bo[bo["phase"] == "bo"].reset_index(drop=True)
 
-    _save("rse_distribution", cf.rse_distribution(rse_all, feasible_rse))
+    # Replay fidelity: the one-step-ahead pf the replay produces vs the run's saved
+    # pf_pred — flags (every generation) whether the replay still mirrors the run.
+    saved_pf = bo["pf_pred"].to_numpy(float)
+    fin = np.isfinite(saved_pf) & np.isfinite(rr.pf_replay)
+    pf_mae = float(np.abs(saved_pf[fin] - rr.pf_replay[fin]).mean())
+    pf_rho = float(spearmanr(saved_pf[fin], rr.pf_replay[fin]).statistic)
 
-    # acquisition-function diagnostics (all BO steps)
-    steps_bo = bo["step"].to_numpy(float)[valid]
-    _save("acqf_value_trace", af.acquisition_trace(
-        steps_bo, bo["acqf_value"].to_numpy(float)[valid], p,
-        (bo["rse"].to_numpy(float)[valid] < feasible_rse).astype(int),
-        bo["acqf_used"].astype(str).to_numpy()[valid]))
-    if acqf == "ficr" and "infeasible_frac" in bo:
-        _save("ficr_weights", af.ficr_weights(
-            steps_bo, bo["infeasible_frac"].to_numpy(float)[valid], ficr_t))
+    v = np.isfinite(saved_pf)
+    np.savez(out / "acqf_trace.npz",
+             steps=bo["step"].to_numpy(float)[v],
+             acqf_value=bo["acqf_value"].to_numpy(float)[v],
+             pf_pred=bo["pf_pred"].to_numpy(float)[v],
+             feasible=(bo["rse"].to_numpy(float)[v] < feasible_rse).astype(int),
+             acqf_used=bo["acqf_used"].astype(str).to_numpy()[v],
+             infeasible_frac=(bo["infeasible_frac"].to_numpy(float)[v]
+                              if "infeasible_frac" in bo else np.full(int(v.sum()), np.nan)))
 
-    both_classes = y.min() == 0 and y.max() == 1
-    if both_classes:
-        _save("roc", cf.roc(y, p))
-        _save("calibration", cf.calibration(y, p))
-        _save("accuracy_by_cr", cf.accuracy_by_cr(cr, y, p))
-        _save("proba", cf.proba(cr, y, p, feasible_rse))
-        variables = [
-            (cr, "CR", "log"),
-            (xnorm, "||X||", "linear"),
-            (np.log10(np.clip(rse_bo, 1e-300, None)), "log10 RSE", "linear"),
-            (bo["ctn_largest_intermediate_elements"].to_numpy(float)[valid], "largest interm.", "log"),
-            (bo["ctn_opt_cost_flops"].to_numpy(float)[valid], "opt FLOPs", "log"),
-            (bo["eval_time_s"].to_numpy(float)[valid], "decomp s", "linear"),
-        ]
-        _save("pairs", cf.pairs(variables, y, p, feasible_rse))
-    else:
-        print(f"[cboss_diagnostics] only one feasibility class among BO points "
-              f"(feasible={int(y.sum())}/{len(y)}) — skipping ROC/calibration/"
-              f"accuracy/pairs/proba.")
+    n_cores = int(round((1 + (1 + 8 * oos["X"].shape[1]) ** 0.5) / 2))
+    (out / "meta.json").write_text(json.dumps(dict(
+        feasible_rse=feasible_rse, n_oos=int(len(oos["X"])),
+        n_scored=n_scored, n_excluded=n_excluded,
+        acqf=acqf, ficr_t=ficr_t, n_cores=n_cores,
+        pf_mae=pf_mae, pf_spearman=pf_rho)))
 
-    gp_states = torch.load(config_dir / "gp_states.pt", weights_only=False)
-    L, step_labels = _lengthscale_matrix(gp_states, n_edges=n_cores * (n_cores - 1) // 2)
-    if L is not None:
-        _save("lengthscale_heatmap", cf.lengthscale_heatmap(L, _edge_labels(n_cores), step_labels))
-    else:
-        print("[cboss_diagnostics] kernel has no ARD lengthscale — skipping heatmap.")
-
-    print(f"cBOSS diagnostics → {out}")
+    print(f"cBOSS OOS diagnostics → {out}  (scored on {n_scored}/{len(oos['X'])} "
+          f"OOS structures, {n_excluded} excluded as train overlap)")
     return out
 
 
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("config_dir", help="a cBOSS result dir (has traces.csv, cboss_results.npz, gp_states.pt, …)")
+    ap.add_argument("config_dir", help="a cBOSS result dir (has cboss_results.npz, traces.csv)")
     generate_cboss_diagnostics(Path(ap.parse_args().config_dir))

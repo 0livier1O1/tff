@@ -430,6 +430,31 @@ def gp_acquisition(d: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def candidate_cr_rank(d: pd.DataFrame, label: str) -> go.Figure:
+    """Per-evaluation candidate — its compression ratio and rank L1 norm (sum of
+    integer bond ranks) against evaluation step, for one config at one seed.
+    Markers are coloured by feasibility (RSE below the feasibility threshold), so
+    the search's feasible/infeasible structure reads at a glance. One row, two
+    panels."""
+    fig = make_subplots(rows=1, cols=2,
+                        subplot_titles=("Candidate CR", "Rank L1 (∑ ranks)"))
+    feas = d["feasible"].astype(bool)
+    groups = ((feas, "feasible", "#2ca02c"), (~feas, "infeasible", "#d62728"))
+    for col, ycol in ((1, "cr"), (2, "rank_sum")):
+        for mask, name, color in groups:
+            sub = d[mask]
+            fig.add_trace(go.Scatter(
+                x=sub["step"], y=sub[ycol], mode="markers", name=name,
+                legendgroup=name, showlegend=(col == 1),
+                marker=dict(color=color, size=6, line=dict(width=0.4, color="white")),
+            ), row=1, col=col)
+    fig.update_xaxes(title_text="evaluation step", rangemode="tozero")
+    fig.update_yaxes(rangemode="nonnegative", showgrid=False)
+    fig.update_layout(template="plotly_white", height=300, title=label,
+                      margin=dict(l=0, r=0, t=46, b=0), legend=_LEGEND)
+    return fig
+
+
 def gp_parity(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
     """One-step-ahead parity — GP-predicted vs actual target, one point per BO
     step, with the y = x line. Spearman ρ quantifies how well the GP ranks."""

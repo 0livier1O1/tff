@@ -163,6 +163,59 @@ def _target_cr_for(repo_root: Path, problem, seed: int) -> float | None:
     return _target_cr(str(seed_dir(repo_root, problem.problem_id, seed) / "adj_matrix.npy"))
 
 
+def load_candidate_evals(
+    repo_root: Path, result_keys: list[tuple[str, int, str]],
+) -> pd.DataFrame:
+    """Per-evaluation candidate frame for the BO families (boss/cboss).
+
+    Each evaluated structure's CR, RSE, and feasibility come from traces.csv; the
+    rank L1 (sum of integer bond ranks) is recovered from the run's
+    `<family>_results.npz` `X_std`, un-standardized to {1..max_rank} exactly as
+    `BOSSBase._to_int` does (1 + x·(max_rank-1), rounded/clamped). Families with
+    no saved design matrix (tnale/random) are skipped — rank L1 is undefined for
+    them. Columns: run, config_id, label, policy, family, seed, step, phase, cr,
+    rse, feasible, rank_sum.
+    """
+    runs_dir = repo_root / "artifacts" / "runs"
+
+    by_config: dict[tuple[str, str], list[int]] = {}
+    for run, seed, config_id in result_keys:
+        by_config.setdefault((run, config_id), []).append(int(seed))
+
+    cols = ["run", "config_id", "label", "policy", "family", "seed",
+            "step", "phase", "cr", "rse", "feasible", "rank_sum"]
+    algo_idx: dict[str, dict[str, dict]] = {}
+    frames: list[pd.DataFrame] = []
+    for (run, config_id), seeds in by_config.items():
+        if run not in algo_idx:
+            algo_idx[run], _ = _run_meta(runs_dir / run)
+        ac = algo_idx[run].get(config_id)
+        if ac is None or ac["family"] not in ("boss", "cboss"):
+            continue
+        subdir = f"{config_id}_{ac['policy'].replace('-', '_')}"
+        mr = int(ac["max_rank"])
+        for seed in seeds:
+            cd = runs_dir / run / f"seed_{seed}" / subdir
+            npz = cd / f"{ac['family']}_results.npz"
+            if not npz.exists():
+                continue
+            X = np.load(npz)["X_std"]
+            rank = (1.0 + X * (mr - 1)).round().clip(1, mr).sum(axis=1)
+            tr = (pd.read_csv(cd / "traces.csv")
+                    .sort_values("step").reset_index(drop=True))
+            df = tr[["step", "phase", "cr", "rse", "feasible"]].copy()
+            df["phase"] = df["phase"].replace(LEGACY_INIT)
+            df["rank_sum"] = rank
+            df["run"], df["config_id"] = run, config_id
+            df["label"], df["policy"], df["family"] = ac["label"], ac["policy"], ac["family"]
+            df["seed"] = seed
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(columns=cols)
+    return pd.concat(frames, ignore_index=True)[cols]
+
+
 def load_traces(
     repo_root: Path,
     result_keys: list[tuple[str, int, str]],

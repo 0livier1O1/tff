@@ -15,11 +15,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
-from app.analysis.cboss_diagnostics import generate_cboss_diagnostics, has_cboss_diagnostics
+from app.analysis.cboss_diagnostics import (
+    generate_cboss_diagnostics, has_cboss_diagnostics, load_cboss_diagnostics,
+)
+from app.plotting import cboss_figures as cf
 from app.analysis.debug_script import write_debug_script, SUPPORTED_FAMILIES
 from app.analysis.diagnostics import (
     generate_gp_diagnostics, has_gp_diagnostics, load_gp_diagnostics, load_rse_cr,
@@ -511,34 +515,14 @@ def _render_debug_instance(repo_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# cBOSS diagnostics — feasibility-classifier + acquisition figures (PNGs)
+# cBOSS diagnostics — replay-based feasibility classifier scored on a shared OOS
+# set (see app/analysis/cboss_diagnostics.py). Compact side-by-side plotly, no tabs.
 # ---------------------------------------------------------------------------
 
-# (png stem, caption) grouped into tabs. Conditional figures (ficr_weights,
-# the one-class-skipped predictive plots, the wsp-skipped heatmap) are shown
-# only when their file was actually produced.
-_CBOSS_PNG_GROUPS: dict[str, list[tuple[str, str]]] = {
-    "Feasibility": [
-        ("rse_distribution", "RSE distribution — feasible vs infeasible (threshold marked)"),
-        ("proba", "Predicted P(feasible) by true class and vs CR"),
-        ("roc", "ROC — one-step-ahead predictions"),
-        ("calibration", "Calibration — one-step-ahead predictions"),
-        ("accuracy_by_cr", "One-step-ahead accuracy by CR bin"),
-        ("pairs", "One-step-ahead pairs plot (errors highlighted)"),
-    ],
-    "Acquisition": [
-        ("acqf_value_trace", "Acquisition value + feasibility belief at the chosen candidate"),
-        ("ficr_weights", "ficr interpolation weights over steps"),
-    ],
-    "GP": [
-        ("lengthscale_heatmap", "ARD lengthscale evolution across refits"),
-    ],
-}
-
-
 def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
-    """Feasibility-classifier + acquisition diagnostics for the cBOSS configs at
-    one seed. PNGs are generated once per config and cached under analysis/cboss/."""
+    """Feasibility-classifier diagnostics for the cBOSS configs at one seed. The
+    expensive part (replay + OOS decomposition) runs once per config behind a
+    Generate button; the computed data is cached under analysis/cboss/."""
     cboss = (sdf[sdf["family"] == "cboss"][["run", "config_id", "label", "policy"]]
              .drop_duplicates())
     for r in cboss.itertuples(index=False):
@@ -551,25 +535,81 @@ def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> N
                 continue
             if not has_cboss_diagnostics(cd):
                 if not st.button("Generate Diagnostics", key=f"gen_cboss_{seed}_{lab}",
-                                 help="Feasibility-classifier + acquisition diagnostics "
-                                      "from the saved run artifacts — cached to disk."):
+                                 help="Replay the feasibility GP step by step and score "
+                                      "each refit on a shared 500-structure OOS set "
+                                      "(decomposed once with the run's settings). Cached."):
                     st.caption("Not generated yet.")
                     continue
-                with st.spinner(f"Generating — {lab}"):
+                with st.spinner(f"Replaying + scoring OOS — {lab}  "
+                                f"(first run decomposes the OOS set, ~minutes)…"):
                     generate_cboss_diagnostics(cd)
-            _render_cboss_pngs(cd / "analysis" / "cboss", seed, lab)
+            _render_cboss_plots(cd, seed, lab)
 
 
-def _render_cboss_pngs(diag_dir: Path, seed: int, lab: str) -> None:
-    """Show the cached cBOSS PNGs, grouped into tabs; skip figures not produced."""
-    present = {g: [(n, c) for n, c in items if (diag_dir / f"{n}.png").exists()]
-               for g, items in _CBOSS_PNG_GROUPS.items()}
-    groups = [g for g, items in present.items() if items]
-    if not groups:
-        st.caption("No diagnostic figures were produced for this result.")
-        return
-    for tab, g in zip(st.tabs(groups), groups):
-        with tab:
-            for name, cap in present[g]:
-                st.caption(cap)
-                st.image(str(diag_dir / f"{name}.png"), use_container_width=True)
+def _render_cboss_plots(cd: Path, seed: int, lab: str) -> None:
+    """Render the cached replay/OOS diagnostics as compact side-by-side plotly."""
+    metrics, ev, acq, meta = load_cboss_diagnostics(cd)
+    st.caption(
+        f"Scored on **{meta['n_scored']}** OOS structures "
+        f"({meta['n_excluded']} excluded as train overlap; "
+        f"feasibility = RSE < {meta['feasible_rse']:g})."
+    )
+
+    # Replay-fidelity flag — computed at generation: does the step-by-step replay
+    # still reproduce the run's saved one-step-ahead pf_pred?
+    fidelity = (f"Replay vs run: mean|Δpf| = {meta['pf_mae']:.4f}, "
+                f"Spearman = {meta['pf_spearman']:.3f}")
+    if meta["pf_mae"] < 0.05 and meta["pf_spearman"] > 0.95:
+        st.caption(f"✅ {fidelity}")
+    else:
+        st.warning(f"⚠ {fidelity} — the replay diverges from the saved run; "
+                   "the diagnostics below may not reflect the actual surrogate.")
+    probas = {"post-init": ev["p_post"], "final": ev["p_final"]}
+
+    a = st.columns(2)
+    with a[0]:
+        st.caption("OOS classifier quality per refit")
+        st.plotly_chart(cf.oos_metrics_vs_step(metrics["step"], metrics["accuracy"],
+                                               metrics["roc_auc"]),
+                        width="stretch", key=f"cb_oosm_{seed}_{lab}")
+    with a[1]:
+        st.caption("ROC on OOS — post-init vs final GP")
+        st.plotly_chart(cf.roc_curves({"post-init": (ev["y"], ev["p_post"]),
+                                       "final": (ev["y"], ev["p_final"])}),
+                        width="stretch", key=f"cb_roc_{seed}_{lab}")
+
+    b = st.columns(2)
+    with b[0]:
+        st.caption("OOS accuracy by CR bin — post-init vs final")
+        st.plotly_chart(cf.accuracy_by_cr(ev["cr"], ev["y"], probas),
+                        width="stretch", key=f"cb_acr_{seed}_{lab}")
+    with b[1]:
+        st.caption("RSE distribution (all OOS)")
+        st.plotly_chart(cf.rse_distribution(ev["rse_all"], meta["feasible_rse"]),
+                        width="stretch", key=f"cb_rse_{seed}_{lab}")
+
+    c = st.columns(2)
+    with c[0]:
+        st.caption("Acquisition value + feasibility belief at the chosen candidate")
+        st.plotly_chart(cf.acqf_value_trace(acq["steps"], acq["acqf_value"], acq["pf_pred"],
+                                            acq["feasible"], acq["acqf_used"]),
+                        width="stretch", key=f"cb_acq_{seed}_{lab}")
+    with c[1]:
+        if ev["ls"].size:
+            st.caption("Final-GP ARD lengthscales")
+            st.plotly_chart(cf.ard_lengthscales(ev["ls"], cf.edge_labels(meta["n_cores"])),
+                            width="stretch", key=f"cb_ls_{seed}_{lab}")
+        else:
+            st.caption("Kernel has no ARD lengthscale.")
+
+    if meta["acqf"] == "ficr" and np.isfinite(acq["infeasible_frac"]).any():
+        st.caption("ficr interpolation weights")
+        st.plotly_chart(cf.ficr_weights(acq["steps"], acq["infeasible_frac"], meta["ficr_t"]),
+                        width="stretch", key=f"cb_ficr_{seed}_{lab}")
+
+    variables = [(ev["cr"], "CR", "log"),
+                 (ev["xnorm"], "||ranks||", "linear"),
+                 (np.log10(np.clip(ev["rse"], 1e-300, None)), "log10 RSE", "linear")]
+    st.caption("OOS pairs — final GP (errors highlighted)")
+    st.plotly_chart(cf.pairs(variables, ev["y"], ev["p_final"], meta["feasible_rse"]),
+                    width="stretch", key=f"cb_pairs_{seed}_{lab}")

@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from app.plotting import figures
-from app.plotting.traces import derive_trace_metrics, load_traces
+from app.plotting.traces import derive_trace_metrics, load_candidate_evals, load_traces
 from app.phases import INIT_PHASES, PHASE_ORDER
 
 
@@ -279,3 +279,25 @@ def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
         loss_threshold=threshold, best_by=best_by, weight_rse=weight_rse,
     )
     render_summary_plots(df, controls, key_prefix=f"perf_{seed}")
+    _render_candidate_evals(repo_root, keys, seed, selected)
+
+
+def _render_candidate_evals(
+    repo_root: Path, keys: list, seed: int, selected: list[str],
+) -> None:
+    """Per-evaluation candidate CR and rank L1 (∑ bond ranks) for this seed's BO
+    families (boss/cboss), one config per row, markers coloured by feasibility.
+    Honors the same Trace-phases selection as the rest of the view."""
+    cand = load_candidate_evals(repo_root, [(r, s, c) for (r, s, c) in keys if s == seed])
+    cand = cand[cand["phase"].isin(selected)]
+    if cand.empty:
+        return
+    st.markdown("##### Per-step candidates")
+    st.caption("Each evaluated structure's CR and rank L1 (sum of bond ranks) vs "
+               "evaluation step — markers coloured by feasibility (RSE below the "
+               "feasibility threshold). BO families only (rank needs the saved design).")
+    for (_run, cid), sub in cand.groupby(["run", "config_id"], sort=False):
+        st.plotly_chart(
+            figures.candidate_cr_rank(sub, sub["label"].iloc[0]),
+            width="stretch", key=f"cand_{seed}_{cid}",
+        )
