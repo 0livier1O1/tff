@@ -64,7 +64,7 @@ class AlgoConfig:
     budget: int = 200
     max_rank: int = 10
     n_init: int = 20
-    init_method: str = "sobol"
+    init_method: str = "cr_stratified"   # 'sobol' | 'lhs' | 'cr_stratified'
     # cr_stratified init shaping knobs (ignored by lhs/sobol):
     cr_warp_lambda: float = 0.0     # Box-Cox exponent for CR spacing (0=log, <0=more low-CR)
     cr_pool_bias: float = 1.0       # low-rank pool bias x**bias (1=uniform, >1=more low-CR candidates)
@@ -159,10 +159,9 @@ class BOSSConfig(AlgoConfig):
 class CBOSSConfig(AlgoConfig):
     family: str = "cboss"
 
-    # Shared fields whose cBOSS defaults differ from the base
-    init_method: str = "lhs"                # 'lhs' | 'sobol'  (the init design)
-    feasible_rse: float = 1e-3              # feasibility threshold + decomp early-stop
-    # budget(100)/max_rank/n_runs/lambda_fitness/kernel: base defaults
+    # All shared search fields (init_method, feasible_rse, budget, max_rank,
+    # lambda_fitness, kernel, …) inherit the base defaults so they match the
+    # other families.
 
     cboss_ficr_t: float = 1.0               # interpolation exponent (cboss-ficr only)
     cboss_seek_feasible_first: bool = True
@@ -191,7 +190,7 @@ class CBOSSConfig(AlgoConfig):
 class TnALEConfig(AlgoConfig):
     family: str = "tnale"
 
-    # max_rank, n_runs, min_rse, lambda_fitness, init_method("sobol"), n_init: base defaults
+    # max_rank, n_runs, min_rse, lambda_fitness, init_method, n_init: base defaults
 
     tnale_topology: str = "ring"
     tnale_local_step_init: int = 2
@@ -213,8 +212,8 @@ class TnALEConfig(AlgoConfig):
 class RandomSearchConfig(AlgoConfig):
     family: str = "random"
 
-    # max_rank, n_runs, feasible_rse, lambda_fitness, n_init, init_method("sobol"),
-    # cr_warp_lambda/cr_pool_bias: base defaults. Defaulting to a shared pooled init
+    # max_rank, n_runs, feasible_rse, lambda_fitness, n_init, init_method,
+    # cr_warp_lambda/cr_pool_bias: base defaults. Inheriting the shared pooled init
     # (sobol/lhs/cr_stratified) means the baseline draws the same initial design as
     # BOSS/CBOSS/TnALE — so on the plots its init phase is hidden alongside theirs and
     # every method starts from the common anchor. ("random" is still selectable for a

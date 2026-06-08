@@ -180,9 +180,16 @@ def _resolve_problem(cfg: SidebarConfig, repo_root: Path) -> ProblemConfig:
 
 
 def _merge_algo_configs(existing: list[dict], new: list[dict]) -> list[dict]:
-    """Union by config_id — existing entries are preserved as-is, new ones appended."""
-    seen = {d["config_id"] for d in existing}
-    return existing + [d for d in new if d["config_id"] not in seen]
+    """Union by config_id. A resubmitted config (same config_id) *replaces* the
+    stored one, so re-running with edited parameters updates config.json (which
+    the job reads its params from). Existing configs absent from `new` are kept
+    in place (e.g. rerun-stale only loads the failed ones); brand-new configs
+    are appended in submission order."""
+    new_by_id = {d["config_id"]: d for d in new}
+    existing_ids = {d["config_id"] for d in existing}
+    merged = [new_by_id.get(d["config_id"], d) for d in existing]
+    merged += [d for d in new if d["config_id"] not in existing_ids]
+    return merged
 
 
 def _write_manifest(path: Path, pid_file: Path, root: Path, jobs: list[dict]) -> None:

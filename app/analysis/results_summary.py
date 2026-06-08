@@ -57,6 +57,9 @@ def _render_phase_filter(df: pd.DataFrame) -> list[str]:
              "Sobol init is hidden, its final eval is still drawn as the "
              "shared best-of-init anchor point.",
     )
+    # Persist so the per-seed Performance view (Diagnostics tab, rendered after
+    # this) applies the same phase selection rather than its own default.
+    st.session_state["selected_trace_phases"] = selected
     return selected
 
 
@@ -244,8 +247,8 @@ def render_summary_plots(
 
 def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
     """Per-seed Performance view: the results-summary charts for one seed only
-    (no averaging). Reuses the global Graph-settings (loss threshold) where set;
-    phase filtering uses the default (Sobol init hidden)."""
+    (no averaging). Reuses the global Graph-settings (loss threshold, Best by,
+    RSE term) and the same Trace-phases selection as the Results Summary tab."""
     raw_df = load_traces(repo_root, keys, derive=False)
     raw_df = raw_df[raw_df["seed"] == seed]
     if raw_df.empty:
@@ -261,10 +264,14 @@ def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
         return
 
     options = _phase_options(df_full["phase"])
-    selected = [p for p in options if p not in INIT_PHASES] or options
+    stored = st.session_state.get("selected_trace_phases")
+    if stored is None:  # Results Summary tab not rendered yet → default (init hidden)
+        selected = [p for p in options if p not in INIT_PHASES] or options
+    else:  # honor the sidebar selection, restricted to this seed's phases
+        selected = [p for p in options if p in stored]
     df = _apply_phase_filter(df_full, selected)
     if df.empty:
-        st.info("No trace rows for this seed after the default phase filter.")
+        st.info("No trace rows for this seed match the selected phases.")
         return
 
     weight_rse = st.session_state.get("rse_term", "λ·RSE") == "λ·RSE"

@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from app.config.algo_config import algo_config_from_dict
-from app.utils import _script_alive, _job_status, _job_gpu, all_gpus
+from app.utils import _script_alive, _job_status, _job_gpu, all_gpus, interrupt_run
 from app.phases import pretty_phase
 
 
@@ -188,6 +188,19 @@ def _auto_refresh_panel(ROOT: Path) -> None:
             })
 
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+        # Interrupt — only while the run is alive. Signals the dispatcher + its
+        # running jobs (SIGINT) so they stop and record as interrupted/cancelled.
+        if alive:
+            _, _int = st.columns([5, 1])
+            if _int.button(
+                "⏹ Interrupt", key=f"interrupt_{rname}", width="stretch",
+                help="Stop this run — signals the dispatcher and its running "
+                     "jobs to halt. Interrupted jobs can be rerun afterwards.",
+            ):
+                interrupt_run(Path(rec["pid_file"]))
+                st.toast(f"Interrupting `{rname}`…", icon="⏹️")
+                st.rerun()
 
         # Rerun-stale shortcut — surfaces only for completed runs that still
         # have failed/interrupted/cancelled jobs. Sets up Extend mode in the

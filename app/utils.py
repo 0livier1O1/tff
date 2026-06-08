@@ -6,12 +6,36 @@ functions independently testable.
 """
 
 import json
+import signal
 import subprocess as _subprocess
 from pathlib import Path
 
 import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def interrupt_run(pid_file: Path, sig: int = signal.SIGINT) -> int:
+    """Signal a run's dispatcher and all its descendant job processes to stop.
+
+    SIGINT (the default) lets each Python job raise KeyboardInterrupt and record
+    itself as 'interrupted'; pending jobs that never started show as 'Cancelled'.
+    Children are signalled before the dispatcher so it can't relaunch them.
+    Returns the number of processes signalled."""
+    if not pid_file.exists():
+        return 0
+    try:
+        root = psutil.Process(int(pid_file.read_text().strip()))
+    except (ValueError, psutil.NoSuchProcess):
+        return 0
+    n = 0
+    for p in root.children(recursive=True) + [root]:
+        try:
+            p.send_signal(sig)
+            n += 1
+        except psutil.NoSuchProcess:
+            pass
+    return n
 
 
 # ── Run completion sentinel ────────────────────────────────────────────────────

@@ -138,20 +138,41 @@ def _render_add_algorithm() -> None:
 
 def render_saved_library_section() -> None:
     """Standalone sidebar section listing the global saved-config library, with
-    a delete button per entry. Rendered under the Execute button (see dashboard).
-    Hidden entirely when the library is empty."""
+    edit + delete buttons per entry. Rendered under the Execute button (see
+    dashboard). Hidden entirely when the library is empty.
+
+    Edit loads the saved config into the Algorithms list above as an editable
+    card; the user changes params and re-saves (⋮ → Save) under the same name,
+    which overwrites the library entry."""
     saved = list_saved_algos()
     if not saved:
         return
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"### Saved configurations ({len(saved)})")
     for s in saved:
-        name_col, del_col = st.sidebar.columns([5, 1])
-        name_col.markdown(f"**{s['name']}**  ·  `{s['policy']}`")
-        if del_col.button(":material/delete:", key=f"del_saved_{s['name']}",
-                          help=f"Delete saved config '{s['name']}'"):
-            delete_saved_algo(s["name"])
+        name = s["name"]
+        name_col, edit_col, del_col = st.sidebar.columns([5, 1, 1])
+        name_col.markdown(f"**{name}**  ·  `{s['policy']}`")
+        if edit_col.button(":material/edit:", key=f"edit_saved_{name}",
+                           help=f"Load '{name}' into the Algorithms list to edit"):
+            _load_saved_for_edit(name)
+        if del_col.button(":material/delete:", key=f"del_saved_{name}",
+                          help=f"Delete saved config '{name}'"):
+            delete_saved_algo(name)
             st.rerun()
+
+
+def _load_saved_for_edit(name: str) -> None:
+    """Drop a saved config into the editable Algorithms list (dedup by config_id)
+    so it can be modified and re-saved over the same library entry."""
+    acfg = instantiate_saved(name)
+    configs = st.session_state.setdefault("algo_configs", [])
+    if any(c.config_id == acfg.config_id for c in configs):
+        st.toast(f"'{name}' is already in the Algorithms list above.", icon="✏️")
+        return
+    configs.append(acfg)
+    st.toast(f"Loaded '{name}' above — edit, then ⋮ → Save to overwrite.", icon="✏️")
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------
