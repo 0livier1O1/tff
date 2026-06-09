@@ -80,7 +80,8 @@ def _build_cboss(acfg, adj_np, target_np, seed):
         wsp_mode=acfg.cboss_wsp_mode, input_warp=acfg.input_warp,
         gp_epochs=acfg.cboss_gp_epochs, freq_update=acfg.freq_update,
         gp_refine_epochs=acfg.cboss_gp_refine_epochs, gp_tol=acfg.cboss_gp_tol,
-        gp_patience=acfg.cboss_gp_patience, mc_samples=acfg.cboss_mc_samples,
+        gp_patience=acfg.cboss_gp_patience, gp_reset_every=acfg.cboss_gp_reset_every,
+        mc_samples=acfg.cboss_mc_samples,
         raw_samples=acfg.cboss_raw_samples, num_restarts=acfg.cboss_num_restarts,
         seed=seed, verbose=True, **_decomp_kwargs(acfg),
     )

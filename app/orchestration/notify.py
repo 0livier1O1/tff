@@ -189,8 +189,12 @@ def notify_on_completion(repo_root: Path, my_pid_file: Path | None) -> bool:
     """Email the combined Active Runs summary iff this is the last live dispatcher.
 
     Best-effort: any failure is swallowed so it never disturbs the dispatcher.
-    A lock file makes the send single-shot if two dispatchers finish together;
-    reported runs' `session_state.json` is removed so the mail isn't re-sent.
+    A lock file makes the send single-shot if two dispatchers finish together.
+    The email is purely a notification: it never removes a run's
+    `session_state.json` (that's the dashboard's tracker — failed runs must stay
+    in the Active Runs panel so they can be rerun). Instead each reported run gets
+    a sibling `.notified` marker so the next completion doesn't re-email it;
+    `launch_run` clears that marker when a run is (re)launched, re-arming the mail.
     """
     try:
         if _recipient() is None:
@@ -201,10 +205,12 @@ def notify_on_completion(repo_root: Path, my_pid_file: Path | None) -> bool:
         if _other_dispatcher_alive(runs_dir, os.getpid()):
             return False  # not last — that dispatcher will notify when it ends
 
-        # Runs the dashboard still considers "active" (not yet acknowledged).
+        # Runs the dashboard still tracks that we haven't already emailed about.
         ss_files = sorted(runs_dir.glob("*/session_state.json"))
         records = []
         for f in ss_files:
+            if (f.parent / ".notified").exists():
+                continue  # already reported — don't re-send
             try:
                 records.append((f, json.loads(f.read_text())))
             except (OSError, json.JSONDecodeError):
@@ -223,9 +229,10 @@ def notify_on_completion(repo_root: Path, my_pid_file: Path | None) -> bool:
         try:
             subject, html, _, _ = build_report([r for _, r in records])
             send_email(subject, html)
-            # Acknowledge so the next completion doesn't re-report these runs.
+            # Mark as emailed (don't delete session_state.json — the dashboard
+            # owns that file; a failed run must stay restorable/rerunnable).
             for f, _ in records:
-                f.unlink(missing_ok=True)
+                (f.parent / ".notified").write_text("1")
         finally:
             lock.unlink(missing_ok=True)
         return True

@@ -505,16 +505,24 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
          min_value=10, max_value=20000, step=10, help="Max epochs for the one-off full fit at init.")
     _num(g4, acfg, "freq_update", "Freq update", f"cboss_freq_update_{cid}",
          min_value=1, max_value=1000,
-         help="Refresh the variational dist every N steps (hyperparameters stay frozen).")
+         help="Re-optimize all parameters (variational + GP hypers) every N steps; "
+              "in between, the variational dist is refined each step on new data.")
     g5, g6 = st.columns(2)
     _num(g5, acfg, "cboss_gp_refine_epochs", "GP refine epochs", f"cboss_gp_refine_{cid}",
-         min_value=1, max_value=5000, help="Max epochs per frozen-hyperparameter refresh.")
+         min_value=1, max_value=5000,
+         help="Max epochs per warm-started refresh (per-step variational refine and "
+              "per-freq_update all-parameter continuation).")
     _num(g6, acfg, "cboss_gp_patience", "GP patience", f"cboss_gp_patience_{cid}",
          min_value=1, max_value=1000, help="ELBO convergence patience (epochs).")
     g7, g8 = st.columns(2)
     _num(g7, acfg, "cboss_gp_tol", "GP tol", f"cboss_gp_tol_{cid}",
          format="%e", help="ELBO convergence tolerance.")
-    _num(g8, acfg, "cboss_mc_samples", "MC samples (cei)", f"cboss_mc_{cid}",
+    _num(g8, acfg, "cboss_gp_reset_every", "GP hard-reset every", f"cboss_gp_reset_{cid}",
+         min_value=0, max_value=1000,
+         help="Every N steps, re-fit the surrogate fresh from scratch (kept only if "
+              "its ELBO wins) to escape warm-start drift / local minima. 0 = never.")
+    g9, g10 = st.columns(2)
+    _num(g9, acfg, "cboss_mc_samples", "MC samples (cei)", f"cboss_mc_{cid}",
          min_value=1, max_value=4096, help="MC samples for the constrained-EI acquisition.")
 
     st.markdown("*Acquisition optimizer*")

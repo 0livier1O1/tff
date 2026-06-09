@@ -5,11 +5,13 @@ predicting P(feasible) = P(RSE < threshold). Subclasses BoTorch's
 ``SingleTaskVariationalGP`` so ``posterior`` / ``condition_on_observations`` are
 inherited; inducing points are fixed to the full training set (no sparsity).
 
-Refitting from scratch every BO step is wasteful, so :meth:`update` does a
-*warm-started, convergence-checked* incremental fit: the GP hyperparameters
-(kernel, mean) are only re-optimized every ``update_every`` updates; in between
-they are frozen and only the variational distribution is refined for a few
-epochs. The expensive full fit therefore runs once at init and periodically.
+Refitting from scratch every BO step is wasteful, so :meth:`refit` does a
+*warm-started, convergence-checked* incremental fit over a reduced ``refine_epochs``
+budget. The surrogate is re-conditioned on all observed data every step
+(variational distribution only); every ``freq_update`` steps *all* parameters
+(variational + GP hyperparameters) are continued from their current values
+(``refit(..., freeze_hypers=False)``). The one expensive *converged* fit
+(``full_epochs``) runs only once, at init, via :meth:`fit`.
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ from gpytorch.kernels import MaternKernel, RBFKernel, ScaleKernel
 from gpytorch.likelihoods import BernoulliLikelihood
 from gpytorch.mlls import VariationalELBO
 from gpytorch.variational import VariationalStrategy, UnwhitenedVariationalStrategy
+from linear_operator.utils.errors import NotPSDError
 
 from tnss.algo.boss.means import make_mean
 from tnss.kernels.input_warp_kernel import maybe_warp
@@ -32,6 +35,11 @@ _NU = {"matern": 2.5, "matern52": 2.5, "matern32": 1.5}
 # than compute (440ms vs 5ms at 24 vs 1-8 threads). Cap threads during the fit;
 # decomposition runs on GPU so this has no effect on the rest of cBOSS.
 _FIT_THREADS = 8
+
+# A hard reset (fresh full fit) is forced after this many consecutive BO steps
+# whose refit hit a NotPSDError — a degenerate inducing covariance that warm-
+# started refits keep failing on. Not a tunable: a numerical-safety backstop.
+MAX_CONSEC_FIT_ERRORS = 5
 
 
 def make_kernel(name: str, D: int, N: int, max_rank: int, wsp_mode: str = "matern",
@@ -67,6 +75,10 @@ class FeasibilityGP(SingleTaskVariationalGP):
     lr, tol, patience: Adam LR and convergence (stop when the ELBO improves by
                        < ``tol`` for ``patience`` consecutive epochs)
     """
+
+    # Set by fit()/refit(): did the fit that produced this surrogate hit a
+    # NotPSDError? CBOSS counts consecutive True's to force a hard reset.
+    fit_error: bool = False
 
     def __init__(self, train_X, train_Y, *, D, N, max_rank, t_shape=None,
                  kernel="matern", mean="constant", var_strategy="whitened", wsp_mode="matern",
@@ -131,6 +143,7 @@ class FeasibilityGP(SingleTaskVariationalGP):
         self.elbo_history = elbo_hist
         self.final_elbo = elbo_hist[-1] if elbo_hist else float("nan")
         self.epochs_run = len(elbo_hist)
+        self.fit_error = False   # reaching here means the ELBO fit completed
         return self
 
     def warm_start_from(self, other: "FeasibilityGP"):
@@ -145,15 +158,56 @@ class FeasibilityGP(SingleTaskVariationalGP):
         torch.nn.Module.load_state_dict(self, {**dst, **keep}, strict=False)
         return self
 
-    def refit(self, X, Y) -> "FeasibilityGP":
-        """Refresh on the full accumulated data ``(X, Y)``: rebuild, warm-start the
-        (frozen) hyperparameters from this fit, and refine only the variational
-        distribution for ``refine_epochs``. Hyperparameters are *not* re-optimized
-        — that happens once, at initialization, via :meth:`fit`."""
+    def refit(self, X, Y, *, freeze_hypers: bool = True) -> "FeasibilityGP":
+        """Continue the fit on the full accumulated data ``(X, Y)``: rebuild,
+        warm-start from this fit, and optimize for ``refine_epochs`` — the *reduced*
+        per-refresh budget. The expensive converged fit (``full_epochs``) happens
+        only once, at init, via :meth:`fit`.
+
+        With ``freeze_hypers`` only the variational distribution is refined (cheap
+        per-step re-conditioning on the new data); with ``freeze_hypers=False`` the
+        GP hyperparameters are continued from their current values too — the
+        periodic ``freq_update`` re-optimization of *all* parameters.
+
+        Resilience: the variational Cholesky of the inducing covariance can break
+        down (``NotPSDError``) when the continued hyper-optimization ill-conditions
+        it. On that, fall back to a frozen-hyper refresh (reusing the previous,
+        well-conditioned hypers); if even that fails, keep the current surrogate —
+        a numerical breakdown never aborts the run. The returned surrogate's
+        ``fit_error`` flag records whether the *requested* fit failed (so CBOSS can
+        force a hard reset after several consecutive failures)."""
+        try:
+            return self._rebuilt_fit(X, Y, freeze_hypers=freeze_hypers)
+        except NotPSDError:
+            if not freeze_hypers:
+                try:
+                    nxt = self._rebuilt_fit(X, Y, freeze_hypers=True)
+                    nxt.fit_error = True   # recovered, but the hyper fit failed
+                    return nxt
+                except NotPSDError:
+                    pass
+            self.fit_error = True          # no update this step — surrogate held
+            return self
+
+    def _rebuilt_fit(self, X, Y, *, freeze_hypers: bool) -> "FeasibilityGP":
+        """Rebuild on ``(X, Y)``, warm-start from this fit, and run ``refine_epochs``."""
         nxt = FeasibilityGP(X, Y, **self._cfg)
         nxt.warm_start_from(self)
-        nxt.fit(epochs=self.refine_epochs, freeze_hypers=True)
+        nxt.fit(epochs=self.refine_epochs, freeze_hypers=freeze_hypers)
         return nxt
+
+    def cold_reset(self, X, Y) -> "FeasibilityGP":
+        """Fresh, full re-optimization of *all* parameters from the default init
+        (NOT warm-started) on ``(X, Y)`` for ``full_epochs`` — an occasional hard
+        reset that escapes warm-start drift / local minima and re-anchors the hypers
+        in a well-conditioned region. Returns the cold fit only if its ELBO beats
+        this surrogate's; otherwise keeps this one (a bad cold init can't regress)."""
+        try:
+            cold = FeasibilityGP(X, Y, **self._cfg).fit(
+                epochs=self.full_epochs, freeze_hypers=False)
+        except NotPSDError:
+            return self
+        return cold if cold.final_elbo >= self.final_elbo else self
 
     @torch.no_grad()
     def proba(self, X):

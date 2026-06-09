@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 
@@ -80,8 +81,17 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
     oos = load_or_build_oos(ROOT, problem_id, seed, algo, n=N_OOS)
     target = _load_target(_target_path(ROOT, problem_id, seed))
 
+    # Generating structure (synthetic problems only): the ground-truth adjacency's
+    # upper-triangular bond ranks. Used to track the surrogate's feasibility belief
+    # about the structure that produced the target (feasible by construction).
+    adj_path = ROOT / "artifacts" / "problems" / problem_id / f"seed_{seed}" / "adj_matrix.npy"
+    gen_X = None
+    if adj_path.exists():
+        adj = np.load(adj_path)
+        gen_X = np.clip(np.round(adj[np.triu_indices(adj.shape[0], 1)]).astype(int), 1, max_rank)
+
     # Replay the feasibility GP step by step and score each refit on OOS.
-    rr = replay(config_dir, algo, target, oos["X"])
+    rr = replay(config_dir, algo, target, oos["X"], gen_X=gen_X)
     X_std_train = np.load(config_dir / "cboss_results.npz")["X_std"]
     keep, n_scored, n_excluded = train_overlap_mask(oos["X"], X_std_train, max_rank)
 
@@ -97,6 +107,17 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
         for step, p_all in zip(rr.steps, rr.proba_oos)
     ]
 
+    # GP-fit-error timeline — read from the run's own gp_states snapshots (ground
+    # truth, not the replay): per recorded step, the phase and whether that step's
+    # refit hit a NotPSDError. Old runs predate this and default to no errors.
+    gp = torch.load(config_dir / "gp_states.pt", map_location="cpu", weights_only=False)
+    gp_step = np.array([int(g["step"]) for g in gp])
+    gp_phase = np.array([str(g.get("phase", "")) for g in gp])
+    gp_fit_error = np.array([bool(g.get("fit_error", False)) for g in gp])
+    n_fit_errors = int(gp_fit_error.sum())
+    n_error_resets = int((gp_phase == "error-reset").sum())
+    n_periodic_resets = int((gp_phase == "reset").sum())
+
     out = _diag_dir(config_dir)
     out.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(metrics).to_csv(out / "oos_metrics.csv", index=False)
@@ -104,7 +125,9 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
              y=yk, cr=oos["cr"][keep], xnorm=xnorm[keep], rse=oos["rse"][keep],
              rse_all=oos["rse"], p_post=p_post, p_final=p_final,
              ls=(rr.final_lengthscales if rr.final_lengthscales is not None
-                 else np.array([])))
+                 else np.array([])),
+             ls_evol=rr.lengthscales, ls_steps=rr.steps, proba_gen=rr.proba_gen,
+             gp_step=gp_step, gp_phase=gp_phase, gp_fit_error=gp_fit_error)
 
     # Acquisition trace — saved run data (the acqf the run actually used).
     bo = pd.read_csv(config_dir / "traces.csv")
@@ -132,7 +155,9 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
         feasible_rse=feasible_rse, n_oos=int(len(oos["X"])),
         n_scored=n_scored, n_excluded=n_excluded,
         acqf=acqf, ficr_t=ficr_t, n_cores=n_cores,
-        pf_mae=pf_mae, pf_spearman=pf_rho)))
+        pf_mae=pf_mae, pf_spearman=pf_rho,
+        n_fit_errors=n_fit_errors, n_error_resets=n_error_resets,
+        n_periodic_resets=n_periodic_resets)))
 
     print(f"cBOSS OOS diagnostics → {out}  (scored on {n_scored}/{len(oos['X'])} "
           f"OOS structures, {n_excluded} excluded as train overlap)")

@@ -96,6 +96,37 @@ def accuracy_by_cr(cr, y_true, probas: dict, n_bins: int = 5) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
+# GP fit-error timeline
+# ---------------------------------------------------------------------------
+
+def fit_error_trace(steps, fit_error, phases) -> go.Figure:
+    """Per-step feasibility-GP health: which BO steps' refit hit a NotPSDError
+    (vermillion ×), and where a hard reset fired — the periodic schedule (blue
+    diamond) vs the consecutive-error backstop (vermillion star). No markers means
+    the surrogate fit cleanly throughout."""
+    steps = np.asarray(steps)
+    fit_error = np.asarray(fit_error, bool)
+    phases = np.asarray(phases)
+    fig = go.Figure()
+    es = steps[fit_error]
+    fig.add_trace(go.Scatter(
+        x=es, y=np.full(es.shape, 1), mode="markers", name="fit error (NotPSD)",
+        marker=dict(symbol="x", size=9, color=COLOR[0])))
+    for kind, label, color, sym in (
+        ("error-reset", "hard reset · 5 consec. errors", COLOR[0], "star"),
+        ("reset", "hard reset · periodic", COLOR[1], "diamond")):
+        rs = steps[phases == kind]
+        if rs.size:
+            fig.add_trace(go.Scatter(
+                x=rs, y=np.full(rs.shape, 2), mode="markers", name=label,
+                marker=dict(symbol=sym, size=12, color=color)))
+    fig.update_xaxes(title_text="BO step", rangemode="tozero")
+    fig.update_yaxes(tickvals=[1, 2], ticktext=["fit error", "hard reset"],
+                     range=[0.5, 2.5])
+    return _base_layout(fig, height=220)
+
+
+# ---------------------------------------------------------------------------
 # Final-GP surrogate views
 # ---------------------------------------------------------------------------
 
@@ -107,6 +138,56 @@ def ard_lengthscales(ls, labels=None) -> go.Figure:
     fig = go.Figure(go.Bar(x=x, y=ls, marker_color="#0072B2"))
     fig.update_xaxes(title_text="bond edge (i,j)")
     fig.update_yaxes(title_text="lengthscale")
+    return _base_layout(fig)
+
+
+def generating_feasibility(steps, proba_gen) -> go.Figure:
+    """Surrogate's predicted P(feasible) for the generating (ground-truth)
+    structure across refits. The generating structure is feasible by construction
+    (it decomposes the target to ~0 RSE), so ideally this sits near 1 — a dip
+    means the classifier doubts the very structure that produced the target."""
+    fig = go.Figure(go.Scatter(x=np.asarray(steps), y=np.asarray(proba_gen),
+                               mode="lines+markers", line=dict(color=COLOR[1])))
+    fig.add_hline(y=0.5, line_dash="dash", line_color="#333")
+    fig.update_xaxes(title_text="BO step (refit)")
+    fig.update_yaxes(title_text="P(feasible) of generating structure", range=[-0.02, 1.02])
+    return _base_layout(fig)
+
+
+def signed_distance_vs_pf(rse, p, feasible_rse: float, y_true) -> go.Figure:
+    """Predicted P(feasible) vs the signed log-distance of the true RSE from the
+    feasibility threshold: d = log10(threshold / RSE) — positive = feasible (deeper
+    = safer margin), negative = infeasible. A well-calibrated classifier rises from
+    0 to 1 across d = 0; the hard region sits near the threshold."""
+    rse = np.asarray(rse, float)
+    d = float(np.log10(feasible_rse)) - np.log10(np.clip(rse, 1e-300, None))
+    p = np.asarray(p, float)
+    y_true = np.asarray(y_true, int)
+    fig = go.Figure()
+    for tf, nm in ((1, "feasible"), (0, "infeasible")):
+        m = y_true == tf
+        fig.add_trace(go.Scattergl(
+            x=d[m], y=p[m], mode="markers", name=nm,
+            marker=dict(color=COLOR[tf], size=5, opacity=0.7,
+                        line=dict(width=0.3, color="#333"))))
+    fig.add_vline(x=0.0, line_dash="dash", line_color="#333")
+    fig.add_hline(y=0.5, line_dash="dot", line_color="#999")
+    fig.update_xaxes(title_text="signed distance from threshold  ·  log10(thr / RSE)")
+    fig.update_yaxes(title_text="predicted P(feasible)", range=[-0.02, 1.02])
+    return _base_layout(fig)
+
+
+def lengthscale_heatmap(L, labels, steps) -> go.Figure:
+    """ARD lengthscale evolution across GP refits — `L` is (n_refits, D); rows
+    (edges) differ, columns (steps) are flat when the kernel hypers are frozen
+    after the init fit (as in cBOSS)."""
+    L = np.asarray(L, float)
+    z = L.T if (L.ndim == 2 and L.shape[1] == len(labels)) else L   # -> (D, n_refits)
+    fig = go.Figure(go.Heatmap(z=z, x=np.asarray(steps), y=list(labels),
+                               colorscale="Viridis",
+                               colorbar=dict(title="lengthscale")))
+    fig.update_xaxes(title_text="BO step (refit)")
+    fig.update_yaxes(title_text="bond edge (i,j)")
     return _base_layout(fig)
 
 

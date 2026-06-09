@@ -366,6 +366,8 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
     }
     with open(out_dir / "session_state.json", "w") as f:
         json.dump(run_record, f)
+    # Re-arm the completion email for this (re)launch — see notify_on_completion.
+    (out_dir / ".notified").unlink(missing_ok=True)
     _existing = [r for r in st.session_state.get("active_runs", []) if r["run_name"] != cfg.run_name]
     st.session_state["active_runs"] = _existing + [run_record]
 

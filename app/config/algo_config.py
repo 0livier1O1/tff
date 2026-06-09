@@ -175,6 +175,9 @@ class CBOSSConfig(AlgoConfig):
     cboss_gp_refine_epochs: int = 60
     cboss_gp_tol: float = 1e-4
     cboss_gp_patience: int = 10
+    # Every N BO steps, hard-reset the surrogate with a fresh full fit (kept only if
+    # its ELBO wins) to escape warm-start drift / local minima. 0 = never reset.
+    cboss_gp_reset_every: int = 25
 
     # Acquisition optimizer (discrete local search) + MC samples for cei
     cboss_mc_samples: int = 128

@@ -547,8 +547,49 @@ def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> N
 
 
 def _render_cboss_plots(cd: Path, seed: int, lab: str) -> None:
-    """Render the cached replay/OOS diagnostics as compact side-by-side plotly."""
+    """Tabbed diagnostics for one cBOSS config: the OOS/replay figure grid, plus a
+    GP fit-error report (which steps hit a NotPSDError and where hard resets fired)."""
     metrics, ev, acq, meta = load_cboss_diagnostics(cd)
+    n_err = meta.get("n_fit_errors", 0)
+    err_label = f"⚠ GP fit errors ({n_err})" if n_err else "GP fit errors"
+    tab_diag, tab_err = st.tabs(["Diagnostics", err_label])
+    with tab_diag:
+        _render_cboss_figure_grid(metrics, ev, acq, meta, seed, lab)
+    with tab_err:
+        _render_cboss_fit_errors(ev, meta, seed, lab)
+
+
+def _render_cboss_fit_errors(ev, meta: dict, seed: int, lab: str) -> None:
+    """Report feasibility-GP fitting errors (NotPSDError) and hard resets recorded
+    during the run. Errors don't abort cBOSS (it falls back to frozen hypers / a
+    held surrogate, and forces a fresh full fit after 5 consecutive failures), but
+    a cluster of them flags a degenerate surrogate region worth knowing about."""
+    if "gp_step" not in ev.files:
+        st.info("Regenerate diagnostics to populate the GP fit-error report "
+                "(this cache predates it).")
+        return
+    n_err = meta.get("n_fit_errors", 0)
+    n_eres = meta.get("n_error_resets", 0)
+    n_pres = meta.get("n_periodic_resets", 0)
+    if not (n_err or n_eres or n_pres):
+        st.success("No GP fitting errors or hard resets recorded — the feasibility "
+                   "GP fit cleanly at every step.")
+        return
+    bits = [f"**{n_err}** GP fitting error(s) · NotPSDError"]
+    if n_eres:
+        bits.append(f"**{n_eres}** error-triggered hard reset(s)")
+    if n_pres:
+        bits.append(f"**{n_pres}** periodic hard reset(s)")
+    st.warning("  ·  ".join(bits))
+    st.caption("A fit error means that step's variational refit failed (degenerate "
+               "inducing covariance); cBOSS fell back to the previous frozen hypers "
+               "or held the surrogate. Five consecutive errors force a fresh full fit.")
+    st.plotly_chart(cf.fit_error_trace(ev["gp_step"], ev["gp_fit_error"], ev["gp_phase"]),
+                    width="stretch", key=f"cb_fiterr_{seed}_{lab}")
+
+
+def _render_cboss_figure_grid(metrics, ev, acq, meta: dict, seed: int, lab: str) -> None:
+    """Render the cached replay/OOS diagnostics as compact side-by-side plotly."""
     st.caption(
         f"Scored on **{meta['n_scored']}** OOS structures "
         f"({meta['n_excluded']} excluded as train overlap; "
@@ -602,10 +643,31 @@ def _render_cboss_plots(cd: Path, seed: int, lab: str) -> None:
         else:
             st.caption("Kernel has no ARD lengthscale.")
 
+    d = st.columns(2)
+    with d[0]:
+        if ev["proba_gen"].size:
+            st.caption("Feasibility belief about the generating (ground-truth) structure")
+            st.plotly_chart(cf.generating_feasibility(ev["ls_steps"], ev["proba_gen"]),
+                            width="stretch", key=f"cb_gen_{seed}_{lab}")
+        else:
+            st.caption("Generating structure unavailable (non-synthetic problem).")
+    with d[1]:
+        st.caption("Predicted feasibility vs signed distance from threshold (final GP)")
+        st.plotly_chart(cf.signed_distance_vs_pf(ev["rse"], ev["p_final"],
+                                                 meta["feasible_rse"], ev["y"]),
+                        width="stretch", key=f"cb_sdist_{seed}_{lab}")
+
     if meta["acqf"] == "ficr" and np.isfinite(acq["infeasible_frac"]).any():
         st.caption("ficr interpolation weights")
         st.plotly_chart(cf.ficr_weights(acq["steps"], acq["infeasible_frac"], meta["ficr_t"]),
                         width="stretch", key=f"cb_ficr_{seed}_{lab}")
+
+    if ev["ls_evol"].size:
+        st.caption("ARD lengthscale evolution across refits (flat over steps — cBOSS "
+                   "freezes kernel hypers after the init fit; bands show per-edge importance)")
+        st.plotly_chart(cf.lengthscale_heatmap(ev["ls_evol"], cf.edge_labels(meta["n_cores"]),
+                                               ev["ls_steps"]),
+                        width="stretch", key=f"cb_lsh_{seed}_{lab}")
 
     variables = [(ev["cr"], "CR", "log"),
                  (ev["xnorm"], "||ranks||", "linear"),

@@ -12,9 +12,13 @@ tagging, and BO-loop skeleton live in :class:`~tnss.algo.boss.base.BOSSBase`;
 this module supplies the feasibility surrogate, the constrained acquisition, and
 seek-feasible-first.
 
-Surrogate refresh: the only full (hyperparameter) ELBO fit runs at init; every
-``freq_update`` steps the variational distribution is refined on all data with
-the hyperparameters held fixed. GP-fit snapshots are recorded at init and each refresh.
+Surrogate refresh: every step the surrogate is re-conditioned on all observed
+data (variational distribution only); every ``freq_update`` steps *all* parameters
+(variational + GP hyperparameters) are continued from their current values for a
+reduced ``refine_epochs`` budget. The one converged full fit (``full_epochs``)
+runs at init; GP-fit snapshots are recorded at every step. A hard reset (fresh
+full fit) fires on a periodic schedule (``gp_reset_every``) and as a backstop after
+``MAX_CONSEC_FIT_ERRORS`` consecutive refits that hit a NotPSDError.
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ from torch import Tensor
 from botorch.optim import optimize_acqf_discrete_local_search
 
 from tnss.algo.boss.base import BOSSBase
-from tnss.algo.cboss.feasibility import FeasibilityGP
+from tnss.algo.cboss.feasibility import FeasibilityGP, MAX_CONSEC_FIT_ERRORS
 from tnss.algo.cboss.acquisitions import (
     MaxFeasibility, PFWeightedImprovement, FeasibilityInterpolatedCR,
     build_constrained_ei,
@@ -89,6 +93,7 @@ class CBOSS(BOSSBase):
         gp_refine_epochs: int = 60,
         gp_tol: float = 1e-4,
         gp_patience: int = 10,
+        gp_reset_every: int = 0,
         mc_samples: int = 128,
         raw_samples: int = 256,
         num_restarts: int = 10,
@@ -119,7 +124,9 @@ class CBOSS(BOSSBase):
         self.gp_refine_epochs = gp_refine_epochs
         self.gp_tol = gp_tol
         self.gp_patience = gp_patience
+        self.gp_reset_every = gp_reset_every
         self.mc_samples = mc_samples
+        self._consec_fit_errors = 0   # consecutive refits that hit a NotPSDError
 
     # ------------------------------------------------------------------
     # Deterministic CR objective + feasibility helpers
@@ -199,15 +206,29 @@ class CBOSS(BOSSBase):
         return cand, extra, suggest_time
 
     def _post_observe(self, feas, X, Y_rse, Y_cr, Y_feas, b):
-        # Hyperparameters stay constant; every freq_update steps refresh the
-        # variational distribution on all data (few epochs). Otherwise unchanged.
-        if (b + 1) % self.freq_update == 0:
-            t0 = time.time()
-            feas = feas.refit(X, Y_feas)
-            self._carried_gp_fit_time = time.time() - t0
-            self._record_surrogate(feas, step=self.n_init + b, phase="refresh")
-        else:
-            self._carried_gp_fit_time = 0.0
+        # Re-condition the surrogate on ALL observed data every step (variational
+        # refine); every freq_update steps continue optimizing ALL parameters
+        # (variational + GP hyperparameters) from their current values, both over
+        # the reduced refine_epochs budget. A hard reset (fresh full fit from
+        # scratch, kept only if its ELBO wins) fires on two triggers: the periodic
+        # schedule (every gp_reset_every steps, 0 = never) OR after
+        # MAX_CONSEC_FIT_ERRORS consecutive refits that hit a NotPSDError — a
+        # numerical breakdown that warm-started refits can't escape.
+        reopt_hypers = (b + 1) % self.freq_update == 0
+        periodic_reset = self.gp_reset_every > 0 and (b + 1) % self.gp_reset_every == 0
+        t0 = time.time()
+        feas = feas.refit(X, Y_feas, freeze_hypers=not reopt_hypers)
+        fit_error = bool(feas.fit_error)
+        self._consec_fit_errors = self._consec_fit_errors + 1 if fit_error else 0
+        error_reset = self._consec_fit_errors >= MAX_CONSEC_FIT_ERRORS
+        if periodic_reset or error_reset:
+            feas = feas.cold_reset(X, Y_feas)
+            self._consec_fit_errors = 0
+        self._carried_gp_fit_time = time.time() - t0
+        phase = ("error-reset" if error_reset else
+                 "reset" if periodic_reset else
+                 "refit" if reopt_hypers else "refresh")
+        self._record_surrogate(feas, step=self.n_init + b, phase=phase, fit_error=fit_error)
         return feas
 
     def _log_step(self, b, row, X, Y_rse, Y_cr, Y_feas):
@@ -219,12 +240,15 @@ class CBOSS(BOSSBase):
               f"best_feas_CR={bcr:.5f}  GP={row['gp_fit_time_s']:.1f}s  "
               f"acqf={row['suggest_time_s']:.1f}s  eval={row['eval_time_s']:.1f}s")
 
-    def _record_surrogate(self, feas: FeasibilityGP, *, step: int, phase: str):
-        """Snapshot a feasibility-GP fit: ELBO, epochs run, and the full state_dict
-        (CPU tensors) so the surrogate is reconstructable offline."""
+    def _record_surrogate(self, feas: FeasibilityGP, *, step: int, phase: str,
+                          fit_error: bool = False):
+        """Snapshot a feasibility-GP fit: ELBO, epochs run, whether this step's
+        refit hit a NotPSDError, and the full state_dict (CPU tensors) so the
+        surrogate is reconstructable offline."""
         self.gp_states.append({
             "step": step,
             "phase": phase,
+            "fit_error": fit_error,
             "elbo": feas.final_elbo,
             "epochs_run": feas.epochs_run,
             "elbo_history": list(feas.elbo_history),
