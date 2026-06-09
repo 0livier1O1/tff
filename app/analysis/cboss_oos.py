@@ -1,8 +1,10 @@
 """
 cboss_oos.py — shared out-of-sample (OOS) feasibility test set for cBOSS diagnostics.
 
-Generates N random TN structures (rank vectors), decomposes each with a run's own
-decomposition settings via BOSS's ``_eval_tn`` path (the exact eval the run used),
+Generates N **CR-stratified** TN structures (rank vectors) — evenly spaced in log
+compression ratio, so the set spans the low-CR / feasible region (which uniform-
+random ranks barely reach) as well as the high-CR end — decomposes each with a run's
+own decomposition settings via BOSS's ``_eval_tn`` path (the exact eval the run used),
 and caches RSE/CR keyed by (problem, seed, decomp-signature) so every algo on that
 problem/seed reuses the same labelled OOS set. Train-set overlap is allowed and
 filtered out at *scoring* time (see ``cboss_replay``), not here — so the cache is
@@ -75,18 +77,48 @@ def _cache_path(repo_root: Path, problem_id: str, seed: int, sig: str) -> Path:
             / f"seed_{seed}__{sig}.npz")
 
 
-def _sample_structures(D: int, max_rank: int, n: int, seed: int) -> np.ndarray:
-    """`n` unique random rank vectors in [1, max_rank]^D (deduped among themselves)."""
-    rng = np.random.default_rng(seed)
-    picked: set = set()
-    out: list = []
-    while len(out) < n:
-        cand = tuple(int(v) for v in rng.integers(1, max_rank + 1, size=D))
-        if cand in picked:
-            continue
-        picked.add(cand)
-        out.append(cand)
-    return np.array(out, dtype=int)
+# OOS design shaping via the shared cr_stratified init knobs: space points evenly in
+# 1/CR (lam<0 packs in more low-CR) over an unbiased rank pool (so the high-CR end is
+# still reached for two-class coverage across the feasibility boundary). Fixed here —
+# the OOS is a fixed evaluation set, not tied to any run's init.
+_OOS_CR_WARP_LAMBDA = -1.0
+_OOS_CR_POOL_BIAS = 1.0
+
+
+def _sample_structures(D: int, max_rank: int, n: int, seed: int,
+                       phys_dims) -> np.ndarray:
+    """`n` unique rank vectors in [1, max_rank]^D, **stratified by compression ratio**,
+    reusing the *same* ``cr_stratified`` design the search families use for their init
+    (:func:`tnss.algo.init_designs.sample_init_points`) — so the OOS set spans low→high
+    CR while emphasising the low-CR region that uniform-random ranks starve and the
+    boundary classifier most needs scoring on.
+
+    ``sample_init_points`` returns a continuous ``[0,1]^D`` design ordered low→high CR;
+    we snap it to the integer rank lattice (which collapses nearby points, most at the
+    sparse low-CR end), dedup *preserving that order*, then subsample ``n`` evenly so the
+    full CR span is kept (not just the low front). Deterministic in ``seed``."""
+    import torch
+    from tnss.algo.init_designs import sample_init_points
+    from tnss.utils import cr_of_normalized, to_int_ranks
+
+    t_shape = torch.tensor(phys_dims, dtype=torch.double)
+    cr_fn = lambda X_std: cr_of_normalized(X_std, max_rank, t_shape)
+
+    X_std = sample_init_points(
+        "cr_stratified", n=n * 4, D=D, seed=seed, cr_fn=cr_fn,
+        cr_warp_lambda=_OOS_CR_WARP_LAMBDA, cr_pool_bias=_OOS_CR_POOL_BIAS, pool_mult=50)
+    seen: set = set()
+    uniq: list = []
+    for row in to_int_ranks(X_std, max_rank).numpy().astype(int):
+        t = tuple(int(v) for v in row)
+        if t not in seen:
+            seen.add(t)
+            uniq.append(row)
+    uniq_arr = np.array(uniq, dtype=int)                 # ordered low -> high CR
+    if len(uniq_arr) <= n:
+        return uniq_arr
+    idx = np.linspace(0, len(uniq_arr) - 1, n).round().astype(int)   # even CR subsample
+    return uniq_arr[idx]
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +177,7 @@ def _build(missing: np.ndarray, target_path: Path, decomp: dict, cache_dir: Path
 
 
 def load_or_build_oos(repo_root, problem_id: str, seed: int, algo: dict,
-                      n: int = 500) -> dict:
+                      n: int = 1000) -> dict:
     """Return ``{X (n,D int), rse (n,), cr (n,)}`` for the OOS set, building +
     caching on first call.
 
@@ -159,7 +191,7 @@ def load_or_build_oos(repo_root, problem_id: str, seed: int, algo: dict,
 
     target = _load_target(target_path)
     D = target.dim() * (target.dim() - 1) // 2
-    X = _sample_structures(D, int(algo["max_rank"]), n, seed)
+    X = _sample_structures(D, int(algo["max_rank"]), n, seed, tuple(target.shape))
 
     have: dict = {}
     if cache.exists():

@@ -27,6 +27,20 @@ def _algo_subdir(config_id: str, policy: str) -> str:
     return f"{config_id}_{policy.replace('-', '_')}"
 
 
+def move_to_trash(repo_root: Path, src: Path) -> Path:
+    """Move one results path (file or dir, under ``artifacts/runs/``) into a fresh
+    ``artifacts/trash/<timestamp>/`` mirror of its runs-relative sub-path, and return
+    the destination. Shared with :func:`purge_configs` so every 'trash' goes to the
+    same place — used by the per-config 'cleanse gp_states' action to drop just that
+    file while keeping the rest of the results."""
+    runs_dir = (repo_root / "artifacts" / "runs").resolve()
+    rel = Path(src).resolve().relative_to(runs_dir)
+    dest = repo_root / "artifacts" / "trash" / time.strftime("%Y%m%d-%H%M%S") / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+    return dest
+
+
 def purge_configs(
     repo_root: Path, targets: list[tuple[str, str]],
 ) -> tuple[list[tuple[str, str]], list[str], Path]:

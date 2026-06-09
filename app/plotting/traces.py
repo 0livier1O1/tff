@@ -166,7 +166,7 @@ def _target_cr_for(repo_root: Path, problem, seed: int) -> float | None:
 def load_candidate_evals(
     repo_root: Path, result_keys: list[tuple[str, int, str]],
 ) -> pd.DataFrame:
-    """Per-evaluation candidate frame for the BO families (boss/cboss).
+    """Per-evaluation candidate frame for the BO families (boss/cboss/bess).
 
     Each evaluated structure's CR, RSE, and feasibility come from traces.csv; the
     rank L1 (sum of integer bond ranks) is recovered from the run's
@@ -190,7 +190,7 @@ def load_candidate_evals(
         if run not in algo_idx:
             algo_idx[run], _ = _run_meta(runs_dir / run)
         ac = algo_idx[run].get(config_id)
-        if ac is None or ac["family"] not in ("boss", "cboss"):
+        if ac is None or ac["family"] not in ("boss", "cboss", "bess"):
             continue
         subdir = f"{config_id}_{ac['policy'].replace('-', '_')}"
         mr = int(ac["max_rank"])

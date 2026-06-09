@@ -506,22 +506,31 @@ def rse_distributions(rse, cr, threshold=None) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 def fit_report(do: pd.DataFrame, dr: pd.DataFrame) -> go.Figure:
-    """Secondary report on how the one-step-ahead GP refits behaved: which
-    optimizer each step landed on (L-BFGS first try, L-BFGS after a flaky
-    retry, or the Adam fallback) and the fitted per-point marginal
-    log-likelihood over the run. A higher, flatter MLL curve means the fit
-    converged consistently. Not a model-quality plot — fitting health only.
+    """Secondary 'fitting health' report. Per-step procedure on the left, fitted
+    per-point marginal log-likelihood on the right.
+
+    The two scans differ: the **objective** GP is *reconstructed* from the run's
+    saved surrogate (not re-fit), so its left-panel categories are whether each step
+    *re-optimised* hypers ('hyper-refresh') or *reused* the last fit's hypers frozen
+    ('conditioned') — the run's actual ``freq_update`` schedule. The **log-RSE** GP is
+    a re-fit probe, so its categories are which optimiser each fit landed on (L-BFGS,
+    L-BFGS after a flaky retry, or the Adam fallback). A higher, flatter MLL curve
+    means a consistently good fit.
     """
     fig = make_subplots(
-        rows=1, cols=2, column_widths=[0.4, 0.6],
-        subplot_titles=("Optimizer per step", "Fit marginal log-likelihood"),
+        rows=1, cols=2, column_widths=[0.45, 0.55],
+        subplot_titles=("Per-step procedure", "Fit marginal log-likelihood"),
     )
-    cats = ["L-BFGS", "L-BFGS (retried)", "Adam fallback"]
+    cats = ["L-BFGS", "L-BFGS (retried)", "Adam fallback", "hyper-refresh", "conditioned"]
     for df, name, color in ((do, "objective", "#1f77b4"), (dr, "log RSE", "#ff7f0e")):
-        opt, att = df["optimizer"], df["fit_attempts"]
-        counts = [int(((opt == "lbfgs") & (att == 1)).sum()),
-                  int(((opt == "lbfgs") & (att > 1)).sum()),
-                  int((opt == "adam").sum())]
+        if "phase" in df.columns:   # reconstructed scan (objective): refresh vs conditioned
+            ph = df["phase"]
+            counts = [0, 0, 0, int((ph == "refresh").sum()), int((ph == "conditioned").sum())]
+        else:                        # re-fit probe (log-RSE): optimiser landed on
+            opt, att = df["optimizer"], df["fit_attempts"]
+            counts = [int(((opt == "lbfgs") & (att == 1)).sum()),
+                      int(((opt == "lbfgs") & (att > 1)).sum()),
+                      int((opt == "adam").sum()), 0, 0]
         fig.add_trace(go.Bar(x=cats, y=counts, name=name, legendgroup=name,
                              marker_color=color, text=counts, textposition="auto"),
                       row=1, col=1)

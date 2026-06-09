@@ -15,7 +15,8 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import (
-    AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, TnALEConfig, RandomSearchConfig,
+    AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, BESSConfig, TnALEConfig,
+    RandomSearchConfig,
     POLICY_OPTIONS, new_algo_config, replace_policy, duplicate_algo_config,
 )
 from app.config.saved_algos import (
@@ -219,6 +220,8 @@ def _render_one_config(acfg: AlgoConfig) -> None:
         _render_boss(acfg)
     elif isinstance(acfg, CBOSSConfig):
         _render_cboss(acfg)
+    elif isinstance(acfg, BESSConfig):
+        _render_bess(acfg)
     elif isinstance(acfg, TnALEConfig):
         _render_tnale(acfg)
     elif isinstance(acfg, RandomSearchConfig):
@@ -530,6 +533,112 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
     _num(a1, acfg, "cboss_raw_samples", "Raw samples", f"cboss_raw_{cid}",
          min_value=1, max_value=8192, help="Discrete local-search initial candidates.")
     _num(a2, acfg, "cboss_num_restarts", "Num restarts", f"cboss_restarts_{cid}",
+         min_value=1, max_value=512, help="Discrete local-search restarts.")
+
+
+def _render_bess(acfg: BESSConfig) -> None:
+    """BESS learns the feasibility boundary (level-set estimation). Same feasibility-
+    GP surrogate as cBOSS; the contour acquisition is selected by policy
+    (bess-cucb / bess-tmse / bess-sur)."""
+    cid = acfg.config_id
+    c1, c2 = st.columns(2)
+    _num(c1, acfg, "budget", "Budget", f"bess_budget_{cid}",
+         min_value=1, max_value=10000, help="BO iterations after the initial design.")
+    _num(c2, acfg, "max_rank", "Max Bond Rank", f"bess_max_bond_{cid}",
+         min_value=1, max_value=100, help="Upper bound on each searched bond rank.")
+
+    c3, c4 = st.columns(2)
+    _num(c3, acfg, "n_init", "Init Points (n_init)", f"bess_n_init_{cid}",
+         min_value=2, help="Initial design evaluations before BO.")
+    _sel(c4, acfg, "init_method", "Init Design", BO_INIT_DESIGNS, f"bess_init_design_{cid}",
+         help=BO_INIT_DESIGN_HELP)
+    _render_cr_stratified_opts(acfg, f"bess_{cid}")
+
+    _num(st, acfg, "feasible_rse", "Feasible RSE", f"bess_feasible_rse_{cid}",
+         format="%e",
+         help="The boundary BESS learns: a structure is feasible iff best RSE < this "
+              "(also the decomposition early-stop). BESS spends its budget mapping this "
+              "level set rather than optimizing CR.")
+
+    c5, c6 = st.columns(2)
+    _num(c5, acfg, "lambda_fitness", "λ fitness (plot)", f"bess_lambda_{cid}",
+         min_value=0.0, format="%f",
+         help="Only for the CR + λ·RSE comparison plot; BESS does not optimize this.")
+    _num(c6, acfg, "n_runs", "N runs", f"bess_n_runs_{cid}",
+         min_value=1, max_value=10, help="Decomposition restarts per candidate (best RSE kept).")
+
+    # Acquisition-specific controls (the contour finder is set by the policy).
+    st.markdown("---")
+    st.markdown("*Contour acquisition*")
+    if acfg.policy == "bess-cucb":
+        _sel(st, acfg, "bess_cucb_gamma_mode", "γ mode", ["constant", "adaptive"],
+             f"bess_cucb_gamma_mode_{cid}",
+             help="'constant' uses the straddle weight below; 'adaptive' is the paper's "
+                  "§3.2 γ_n = IQR(μ)/(3·mean σ), recomputed each step from the posterior.")
+        if acfg.bess_cucb_gamma_mode == "constant":
+            _num(st, acfg, "bess_cucb_gamma", "Straddle γ", f"bess_cucb_gamma_{cid}",
+                 min_value=0.0, step=0.1, format="%.2f",
+                 help="cUCB exploration weight γ in a(x)=γ·σ(x)−|μ(x)|. 1.96 = classic straddle.")
+    elif acfg.policy == "bess-tmse":
+        _num(st, acfg, "bess_tmse_eps", "tMSE band ε", f"bess_tmse_eps_{cid}",
+             min_value=0.0, step=0.01, format="%.3f",
+             help="Boundary band half-width (latent units). Small ε concentrates sampling "
+                  "tightly on the boundary; larger ε rewards a wider margin around it.")
+    elif acfg.policy == "bess-sur":
+        s1, s2 = st.columns(2)
+        _num(s1, acfg, "bess_sur_obs_noise", "SUR obs noise τ²", f"bess_sur_noise_{cid}",
+             min_value=0.0, step=0.1, format="%.2f",
+             help="Probit implicit observation noise in the kriging variance update. "
+                  "1.0 = the probit link's unit latent noise.")
+        _num(s2, acfg, "bess_sur_ref_size", "SUR ref points", f"bess_sur_ref_{cid}",
+             min_value=16, max_value=8192, step=64,
+             help="Reference points for SUR's integrated-error look-ahead. Caps its "
+                  "O((M+b)²) cost — the expensive acquisition.")
+    _num(st, acfg, "bess_n_ref", "Boundary-error ref points", f"bess_n_ref_{cid}",
+         min_value=64, max_value=16384, step=64,
+         help="Fixed reference design over which the integrated boundary error E (the "
+              "level-set convergence metric) is estimated each step.")
+
+    # Feasibility GP surrogate — identical to cBOSS.
+    st.markdown("---")
+    st.markdown("*Feasibility GP surrogate*")
+    g1, g2 = st.columns(2)
+    _sel(g1, acfg, "kernel", "Kernel",
+         ["matern", "matern32", "rbf", "weighted_shortest_path"], f"bess_kernel_{cid}",
+         help="Feasibility-classifier kernel (ARD unless wsp).")
+    _sel(g2, acfg, "bess_var_strategy", "Var. strategy", ["whitened", "unwhitened"],
+         f"bess_var_strategy_{cid}", help="Variational strategy.")
+    _sel(st, acfg, "mean", "Mean function", BO_MEANS, f"bess_mean_{cid}", help=BO_MEAN_HELP)
+    _chk(st, acfg, "input_warp", "Use Input Warping", f"bess_input_warp_{cid}", help=BO_INPUT_WARP_HELP)
+    if acfg.kernel == "weighted_shortest_path":
+        _sel(st, acfg, "bess_wsp_mode", "WSP mode", ["matern", "bogrape", "soft", "ewsp"],
+             f"bess_wsp_mode_{cid}", help="Shortest-path kernel variant.")
+
+    g3, g4 = st.columns(2)
+    _num(g3, acfg, "bess_gp_epochs", "GP epochs (init fit)", f"bess_gp_epochs_{cid}",
+         min_value=10, max_value=20000, step=10, help="Max epochs for the one-off full fit at init.")
+    _num(g4, acfg, "freq_update", "Freq update", f"bess_freq_update_{cid}",
+         min_value=1, max_value=1000,
+         help="Re-optimize all parameters (variational + GP hypers) every N steps; "
+              "in between, the variational dist is refined each step on new data.")
+    g5, g6 = st.columns(2)
+    _num(g5, acfg, "bess_gp_refine_epochs", "GP refine epochs", f"bess_gp_refine_{cid}",
+         min_value=1, max_value=5000, help="Max epochs per warm-started refresh.")
+    _num(g6, acfg, "bess_gp_patience", "GP patience", f"bess_gp_patience_{cid}",
+         min_value=1, max_value=1000, help="ELBO convergence patience (epochs).")
+    g7, g8 = st.columns(2)
+    _num(g7, acfg, "bess_gp_tol", "GP tol", f"bess_gp_tol_{cid}",
+         format="%e", help="ELBO convergence tolerance.")
+    _num(g8, acfg, "bess_gp_reset_every", "GP hard-reset every", f"bess_gp_reset_{cid}",
+         min_value=0, max_value=1000,
+         help="Every N steps, re-fit the surrogate fresh from scratch (kept only if "
+              "its ELBO wins). 0 = never.")
+
+    st.markdown("*Acquisition optimizer*")
+    a1, a2 = st.columns(2)
+    _num(a1, acfg, "bess_raw_samples", "Raw samples", f"bess_raw_{cid}",
+         min_value=1, max_value=8192, help="Discrete local-search initial candidates.")
+    _num(a2, acfg, "bess_num_restarts", "Num restarts", f"bess_restarts_{cid}",
          min_value=1, max_value=512, help="Discrete local-search restarts.")
 
 

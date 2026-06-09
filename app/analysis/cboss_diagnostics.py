@@ -4,7 +4,7 @@ cboss_diagnostics.py — replay-based feasibility-classifier diagnostics for cBO
 Unlike the old version (which trusted the per-step predictions saved during the
 run), this *replays* the run: it rebuilds the `FeasibilityGP` step by step from
 `cboss_results.npz` (see `cboss_replay`), and scores each refit on a shared,
-held-out 500-structure out-of-sample (OOS) test set decomposed with the run's own
+held-out 1000-structure CR-stratified out-of-sample (OOS) test set decomposed with the run's own
 settings (see `cboss_oos`). It then caches the computed data (CSV/npz under
 `<config_dir>/analysis/cboss/`) — mirroring how BOSS caches `gp_diag.csv` — and the
 dashboard builds plotly figures from it. No PNGs.
@@ -31,16 +31,7 @@ if str(ROOT) not in sys.path:
 from app.analysis.cboss_oos import load_or_build_oos, _load_target, _target_path
 from app.analysis.cboss_replay import replay, train_overlap_mask
 
-N_OOS = 500
-
-
-def _diag_dir(config_dir: Path) -> Path:
-    return config_dir / "analysis" / "cboss"
-
-
-def has_cboss_diagnostics(config_dir: Path) -> bool:
-    d = _diag_dir(config_dir)
-    return all((d / f).exists() for f in ("oos_metrics.csv", "oos_eval.npz", "meta.json"))
+N_OOS = 1000
 
 
 def _algo_config(config_dir: Path) -> dict:
@@ -49,6 +40,22 @@ def _algo_config(config_dir: Path) -> dict:
     cfg = json.loads((config_dir.parents[1] / "config.json").read_text())
     cid = config_dir.name.split("_")[0]
     return next(a for a in cfg["algo_configs"] if a["config_id"] == cid)
+
+
+def _family(config_dir: Path) -> str:
+    """Algorithm family for this result dir ('cboss' | 'bess'). Both wrap the same
+    FeasibilityGP, so the replay diagnostics are shared; only the artifact filename
+    and cache subdir are family-specific."""
+    return _algo_config(config_dir).get("family", "cboss")
+
+
+def _diag_dir(config_dir: Path) -> Path:
+    return config_dir / "analysis" / _family(config_dir)
+
+
+def has_cboss_diagnostics(config_dir: Path) -> bool:
+    d = _diag_dir(config_dir)
+    return all((d / f).exists() for f in ("oos_metrics.csv", "oos_eval.npz", "meta.json"))
 
 
 def load_cboss_diagnostics(config_dir: Path):
@@ -92,7 +99,7 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
 
     # Replay the feasibility GP step by step and score each refit on OOS.
     rr = replay(config_dir, algo, target, oos["X"], gen_X=gen_X)
-    X_std_train = np.load(config_dir / "cboss_results.npz")["X_std"]
+    X_std_train = np.load(config_dir / f"{algo.get('family', 'cboss')}_results.npz")["X_std"]
     keep, n_scored, n_excluded = train_overlap_mask(oos["X"], X_std_train, max_rank)
 
     y = (oos["rse"] < feasible_rse).astype(int)

@@ -24,11 +24,13 @@ from typing import Any
 MABSS_POLICIES = ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4"]
 BOSS_POLICIES  = ["boss-ei", "boss-ucb"]
 CBOSS_POLICIES = ["cboss-cei", "cboss-pf", "cboss-ficr"]
+BESS_POLICIES  = ["bess-cucb", "bess-tmse", "bess-sur"]
 TNALE_POLICIES = ["tnale"]
 RANDOM_POLICIES = ["random"]
 
 POLICY_OPTIONS: list[str] = (
-    MABSS_POLICIES + BOSS_POLICIES + CBOSS_POLICIES + TNALE_POLICIES + RANDOM_POLICIES
+    MABSS_POLICIES + BOSS_POLICIES + CBOSS_POLICIES + BESS_POLICIES
+    + TNALE_POLICIES + RANDOM_POLICIES
 )
 
 
@@ -39,6 +41,8 @@ def policy_family(policy: str) -> str:
         return "boss"
     if policy in CBOSS_POLICIES:
         return "cboss"
+    if policy in BESS_POLICIES:
+        return "bess"
     if policy in TNALE_POLICIES:
         return "tnale"
     if policy in RANDOM_POLICIES:
@@ -186,6 +190,40 @@ class CBOSSConfig(AlgoConfig):
 
 
 # ---------------------------------------------------------------------------
+# BESS (boundary / level-set estimation) — learns the feasibility boundary
+# instead of optimizing CR. Reuses cBOSS's feasibility-GP surrogate, so its
+# surrogate fields mirror the cboss_* ones (bess_* here).
+# ---------------------------------------------------------------------------
+
+@dataclass(kw_only=True)
+class BESSConfig(AlgoConfig):
+    family: str = "bess"
+
+    # Acquisition (the contour finder is selected by policy: bess-cucb/tmse/sur).
+    bess_cucb_gamma_mode: str = "constant"  # 'constant' | 'adaptive' (paper §3.2)
+    bess_cucb_gamma: float = 1.96           # straddle constant (constant mode)
+    bess_tmse_eps: float = 0.05             # tmse boundary band half-width (latent)
+    bess_sur_obs_noise: float = 1.0         # sur probit implicit observation noise τ²
+    bess_sur_ref_size: int = 512            # sur look-ahead reference points
+    bess_n_ref: int = 2048                  # reference design for the boundary-error E
+
+    # Feasibility GP surrogate (same surrogate as cBOSS; kernel/mean/input_warp
+    # are shared base fields).
+    bess_var_strategy: str = "whitened"     # whitened | unwhitened
+    bess_wsp_mode: str = "matern"           # only for the wsp kernel
+    bess_gp_epochs: int = 400               # full fit at init
+    # (refresh cadence is the shared base field `freq_update`)
+    bess_gp_refine_epochs: int = 60
+    bess_gp_tol: float = 1e-4
+    bess_gp_patience: int = 10
+    bess_gp_reset_every: int = 0            # 0 = never hard-reset
+
+    # Acquisition optimizer (discrete local search)
+    bess_raw_samples: int = 256
+    bess_num_restarts: int = 10
+
+
+# ---------------------------------------------------------------------------
 # TnALE
 # ---------------------------------------------------------------------------
 
@@ -231,6 +269,7 @@ _CONFIG_CLS = {
     "mabss": MABSSConfig,
     "boss":  BOSSConfig,
     "cboss": CBOSSConfig,
+    "bess":  BESSConfig,
     "tnale": TnALEConfig,
     "random": RandomSearchConfig,
 }

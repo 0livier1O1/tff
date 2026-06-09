@@ -32,7 +32,7 @@ from app.plotting import figures
 from app.plotting.traces import load_traces
 from app.problem_io import load_problem
 from app.orchestration.rename_label import rename_config_label
-from app.orchestration.purge import purge_configs
+from app.orchestration.purge import purge_configs, move_to_trash
 from app.analysis.extend import order_columns, render_problem_seed_tabs
 from app.analysis.results_summary import render_results_summary, render_seed_performance
 
@@ -438,10 +438,13 @@ def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None
                     st.plotly_chart(figures.rse_distributions(rse, cr, thr),
                                     width="stretch", key=f"rdist_{seed}_{lab}")
             with t_fit:
-                st.caption("GP-fitting procedure — optimizer per refit and "
-                           "marginal-likelihood convergence. Secondary diagnostic.")
+                st.caption("Fitting health — the objective GP is reconstructed from the "
+                           "run's saved surrogate (left bars: which steps re-optimised "
+                           "hypers vs reused them frozen); the log-RSE GP is a re-fit probe "
+                           "(optimizer per fit). Right: per-point marginal log-likelihood.")
                 st.plotly_chart(figures.fit_report(do, dr), width="stretch",
                                 key=f"fit_{seed}_{lab}")
+            _render_gp_states_cleanse(runs_dir, cd, seed, lab)
 
 
 # ---------------------------------------------------------------------------
@@ -515,28 +518,30 @@ def _render_debug_instance(repo_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# cBOSS diagnostics — replay-based feasibility classifier scored on a shared OOS
-# set (see app/analysis/cboss_diagnostics.py). Compact side-by-side plotly, no tabs.
+# Feasibility-classifier diagnostics — replay-based, scored on a shared OOS set
+# (see app/analysis/cboss_diagnostics.py). Shared by cBOSS and BESS: both wrap the
+# same FeasibilityGP, so the replay/OOS grid is identical. Compact side-by-side
+# plotly, no tabs.
 # ---------------------------------------------------------------------------
 
 def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
-    """Feasibility-classifier diagnostics for the cBOSS configs at one seed. The
-    expensive part (replay + OOS decomposition) runs once per config behind a
-    Generate button; the computed data is cached under analysis/cboss/."""
-    cboss = (sdf[sdf["family"] == "cboss"][["run", "config_id", "label", "policy"]]
-             .drop_duplicates())
-    for r in cboss.itertuples(index=False):
+    """Feasibility-classifier diagnostics for the cBOSS/BESS configs at one seed.
+    The expensive part (replay + OOS decomposition) runs once per config behind a
+    Generate button; the computed data is cached under analysis/<family>/."""
+    configs = (sdf[sdf["family"].isin(["cboss", "bess"])]
+               [["run", "config_id", "label", "policy", "family"]].drop_duplicates())
+    for r in configs.itertuples(index=False):
         lab = r.label
         cd = (runs_dir / r.run / f"seed_{seed}"
               / f"{r.config_id}_{r.policy.replace('-', '_')}")
         with st.expander(f"**{lab}**  ·  `{r.policy}`", expanded=False):
-            if not (cd / "cboss_results.npz").exists():
-                st.caption("No cBOSS artifacts found for this result.")
+            if not (cd / f"{r.family}_results.npz").exists():
+                st.caption("No feasibility-GP artifacts found for this result.")
                 continue
             if not has_cboss_diagnostics(cd):
                 if not st.button("Generate Diagnostics", key=f"gen_cboss_{seed}_{lab}",
                                  help="Replay the feasibility GP step by step and score "
-                                      "each refit on a shared 500-structure OOS set "
+                                      "each refit on a shared 1000-structure CR-stratified OOS set "
                                       "(decomposed once with the run's settings). Cached."):
                     st.caption("Not generated yet.")
                     continue
@@ -544,6 +549,37 @@ def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> N
                                 f"(first run decomposes the OOS set, ~minutes)…"):
                     generate_cboss_diagnostics(cd)
             _render_cboss_plots(cd, seed, lab)
+            _render_gp_states_cleanse(runs_dir, cd, seed, lab)
+
+
+def _render_gp_states_cleanse(runs_dir: Path, cd: Path, seed: int, lab: str) -> None:
+    """Reclaim space by moving this config's ``gp_states.pt`` (the live surrogate
+    snapshots — tens of MB) out of the run, *after* its diagnostics are cached.
+
+    Safe by construction: it's behind a popover that needs an explicit confirm (no
+    stray-click deletes), and it *moves* rather than deletes — into the same
+    ``artifacts/trash/<timestamp>/…`` the 'Delete results' button uses (via
+    :func:`~app.orchestration.purge.move_to_trash`), for you to remove manually. The
+    cached diagnostics keep rendering from disk; only *regenerating* them (which needs
+    the snapshots) becomes unavailable without re-running the experiment."""
+    gp = cd / "gp_states.pt"
+    if not gp.exists():
+        return
+    repo_root = runs_dir.parent.parent                 # artifacts/runs -> repo root
+    mb = gp.stat().st_size / 1048576
+    with st.popover(f":material/delete: Cleanse GP states ({mb:.0f} MB)",
+                    help="Move gp_states.pt to the trash folder to free space."):
+        st.caption(
+            f"Move **gp_states.pt** ({mb:.0f} MB) to `artifacts/trash/` to free space. "
+            "It is **moved, not deleted** — remove it from the trash yourself once you're "
+            "sure. The diagnostics above are already cached and keep working; you just "
+            "won't be able to *regenerate* them without re-running the experiment.")
+        if st.button("Confirm — move to trash", type="primary",
+                     key=f"cleanse_gp_{seed}_{lab}"):
+            dest = move_to_trash(repo_root, gp)
+            st.toast(f"Moved gp_states.pt ({mb:.0f} MB) → "
+                     f"{dest.relative_to(repo_root)}", icon="🗑")
+            st.rerun()
 
 
 def _render_cboss_plots(cd: Path, seed: int, lab: str) -> None:
@@ -607,11 +643,17 @@ def _render_cboss_figure_grid(metrics, ev, acq, meta: dict, seed: int, lab: str)
                    "the diagnostics below may not reflect the actual surrogate.")
     probas = {"post-init": ev["p_post"], "final": ev["p_final"]}
 
+    # BO steps at which the GP was hard-reset (fresh full fit) — overlaid as dashed
+    # verticals on every step-indexed panel so resets line up across them. Absent in
+    # caches that predate reset recording.
+    reset_steps = (ev["gp_step"][np.isin(ev["gp_phase"], ["reset", "error-reset"])]
+                   if "gp_step" in ev.files else [])
+
     a = st.columns(2)
     with a[0]:
         st.caption("OOS classifier quality per refit")
         st.plotly_chart(cf.oos_metrics_vs_step(metrics["step"], metrics["accuracy"],
-                                               metrics["roc_auc"]),
+                                               metrics["roc_auc"], reset_steps=reset_steps),
                         width="stretch", key=f"cb_oosm_{seed}_{lab}")
     with a[1]:
         st.caption("ROC on OOS — post-init vs final GP")
@@ -633,7 +675,8 @@ def _render_cboss_figure_grid(metrics, ev, acq, meta: dict, seed: int, lab: str)
     with c[0]:
         st.caption("Acquisition value + feasibility belief at the chosen candidate")
         st.plotly_chart(cf.acqf_value_trace(acq["steps"], acq["acqf_value"], acq["pf_pred"],
-                                            acq["feasible"], acq["acqf_used"]),
+                                            acq["feasible"], acq["acqf_used"],
+                                            reset_steps=reset_steps),
                         width="stretch", key=f"cb_acq_{seed}_{lab}")
     with c[1]:
         if ev["ls"].size:
@@ -647,7 +690,8 @@ def _render_cboss_figure_grid(metrics, ev, acq, meta: dict, seed: int, lab: str)
     with d[0]:
         if ev["proba_gen"].size:
             st.caption("Feasibility belief about the generating (ground-truth) structure")
-            st.plotly_chart(cf.generating_feasibility(ev["ls_steps"], ev["proba_gen"]),
+            st.plotly_chart(cf.generating_feasibility(ev["ls_steps"], ev["proba_gen"],
+                                                      reset_steps=reset_steps),
                             width="stretch", key=f"cb_gen_{seed}_{lab}")
         else:
             st.caption("Generating structure unavailable (non-synthetic problem).")
@@ -659,14 +703,15 @@ def _render_cboss_figure_grid(metrics, ev, acq, meta: dict, seed: int, lab: str)
 
     if meta["acqf"] == "ficr" and np.isfinite(acq["infeasible_frac"]).any():
         st.caption("ficr interpolation weights")
-        st.plotly_chart(cf.ficr_weights(acq["steps"], acq["infeasible_frac"], meta["ficr_t"]),
+        st.plotly_chart(cf.ficr_weights(acq["steps"], acq["infeasible_frac"], meta["ficr_t"],
+                                        reset_steps=reset_steps),
                         width="stretch", key=f"cb_ficr_{seed}_{lab}")
 
     if ev["ls_evol"].size:
         st.caption("ARD lengthscale evolution across refits (flat over steps — cBOSS "
                    "freezes kernel hypers after the init fit; bands show per-edge importance)")
         st.plotly_chart(cf.lengthscale_heatmap(ev["ls_evol"], cf.edge_labels(meta["n_cores"]),
-                                               ev["ls_steps"]),
+                                               ev["ls_steps"], reset_steps=reset_steps),
                         width="stretch", key=f"cb_lsh_{seed}_{lab}")
 
     variables = [(ev["cr"], "CR", "log"),

@@ -17,6 +17,7 @@ from sklearn.metrics import roc_curve, roc_auc_score
 
 # colourblind-friendly: feasible = blue, infeasible = vermillion (as the old figures)
 COLOR = {1: "#0072B2", 0: "#D55E00"}
+RESET_COLOR = "#6a3d9a"   # hard-reset markers (purple — distinct from the data colours)
 _HEIGHT = 320
 _LEGEND = dict(orientation="v", x=1.01, xanchor="left", y=1.0, yanchor="top",
                font=dict(size=10))
@@ -34,11 +35,32 @@ def _base_layout(fig: go.Figure, height: int = _HEIGHT, **kw) -> go.Figure:
     return fig
 
 
+def add_reset_markers(fig: go.Figure, reset_steps) -> go.Figure:
+    """Overlay dashed verticals at the BO steps where the GP was hard-reset (a fresh
+    full fit from scratch — periodic schedule or the consecutive-error backstop).
+    Shared by every step-indexed diagnostic so resets line up across panels. On a
+    subplot figure the lines span all rows; a single legend proxy labels them."""
+    rs = np.unique(np.asarray(reset_steps, float))
+    rs = rs[np.isfinite(rs)]
+    if rs.size == 0:
+        return fig
+    for s in rs:
+        fig.add_vline(x=float(s), line_dash="dash", line_color=RESET_COLOR,
+                      line_width=1, opacity=0.55)
+    proxy = go.Scatter(x=[None], y=[None], mode="lines", name="hard reset",
+                       line=dict(color=RESET_COLOR, dash="dash", width=1))
+    if getattr(fig, "_grid_ref", None) is not None:
+        fig.add_trace(proxy, row=1, col=1)
+    else:
+        fig.add_trace(proxy)
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # OOS metrics
 # ---------------------------------------------------------------------------
 
-def oos_metrics_vs_step(steps, accuracy, roc_auc) -> go.Figure:
+def oos_metrics_vs_step(steps, accuracy, roc_auc, reset_steps=()) -> go.Figure:
     """Accuracy and ROC-AUC of each replayed GP refit, scored on the OOS set,
     against BO step. Both metrics share the [0,1] axis."""
     fig = go.Figure()
@@ -49,6 +71,7 @@ def oos_metrics_vs_step(steps, accuracy, roc_auc) -> go.Figure:
     fig.add_hline(y=0.5, line_dash="dot", line_color="#999")
     fig.update_xaxes(title_text="BO step", rangemode="tozero")
     fig.update_yaxes(title_text="OOS score", rangemode="tozero")
+    add_reset_markers(fig, reset_steps)
     return _base_layout(fig)
 
 
@@ -141,7 +164,7 @@ def ard_lengthscales(ls, labels=None) -> go.Figure:
     return _base_layout(fig)
 
 
-def generating_feasibility(steps, proba_gen) -> go.Figure:
+def generating_feasibility(steps, proba_gen, reset_steps=()) -> go.Figure:
     """Surrogate's predicted P(feasible) for the generating (ground-truth)
     structure across refits. The generating structure is feasible by construction
     (it decomposes the target to ~0 RSE), so ideally this sits near 1 — a dip
@@ -151,6 +174,7 @@ def generating_feasibility(steps, proba_gen) -> go.Figure:
     fig.add_hline(y=0.5, line_dash="dash", line_color="#333")
     fig.update_xaxes(title_text="BO step (refit)")
     fig.update_yaxes(title_text="P(feasible) of generating structure", range=[-0.02, 1.02])
+    add_reset_markers(fig, reset_steps)
     return _base_layout(fig)
 
 
@@ -177,7 +201,7 @@ def signed_distance_vs_pf(rse, p, feasible_rse: float, y_true) -> go.Figure:
     return _base_layout(fig)
 
 
-def lengthscale_heatmap(L, labels, steps) -> go.Figure:
+def lengthscale_heatmap(L, labels, steps, reset_steps=()) -> go.Figure:
     """ARD lengthscale evolution across GP refits — `L` is (n_refits, D); rows
     (edges) differ, columns (steps) are flat when the kernel hypers are frozen
     after the init fit (as in cBOSS)."""
@@ -188,6 +212,7 @@ def lengthscale_heatmap(L, labels, steps) -> go.Figure:
                                colorbar=dict(title="lengthscale")))
     fig.update_xaxes(title_text="BO step (refit)")
     fig.update_yaxes(title_text="bond edge (i,j)")
+    add_reset_markers(fig, reset_steps)
     return _base_layout(fig)
 
 
@@ -270,7 +295,7 @@ def rse_distribution(rse, feasible_rse: float) -> go.Figure:
     return _base_layout(fig, barmode="overlay")
 
 
-def acqf_value_trace(steps, acqf_value, pf_pred, feasible, acqf_used) -> go.Figure:
+def acqf_value_trace(steps, acqf_value, pf_pred, feasible, acqf_used, reset_steps=()) -> go.Figure:
     """Two stacked panels — acquisition value and feasibility belief at the chosen
     candidate vs BO step, points coloured by realized feasibility; the cold-start
     seek-feasibility phase is shaded."""
@@ -297,13 +322,14 @@ def acqf_value_trace(steps, acqf_value, pf_pred, feasible, acqf_used) -> go.Figu
     for s in steps[seek]:
         fig.add_vrect(x0=s - 0.5, x1=s + 0.5, fillcolor="grey", opacity=0.12,
                       line_width=0)
+    add_reset_markers(fig, reset_steps)   # dashed verticals span both panels
     fig.update_yaxes(title_text="acquisition value", row=1, col=1)
     fig.update_yaxes(title_text="P(feasible)", range=[-0.02, 1.02], row=2, col=1)
     fig.update_xaxes(title_text="BO step", row=2, col=1)
     return _base_layout(fig, height=440)
 
 
-def ficr_weights(steps, c, t: float) -> go.Figure:
+def ficr_weights(steps, c, t: float, reset_steps=()) -> go.Figure:
     """`ficr` interpolation weights vs BO step: feasibility weight c·t and the
     complementary UCB weight, with the infeasible fraction c."""
     steps = np.asarray(steps, float)
@@ -318,4 +344,5 @@ def ficr_weights(steps, c, t: float) -> go.Figure:
                              name="UCB weight 1−c·t", line=dict(color=COLOR[0])))
     fig.update_xaxes(title_text="BO step")
     fig.update_yaxes(title_text="weight", range=[-0.02, 1.05])
+    add_reset_markers(fig, reset_steps)
     return _base_layout(fig)

@@ -20,11 +20,12 @@ import torch
 
 from tnss.algo.boss.boss import BOSS
 from tnss.algo.cboss import CBOSS
+from tnss.algo.bess import BESS
 from tnss.algo.tnale import TnALE
 from tnss.algo.random_search import RandomSearch
 
 
-SINGLE_OBJECT_FAMILIES = ("boss", "cboss", "tnale", "random")
+SINGLE_OBJECT_FAMILIES = ("boss", "cboss", "bess", "tnale", "random")
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,26 @@ def _build_cboss(acfg, adj_np, target_np, seed):
         gp_patience=acfg.cboss_gp_patience, gp_reset_every=acfg.cboss_gp_reset_every,
         mc_samples=acfg.cboss_mc_samples,
         raw_samples=acfg.cboss_raw_samples, num_restarts=acfg.cboss_num_restarts,
+        seed=seed, verbose=True, **_decomp_kwargs(acfg),
+    )
+
+
+def _build_bess(acfg, adj_np, target_np, seed):
+    return BESS(
+        _target_torch(target_np),
+        budget=acfg.budget, n_init=acfg.n_init, init_design=acfg.init_method,
+        cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
+        max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
+        n_runs=acfg.n_runs, lamda=acfg.lambda_fitness, acqf=_acqf(acfg),
+        cucb_gamma_mode=acfg.bess_cucb_gamma_mode, cucb_gamma=acfg.bess_cucb_gamma,
+        tmse_eps=acfg.bess_tmse_eps, sur_obs_noise=acfg.bess_sur_obs_noise,
+        sur_ref_size=acfg.bess_sur_ref_size, n_ref=acfg.bess_n_ref,
+        kernel=acfg.kernel, mean=acfg.mean, var_strategy=acfg.bess_var_strategy,
+        wsp_mode=acfg.bess_wsp_mode, input_warp=acfg.input_warp,
+        gp_epochs=acfg.bess_gp_epochs, freq_update=acfg.freq_update,
+        gp_refine_epochs=acfg.bess_gp_refine_epochs, gp_tol=acfg.bess_gp_tol,
+        gp_patience=acfg.bess_gp_patience, gp_reset_every=acfg.bess_gp_reset_every,
+        raw_samples=acfg.bess_raw_samples, num_restarts=acfg.bess_num_restarts,
         seed=seed, verbose=True, **_decomp_kwargs(acfg),
     )
 
@@ -157,11 +178,12 @@ def _save_none(algo, out_dir: Path, acfg):
 # ---------------------------------------------------------------------------
 
 _BUILDERS: dict[str, Callable] = {
-    "boss": _build_boss, "cboss": _build_cboss,
+    "boss": _build_boss, "cboss": _build_cboss, "bess": _build_bess,
     "tnale": _build_tnale, "random": _build_random,
 }
 _SAVERS: dict[str, Callable] = {
     "boss": _save_bo("boss_results.npz"), "cboss": _save_bo("cboss_results.npz"),
+    "bess": _save_bo("bess_results.npz"),
     "tnale": _save_none, "random": _save_random,
 }
 
