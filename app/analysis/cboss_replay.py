@@ -25,6 +25,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from tnss.algo.bess.acquisitions import _latent_moments
 from tnss.algo.cboss.feasibility import FeasibilityGP
 
 
@@ -35,6 +36,7 @@ class ReplayResult:
     pf_replay: np.ndarray            # (budget,) one-step-ahead P(feasible) at each candidate
     post_init_proba_oos: np.ndarray  # (n_oos,) P(feasible) on OOS, post-init GP
     final_proba_oos: np.ndarray      # (n_oos,) P(feasible) on OOS, final GP
+    final_sigma_oos: np.ndarray      # (n_oos,) latent posterior std (uncertainty) on OOS, final GP
     final_lengthscales: np.ndarray | None  # (D,) ARD lengthscales of the final GP, or None
     lengthscales: np.ndarray         # (n_refits, D) ARD lengthscales per refit (empty if none)
     proba_gen: np.ndarray            # (n_refits,) P(feasible) of the generating structure, or empty
@@ -165,12 +167,17 @@ def replay(config_dir, algo: dict, target, oos_X: np.ndarray,
                 f"surrogate's training prefix [0,{k - 1}] (snapshot step {g['step']})")
             pf_replay[idx] = float(gp.proba(Xt[cand_i:cand_i + 1]).item())
 
+    # Latent posterior std (the classifier's predictive uncertainty, pre-link) of the
+    # final surrogate on the OOS set — `gp` holds the last reconstructed snapshot.
+    final_sigma = _latent_moments(gp, oos_std)[1].detach().numpy()
+
     return ReplayResult(
         steps=np.array(steps, dtype=int),
         proba_oos=np.array(proba_oos) if proba_oos else np.empty((0, len(oos_X))),
         pf_replay=pf_replay,
         post_init_proba_oos=post_init,
         final_proba_oos=final_oos if final_oos is not None else post_init,
+        final_sigma_oos=final_sigma,
         final_lengthscales=_lengthscales_from_sd(snaps[-1]["state_dict"]),
         lengthscales=np.array(ls_snaps) if ls_snaps else np.empty((0, 0)),
         proba_gen=np.array(proba_gen) if proba_gen else np.empty(0),

@@ -474,6 +474,29 @@ def gp_parity(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
     return fig
 
 
+def gp_parity_multi(series, lab: str = "objective") -> go.Figure:
+    """One-step-ahead parity overlay — GP-predicted vs actual, one colour per algo,
+    with the y = x line and each algo's Spearman ρ in the legend. `series` is a list
+    of ``(label, y_actual, mu)``."""
+    palette = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9"]
+    allv = np.concatenate([np.concatenate([np.asarray(y), np.asarray(mu)])
+                           for _, y, mu in series])
+    lo, hi = float(allv.min()), float(allv.max())
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", showlegend=False,
+                             hoverinfo="skip", line=dict(color="#999", dash="dash")))
+    for (label, y, mu), color in zip(series, palette):
+        rho = spearmanr(y, mu)[0]
+        fig.add_trace(go.Scatter(x=np.asarray(y), y=np.asarray(mu), mode="markers",
+                                 marker=dict(color=color, size=5),
+                                 name=f"{label} (ρ={rho:.3f})"))
+    fig.update_xaxes(title_text=f"actual {lab}")
+    fig.update_yaxes(title_text=f"predicted {lab}", showgrid=False)
+    fig.update_layout(template="plotly_white", height=_HEIGHT,
+                      margin=dict(l=0, r=0, t=30, b=0), legend=_LEGEND)
+    return fig
+
+
 def rse_distributions(rse, cr, threshold=None) -> go.Figure:
     """RSE landscape — RSE and log-RSE histograms, plus log-RSE against CR.
     Shows whether log(RSE) has the dynamic range to be modelled, and whether

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -320,8 +321,8 @@ def _render_problem_descriptions(
 # ---------------------------------------------------------------------------
 
 def _render_diagnostics(repo_root: Path) -> None:
-    """One tab per seed among the selected results: the convergence trace plus
-    the (cached) BOSS GP-surrogate diagnostics."""
+    """One tab per seed among the selected results, each split into Performance,
+    Decomposition (per-config decomposition-loss curves), and Surrogate diagnostics."""
     keys = st.session_state.get("selected_result_keys", [])
     if not keys:
         st.info("Select one or more completed results in the table above.")
@@ -337,18 +338,101 @@ def _render_diagnostics(repo_root: Path) -> None:
     for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
         with tab:
             sdf = df[df["seed"] == seed]
-            perf_tab, surr_tab = st.tabs(["Performance", "Surrogate diagnostics"])
+            perf_tab, decomp_tab, surr_tab = st.tabs(
+                ["Performance", "Decomposition", "Surrogate diagnostics"])
             with perf_tab:
                 render_seed_performance(repo_root, keys, int(seed))
+            with decomp_tab:
+                _render_decomp_traces(runs_dir, sdf, int(seed))
             with surr_tab:
+                _render_diag_generate_all(runs_dir, sdf, int(seed))
                 _render_gp_diagnostics(runs_dir, sdf, int(seed))
                 _render_cboss_diagnostics(runs_dir, sdf, int(seed))
 
 
+def _render_decomp_traces(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
+    """Tensor-decomposition loss curves for one chosen config at this seed — one line
+    per evaluation, shaded darker for later search steps. Every family writes
+    ``decomp_traces.json``, so a dropdown picks which algorithm to show."""
+    configs = sdf[["run", "config_id", "label", "policy"]].drop_duplicates()
+    avail = []
+    for r in configs.itertuples(index=False):
+        cd = (runs_dir / r.run / f"seed_{seed}"
+              / f"{r.config_id}_{r.policy.replace('-', '_')}")
+        if (cd / "decomp_traces.json").exists():
+            avail.append((f"{r.label}  ·  {r.policy}", cd))
+    if not avail:
+        st.info("No decomposition traces found for the selected results.")
+        return
+
+    labels = [lab for lab, _ in avail]
+    pick = st.selectbox("Algorithm", labels, key=f"decomp_algo_{seed}")
+    cd = dict(avail)[pick]
+
+    with open(cd / "decomp_traces.json") as f:
+        decomp_traces = json.load(f)
+    tr = pd.read_csv(cd / "traces.csv")
+    cr_by_step = {int(s): float(c) for s, c in zip(tr["step"], tr["cr"])}
+    log_y = st.toggle("Log scale", key=f"decomp_log_{seed}",
+                      help="Plot decomposition loss on a log y-axis.")
+    st.caption("Decomposition loss per evaluation — darker = later step.")
+    st.plotly_chart(figures.decomp_loss_curves(decomp_traces, cr_by_step, log_y=log_y),
+                    width="stretch", key=f"decomp_{seed}")
+
+
+def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> list[tuple]:
+    """Every selected config at this seed whose surrogate diagnostics aren't cached yet,
+    as ``(kind, config_dir, label)`` — ``kind`` is 'boss' (objective/RSE GP refit) or
+    'feas' (cBOSS/BESS replay + OOS scoring)."""
+    out: list[tuple] = []
+    boss = (sdf[sdf["family"] == "boss"][["run", "config_id", "label", "policy"]]
+            .drop_duplicates())
+    for r in boss.itertuples(index=False):
+        cd = (runs_dir / r.run / f"seed_{seed}"
+              / f"{r.config_id}_{r.policy.replace('-', '_')}")
+        if not has_gp_diagnostics(cd):
+            out.append(("boss", cd, r.label))
+    feas = (sdf[sdf["family"].isin(["cboss", "bess"])]
+            [["run", "config_id", "label", "policy", "family"]].drop_duplicates())
+    for r in feas.itertuples(index=False):
+        cd = (runs_dir / r.run / f"seed_{seed}"
+              / f"{r.config_id}_{r.policy.replace('-', '_')}")
+        if (cd / f"{r.family}_results.npz").exists() and not has_cboss_diagnostics(cd):
+            out.append(("feas", cd, r.label))
+    return out
+
+
+def _render_diag_generate_all(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
+    """One button that generates surrogate diagnostics for *every* not-yet-cached config
+    at this seed (BOSS objective/RSE refit + cBOSS/BESS replay/OOS), in sequence, behind
+    a single progress bar. Replaces the per-config Generate buttons."""
+    pending = _pending_diagnostics(runs_dir, sdf, seed)
+    if not pending:
+        return
+    n = len(pending)
+    if not st.button(f":material/play_arrow: Generate diagnostics — {n} config(s)",
+                     type="primary", key=f"gen_all_{seed}",
+                     help="One-step-ahead replay + OOS scoring for every BOSS / cBOSS / "
+                          "BESS config at this seed that isn't cached yet. Runs once "
+                          "(cBOSS/BESS decompose the shared OOS set on first use), cached."):
+        st.caption(f"{n} config(s) not generated yet — click to build them all.")
+        return
+    bar = st.progress(0.0, text="Generating diagnostics…")
+    for i, (kind, cd, lab) in enumerate(pending):
+        if kind == "boss":
+            generate_gp_diagnostics(cd, progress=lambda f, i=i, lab=lab: bar.progress(
+                (i + f) / n, text=f"GP refit — {lab}  ({(i + f) / n:.0%})"))
+        else:
+            bar.progress(i / n, text=f"Replay + OOS — {lab}  (decomposes OOS on first use)")
+            generate_cboss_diagnostics(cd)
+    bar.empty()
+    st.rerun()
+
+
 def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
-    """GP-surrogate diagnostics for the BOSS configs at one seed. Each config has
-    its own Generate button — the expensive one-step-ahead refit runs once, is
-    cached under that config's `analysis/` folder, and reloaded for the plots."""
+    """GP-surrogate diagnostics for the BOSS configs at one seed, merged across configs.
+    Generation is driven by the single seed-level Generate button (see
+    :func:`_render_diag_generate_all`); this only renders already-cached configs."""
     boss = (sdf[sdf["family"] == "boss"][["run", "config_id", "label", "policy"]]
             .drop_duplicates())
     if boss.empty:
@@ -358,93 +442,99 @@ def _render_gp_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None
     # RSE-distribution panels (None until that tab has rendered its controls).
     thr = st.session_state.get("loss_threshold")
 
-    # One collapsible section per BOSS config — its own Generate button, plots
-    # cached. The st.progress bar fills as the refit reports its 0–1 fraction.
-    for r in boss.itertuples(index=False):
-        lab = r.label
-        cd = (runs_dir / r.run / f"seed_{seed}"
-              / f"{r.config_id}_{r.policy.replace('-', '_')}")
-        with st.expander(f"**{lab}**  ·  `{r.policy}`", expanded=False):
-            dt_path = cd / "decomp_traces.json"
-            if dt_path.exists():
-                st.caption("Decomposition loss per evaluation — darker = later step.")
-                with open(dt_path) as f:
-                    decomp_traces = json.load(f)
-                tr = pd.read_csv(cd / "traces.csv")
-                cr_by_step = {int(s): float(c) for s, c in zip(tr["step"], tr["cr"])}
-                dcol, _ = st.columns(2)
-                with dcol:
-                    log_y = st.toggle("Log scale", key=f"decomp_log_{seed}_{lab}",
-                                      help="Plot decomposition loss on a log y-axis.")
-                    st.plotly_chart(
-                        figures.decomp_loss_curves(decomp_traces, cr_by_step,
-                                                   log_y=log_y),
-                        width="stretch", key=f"decomp_{seed}_{lab}")
-            else:
-                st.caption("No decomposition traces saved for this result.")
-
+    with st.expander("Regular models", expanded=False):
+        algos: list[SimpleNamespace] = []
+        for r in boss.itertuples(index=False):
+            cd = (runs_dir / r.run / f"seed_{seed}"
+                  / f"{r.config_id}_{r.policy.replace('-', '_')}")
             if not has_gp_diagnostics(cd):
-                if not st.button("Generate Diagnostics", key=f"gen_{seed}_{lab}",
-                                 help="One-step-ahead GP refit (objective + RSE) — "
-                                      "expensive; runs once, then cached to disk."):
-                    st.caption("Not generated yet.")
-                    continue
-                bar = st.progress(0.0, text=f"Generating — {lab}  (0%)")
-                generate_gp_diagnostics(cd, progress=lambda f, b=bar, l=lab: b.progress(
-                    f, text=f"Generating — {l}  ({f:.0%})"))
-                bar.empty()
+                continue
+            algos.append(SimpleNamespace(
+                label=r.label, policy=r.policy, cd=cd,
+                do=load_gp_diagnostics(cd, "objective"), dr=load_gp_diagnostics(cd, "rse"),
+                rse_cr=load_rse_cr(cd)))
 
-            do = load_gp_diagnostics(cd, "objective")
-            dr = load_gp_diagnostics(cd, "rse")
-            rse, cr = load_rse_cr(cd)
+        if not algos:
+            st.caption("Not generated yet — use the **Generate diagnostics** button above.")
+            return
 
-            t_obj, t_rse, t_fit = st.tabs(["Objectives", "RSE", "Fitting"])
-            with t_obj:
-                oc1 = st.columns(2)
-                with oc1[0]:
-                    st.caption("one-step-ahead calibration")
-                    st.plotly_chart(figures.gp_calibration(do), width="stretch",
-                                    key=f"ocal_{seed}_{lab}")
-                with oc1[1]:
-                    st.caption("hyperparameter trajectories")
-                    st.plotly_chart(figures.gp_hyperparameters(do), width="stretch",
-                                    key=f"ohyp_{seed}_{lab}")
-                oc2 = st.columns(2)
-                with oc2[0]:
-                    st.caption("predicted vs actual")
-                    st.plotly_chart(figures.gp_parity(do), width="stretch",
-                                    key=f"opar_{seed}_{lab}")
-                with oc2[1]:
-                    st.caption("acquisition behaviour")
-                    st.plotly_chart(figures.gp_acquisition(do), width="stretch",
-                                    key=f"oacq_{seed}_{lab}")
-            with t_rse:
-                rc1 = st.columns(2)
-                with rc1[0]:
-                    st.caption("one-step-ahead calibration")
-                    st.plotly_chart(figures.gp_calibration(dr, "log RSE"), width="stretch",
-                                    key=f"rcal_{seed}_{lab}")
-                with rc1[1]:
-                    st.caption("hyperparameter trajectories")
-                    st.plotly_chart(figures.gp_hyperparameters(dr), width="stretch",
-                                    key=f"rhyp_{seed}_{lab}")
-                rc2 = st.columns(2)
-                with rc2[0]:
-                    st.caption("predicted vs actual")
-                    st.plotly_chart(figures.gp_parity(dr, "log RSE"), width="stretch",
-                                    key=f"rpar_{seed}_{lab}")
-                with rc2[1]:
-                    st.caption("RSE distribution")
-                    st.plotly_chart(figures.rse_distributions(rse, cr, thr),
-                                    width="stretch", key=f"rdist_{seed}_{lab}")
-            with t_fit:
-                st.caption("Fitting health — the objective GP is reconstructed from the "
-                           "run's saved surrogate (left bars: which steps re-optimised "
-                           "hypers vs reused them frozen); the log-RSE GP is a re-fit probe "
-                           "(optimizer per fit). Right: per-point marginal log-likelihood.")
-                st.plotly_chart(figures.fit_report(do, dr), width="stretch",
-                                key=f"fit_{seed}_{lab}")
-            _render_gp_states_cleanse(runs_dir, cd, seed, lab)
+        # Merged objective comparisons — one colour per algo, half width each.
+        r1 = st.columns(2)
+        with r1[0]:
+            st.caption("Objective one-step-ahead parity (predicted vs actual)")
+            st.plotly_chart(figures.gp_parity_multi(
+                [(a.label, a.do["y"], a.do["mu"]) for a in algos]),
+                width="stretch", key=f"o_par_{seed}")
+        with r1[1]:
+            st.caption("Calibration residual z = (y−μ)/σ — honest uncertainty ≈ within ±2")
+            st.plotly_chart(cf.multi_line(
+                [(a.label, a.do["k"], (a.do["y"] - a.do["mu"]) / a.do["sd"]) for a in algos],
+                "z = (y−μ)/σ", hline=0.0),
+                width="stretch", key=f"o_z_{seed}")
+        r2 = st.columns(2)
+        with r2[0]:
+            st.caption("log-EI at the chosen point (declining = search maturing)")
+            st.plotly_chart(cf.multi_line(
+                [(a.label, a.do["k"], a.do["lei"]) for a in algos], "log-EI at pick"),
+                width="stretch", key=f"o_lei_{seed}")
+        with r2[1]:
+            st.caption("GP σ at the chosen point (explore ↔ exploit)")
+            st.plotly_chart(cf.multi_line(
+                [(a.label, a.do["k"], a.do["sd"]) for a in algos], "GP σ at pick"),
+                width="stretch", key=f"o_sd_{seed}")
+
+        # Per-algo detail — tabs (the section is an expander; expanders can't nest).
+        st.markdown("###### Per-algorithm detail")
+        for tab, (i, a) in zip(st.tabs([f"{a.label} · {a.policy}" for a in algos]),
+                               enumerate(algos)):
+            with tab:
+                _render_boss_detail(a, thr, seed, i)
+
+        # One cleanse action for every config's gp_states.pt on this page.
+        _render_gp_states_cleanse(runs_dir, [a.cd for a in algos], seed, "boss")
+
+
+def _render_boss_detail(a: SimpleNamespace, thr, seed: int, i: int) -> None:
+    """Full per-config BOSS GP diagnostics (objective + RSE + fitting), half width."""
+    do, dr = a.do, a.dr
+    rse, cr = a.rse_cr
+    t_obj, t_rse, t_fit = st.tabs(["Objectives", "RSE", "Fitting"])
+    with t_obj:
+        oc1 = st.columns(2)
+        with oc1[0]:
+            st.caption("one-step-ahead calibration")
+            st.plotly_chart(figures.gp_calibration(do), width="stretch", key=f"ocal_{seed}_{i}")
+        with oc1[1]:
+            st.caption("hyperparameter trajectories")
+            st.plotly_chart(figures.gp_hyperparameters(do), width="stretch", key=f"ohyp_{seed}_{i}")
+        oc2 = st.columns(2)
+        with oc2[0]:
+            st.caption("predicted vs actual")
+            st.plotly_chart(figures.gp_parity(do), width="stretch", key=f"opar_{seed}_{i}")
+        with oc2[1]:
+            st.caption("acquisition behaviour")
+            st.plotly_chart(figures.gp_acquisition(do), width="stretch", key=f"oacq_{seed}_{i}")
+    with t_rse:
+        rc1 = st.columns(2)
+        with rc1[0]:
+            st.caption("one-step-ahead calibration")
+            st.plotly_chart(figures.gp_calibration(dr, "log RSE"), width="stretch", key=f"rcal_{seed}_{i}")
+        with rc1[1]:
+            st.caption("hyperparameter trajectories")
+            st.plotly_chart(figures.gp_hyperparameters(dr), width="stretch", key=f"rhyp_{seed}_{i}")
+        rc2 = st.columns(2)
+        with rc2[0]:
+            st.caption("predicted vs actual")
+            st.plotly_chart(figures.gp_parity(dr, "log RSE"), width="stretch", key=f"rpar_{seed}_{i}")
+        with rc2[1]:
+            st.caption("RSE distribution")
+            st.plotly_chart(figures.rse_distributions(rse, cr, thr), width="stretch", key=f"rdist_{seed}_{i}")
+    with t_fit:
+        st.caption("Fitting health — the objective GP is reconstructed from the run's "
+                   "saved surrogate (left bars: which steps re-optimised hypers vs reused "
+                   "them frozen); the log-RSE GP is a re-fit probe (optimizer per fit). "
+                   "Right: per-point marginal log-likelihood.")
+        st.plotly_chart(figures.fit_report(do, dr), width="stretch", key=f"fit_{seed}_{i}")
 
 
 # ---------------------------------------------------------------------------
@@ -525,198 +615,205 @@ def _render_debug_instance(repo_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
-    """Feasibility-classifier diagnostics for the cBOSS/BESS configs at one seed.
-    The expensive part (replay + OOS decomposition) runs once per config behind a
-    Generate button; the computed data is cached under analysis/<family>/."""
+    """Single merged feasibility-classifier diagnostics page for *all* cBOSS/BESS
+    configs at one seed. Each config's expensive replay + OOS scoring runs once behind
+    its own Generate button (cached under analysis/<family>/); once generated, the
+    configs are compared on shared plots (one colour per algo), with per-algo surrogate
+    detail in expanders below."""
     configs = (sdf[sdf["family"].isin(["cboss", "bess"])]
                [["run", "config_id", "label", "policy", "family"]].drop_duplicates())
-    for r in configs.itertuples(index=False):
-        lab = r.label
-        cd = (runs_dir / r.run / f"seed_{seed}"
-              / f"{r.config_id}_{r.policy.replace('-', '_')}")
-        with st.expander(f"**{lab}**  ·  `{r.policy}`", expanded=False):
-            if not (cd / f"{r.family}_results.npz").exists():
-                st.caption("No feasibility-GP artifacts found for this result.")
+    if configs.empty:
+        return
+
+    with st.expander("Feasibility models", expanded=False):
+        algos: list[SimpleNamespace] = []
+        for r in configs.itertuples(index=False):
+            cd = (runs_dir / r.run / f"seed_{seed}"
+                  / f"{r.config_id}_{r.policy.replace('-', '_')}")
+            if not (cd / f"{r.family}_results.npz").exists() or not has_cboss_diagnostics(cd):
                 continue
-            if not has_cboss_diagnostics(cd):
-                if not st.button("Generate Diagnostics", key=f"gen_cboss_{seed}_{lab}",
-                                 help="Replay the feasibility GP step by step and score "
-                                      "each refit on a shared 1000-structure CR-stratified OOS set "
-                                      "(decomposed once with the run's settings). Cached."):
-                    st.caption("Not generated yet.")
-                    continue
-                with st.spinner(f"Replaying + scoring OOS — {lab}  "
-                                f"(first run decomposes the OOS set, ~minutes)…"):
-                    generate_cboss_diagnostics(cd)
-            _render_cboss_plots(cd, seed, lab)
-            _render_gp_states_cleanse(runs_dir, cd, seed, lab)
+            metrics, ev, acq, meta = load_cboss_diagnostics(cd)
+            algos.append(SimpleNamespace(label=r.label, policy=r.policy, family=r.family,
+                                         cd=cd, metrics=metrics, ev=ev, acq=acq, meta=meta))
+
+        if not algos:
+            st.caption("Not generated yet — use the **Generate diagnostics** button above.")
+            return
+        _render_feasibility_merged(runs_dir, algos, seed)
 
 
-def _render_gp_states_cleanse(runs_dir: Path, cd: Path, seed: int, lab: str) -> None:
-    """Reclaim space by moving this config's ``gp_states.pt`` (the live surrogate
-    snapshots — tens of MB) out of the run, *after* its diagnostics are cached.
+def _render_gp_states_cleanse(runs_dir: Path, cds: list[Path], seed: int, key: str) -> None:
+    """Reclaim space by moving **every** displayed config's ``gp_states.pt`` (the live
+    surrogate snapshots — tens of MB each, the only GP-related files) to trash in one
+    action, *after* the diagnostics are cached. The button shows the combined size.
 
-    Safe by construction: it's behind a popover that needs an explicit confirm (no
-    stray-click deletes), and it *moves* rather than deletes — into the same
+    Safe by construction: behind a popover that needs an explicit confirm (no stray-click
+    deletes), and it *moves* rather than deletes — into the same
     ``artifacts/trash/<timestamp>/…`` the 'Delete results' button uses (via
     :func:`~app.orchestration.purge.move_to_trash`), for you to remove manually. The
-    cached diagnostics keep rendering from disk; only *regenerating* them (which needs
-    the snapshots) becomes unavailable without re-running the experiment."""
-    gp = cd / "gp_states.pt"
-    if not gp.exists():
+    cached diagnostics keep rendering from disk; only *regenerating* them (which needs the
+    snapshots) becomes unavailable without re-running the experiment."""
+    gps = [cd / "gp_states.pt" for cd in cds]
+    gps = [g for g in gps if g.exists()]
+    if not gps:
         return
     repo_root = runs_dir.parent.parent                 # artifacts/runs -> repo root
-    mb = gp.stat().st_size / 1048576
-    with st.popover(f":material/delete: Cleanse GP states ({mb:.0f} MB)",
-                    help="Move gp_states.pt to the trash folder to free space."):
+    total_mb = sum(g.stat().st_size for g in gps) / 1048576
+    with st.popover(f":material/delete: Cleanse GP states ({len(gps)} files · {total_mb:.0f} MB)",
+                    help="Move every gp_states.pt for these configs to the trash folder "
+                         "to free space."):
         st.caption(
-            f"Move **gp_states.pt** ({mb:.0f} MB) to `artifacts/trash/` to free space. "
-            "It is **moved, not deleted** — remove it from the trash yourself once you're "
-            "sure. The diagnostics above are already cached and keep working; you just "
-            "won't be able to *regenerate* them without re-running the experiment.")
-        if st.button("Confirm — move to trash", type="primary",
-                     key=f"cleanse_gp_{seed}_{lab}"):
-            dest = move_to_trash(repo_root, gp)
-            st.toast(f"Moved gp_states.pt ({mb:.0f} MB) → "
-                     f"{dest.relative_to(repo_root)}", icon="🗑")
+            f"Move **{len(gps)} gp_states.pt** file(s) — **{total_mb:.0f} MB** total — to "
+            "`artifacts/trash/` to free space. They are **moved, not deleted** — remove them "
+            "from the trash yourself once you're sure. The diagnostics above are already "
+            "cached and keep working; you just won't be able to *regenerate* them without "
+            "re-running the experiment.")
+        if st.button("Confirm — move all to trash", type="primary",
+                     key=f"cleanse_gp_{seed}_{key}"):
+            for g in gps:
+                move_to_trash(repo_root, g)
+            st.toast(f"Moved {len(gps)} gp_states.pt file(s) ({total_mb:.0f} MB) to trash",
+                     icon="🗑")
             st.rerun()
 
 
-def _render_cboss_plots(cd: Path, seed: int, lab: str) -> None:
-    """Tabbed diagnostics for one cBOSS config: the OOS/replay figure grid, plus a
-    GP fit-error report (which steps hit a NotPSDError and where hard resets fired)."""
-    metrics, ev, acq, meta = load_cboss_diagnostics(cd)
-    n_err = meta.get("n_fit_errors", 0)
-    err_label = f"⚠ GP fit errors ({n_err})" if n_err else "GP fit errors"
-    tab_diag, tab_err = st.tabs(["Diagnostics", err_label])
-    with tab_diag:
-        _render_cboss_figure_grid(metrics, ev, acq, meta, seed, lab)
-    with tab_err:
-        _render_cboss_fit_errors(ev, meta, seed, lab)
-
-
-def _render_cboss_fit_errors(ev, meta: dict, seed: int, lab: str) -> None:
-    """Report feasibility-GP fitting errors (NotPSDError) and hard resets recorded
-    during the run. Errors don't abort cBOSS (it falls back to frozen hypers / a
-    held surrogate, and forces a fresh full fit after 5 consecutive failures), but
-    a cluster of them flags a degenerate surrogate region worth knowing about."""
+def _reset_steps(ev) -> np.ndarray:
+    """BO steps at which the feasibility GP was hard-reset (periodic or error-backstop
+    fresh full fit), from a diagnostics ``oos_eval.npz``. Empty for caches predating it."""
     if "gp_step" not in ev.files:
-        st.info("Regenerate diagnostics to populate the GP fit-error report "
-                "(this cache predates it).")
-        return
-    n_err = meta.get("n_fit_errors", 0)
-    n_eres = meta.get("n_error_resets", 0)
-    n_pres = meta.get("n_periodic_resets", 0)
-    if not (n_err or n_eres or n_pres):
-        st.success("No GP fitting errors or hard resets recorded — the feasibility "
-                   "GP fit cleanly at every step.")
-        return
-    bits = [f"**{n_err}** GP fitting error(s) · NotPSDError"]
-    if n_eres:
-        bits.append(f"**{n_eres}** error-triggered hard reset(s)")
-    if n_pres:
-        bits.append(f"**{n_pres}** periodic hard reset(s)")
-    st.warning("  ·  ".join(bits))
-    st.caption("A fit error means that step's variational refit failed (degenerate "
-               "inducing covariance); cBOSS fell back to the previous frozen hypers "
-               "or held the surrogate. Five consecutive errors force a fresh full fit.")
-    st.plotly_chart(cf.fit_error_trace(ev["gp_step"], ev["gp_fit_error"], ev["gp_phase"]),
-                    width="stretch", key=f"cb_fiterr_{seed}_{lab}")
+        return np.empty(0, int)
+    return np.unique(ev["gp_step"][np.isin(ev["gp_phase"], ["reset", "error-reset"])])
 
 
-def _render_cboss_figure_grid(metrics, ev, acq, meta: dict, seed: int, lab: str) -> None:
-    """Render the cached replay/OOS diagnostics as compact side-by-side plotly."""
-    st.caption(
-        f"Scored on **{meta['n_scored']}** OOS structures "
-        f"({meta['n_excluded']} excluded as train overlap; "
-        f"feasibility = RSE < {meta['feasible_rse']:g})."
-    )
+def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], seed: int) -> None:
+    """Compare every generated cBOSS/BESS config on shared plots (one colour per algo),
+    then drop to per-algo surrogate detail (tabs). Half-width plots throughout."""
+    # Hard-reset / fit-error table first.
+    _render_resets_table(algos)
 
-    # Replay-fidelity flag — computed at generation: does the step-by-step replay
-    # still reproduce the run's saved one-step-ahead pf_pred?
-    fidelity = (f"Replay vs run: mean|Δpf| = {meta['pf_mae']:.4f}, "
-                f"Spearman = {meta['pf_spearman']:.3f}")
-    if meta["pf_mae"] < 0.05 and meta["pf_spearman"] > 0.95:
-        st.caption(f"✅ {fidelity}")
-    else:
-        st.warning(f"⚠ {fidelity} — the replay diverges from the saved run; "
-                   "the diagnostics below may not reflect the actual surrogate.")
-    probas = {"post-init": ev["p_post"], "final": ev["p_final"]}
+    # Scored-count + replay-fidelity summary (per algo; the replay must still mirror
+    # the run's saved one-step-ahead pf for the diagnostics to be trustworthy).
+    st.caption("  ·  ".join(
+        f"**{a.label}**: scored {a.meta['n_scored']}/{a.meta['n_scored'] + a.meta['n_excluded']}"
+        for a in algos))
+    bad = [a for a in algos if not (a.meta["pf_mae"] < 0.05 and a.meta["pf_spearman"] > 0.95)]
+    if bad:
+        st.warning("⚠ Replay diverges from the saved run for: "
+                   + ", ".join(f"{a.label} (|Δpf|={a.meta['pf_mae']:.3f})" for a in bad)
+                   + " — its diagnostics may not reflect the actual surrogate.")
 
-    # BO steps at which the GP was hard-reset (fresh full fit) — overlaid as dashed
-    # verticals on every step-indexed panel so resets line up across them. Absent in
-    # caches that predate reset recording.
-    reset_steps = (ev["gp_step"][np.isin(ev["gp_phase"], ["reset", "error-reset"])]
-                   if "gp_step" in ev.files else [])
+    r1 = st.columns(3)
+    with r1[0]:
+        st.caption("OOS balanced accuracy per refit (chance = 0.5)")
+        st.plotly_chart(cf.multi_line(
+            [(a.label, a.metrics["step"], a.metrics["bal_accuracy"]) for a in algos],
+            "OOS balanced accuracy", hline=0.5, yrange=[0, 1.02], legend=False),
+            width="stretch", key=f"cb_acc_{seed}")
+    with r1[1]:
+        st.caption("OOS ROC-AUC per refit")
+        st.plotly_chart(cf.multi_line(
+            [(a.label, a.metrics["step"], a.metrics["roc_auc"]) for a in algos],
+            "OOS ROC-AUC", hline=0.5, yrange=[0, 1.02], legend=False),
+            width="stretch", key=f"cb_auc_{seed}")
+    with r1[2]:
+        st.caption("ROC on OOS — shared legend (dashed = post-init, solid = final)")
+        st.plotly_chart(cf.roc_curves_multi(
+            [(a.label, a.ev["y"], a.ev["p_post"], a.ev["p_final"]) for a in algos]),
+            width="stretch", key=f"cb_roc_{seed}")
 
-    a = st.columns(2)
-    with a[0]:
-        st.caption("OOS classifier quality per refit")
-        st.plotly_chart(cf.oos_metrics_vs_step(metrics["step"], metrics["accuracy"],
-                                               metrics["roc_auc"], reset_steps=reset_steps),
-                        width="stretch", key=f"cb_oosm_{seed}_{lab}")
-    with a[1]:
-        st.caption("ROC on OOS — post-init vs final GP")
-        st.plotly_chart(cf.roc_curves({"post-init": (ev["y"], ev["p_post"]),
-                                       "final": (ev["y"], ev["p_final"])}),
-                        width="stretch", key=f"cb_roc_{seed}_{lab}")
+    r2 = st.columns(2)
+    with r2[0]:
+        st.caption("P(feasible) at the chosen candidate")
+        st.plotly_chart(cf.multi_line(
+            [(a.label, a.acq["steps"], a.acq["pf_pred"]) for a in algos],
+            "P(feasible)", hline=0.5, yrange=[-0.02, 1.02]),
+            width="stretch", key=f"cb_pf_{seed}")
+    with r2[1]:
+        st.caption("OOS accuracy init→final by CR bin (open=post-init, filled=final)")
+        st.plotly_chart(cf.accuracy_bin_slopes(
+            [(a.label, a.ev["cr"], a.ev["y"], a.ev["p_post"], a.ev["p_final"]) for a in algos]),
+            width="stretch", key=f"cb_slopes_{seed}")
 
-    b = st.columns(2)
-    with b[0]:
-        st.caption("OOS accuracy by CR bin — post-init vs final")
-        st.plotly_chart(cf.accuracy_by_cr(ev["cr"], ev["y"], probas),
-                        width="stretch", key=f"cb_acr_{seed}_{lab}")
-    with b[1]:
-        st.caption("RSE distribution (all OOS)")
-        st.plotly_chart(cf.rse_distribution(ev["rse_all"], meta["feasible_rse"]),
-                        width="stretch", key=f"cb_rse_{seed}_{lab}")
+    r3 = st.columns(2)
+    with r3[0]:
+        gen = [(a.label, a.ev["ls_steps"], a.ev["proba_gen"]) for a in algos if a.ev["proba_gen"].size]
+        if gen:
+            st.caption("P(feasible) of the generating (ground-truth) structure")
+            st.plotly_chart(cf.multi_line(gen, "P(feasible) generating",
+                                          hline=0.5, yrange=[-0.02, 1.02]),
+                            width="stretch", key=f"cb_gen_{seed}")
+        else:
+            st.caption("Generating structure unavailable (non-synthetic problem).")
+    with r3[1]:
+        st.caption("RSE distribution (shared OOS set — identical across algos)")
+        st.plotly_chart(cf.rse_distribution(algos[0].ev["rse_all"], algos[0].meta["feasible_rse"]),
+                        width="stretch", key=f"cb_rse_{seed}")
 
-    c = st.columns(2)
-    with c[0]:
-        st.caption("Acquisition value + feasibility belief at the chosen candidate")
-        st.plotly_chart(cf.acqf_value_trace(acq["steps"], acq["acqf_value"], acq["pf_pred"],
-                                            acq["feasible"], acq["acqf_used"],
-                                            reset_steps=reset_steps),
-                        width="stretch", key=f"cb_acq_{seed}_{lab}")
-    with c[1]:
-        if ev["ls"].size:
-            st.caption("Final-GP ARD lengthscales")
-            st.plotly_chart(cf.ard_lengthscales(ev["ls"], cf.edge_labels(meta["n_cores"])),
-                            width="stretch", key=f"cb_ls_{seed}_{lab}")
+    r4 = st.columns(2)
+    with r4[0]:
+        ls = [(a.label, a.ev["ls"]) for a in algos if a.ev["ls"].size]
+        if ls:
+            st.caption("Final-GP ARD lengthscales (grouped per bond edge)")
+            st.plotly_chart(cf.lengthscales_grouped(ls, cf.edge_labels(algos[0].meta["n_cores"])),
+                            width="stretch", key=f"cb_ls_{seed}")
         else:
             st.caption("Kernel has no ARD lengthscale.")
 
-    d = st.columns(2)
-    with d[0]:
-        if ev["proba_gen"].size:
-            st.caption("Feasibility belief about the generating (ground-truth) structure")
-            st.plotly_chart(cf.generating_feasibility(ev["ls_steps"], ev["proba_gen"],
-                                                      reset_steps=reset_steps),
-                            width="stretch", key=f"cb_gen_{seed}_{lab}")
-        else:
-            st.caption("Generating structure unavailable (non-synthetic problem).")
-    with d[1]:
-        st.caption("Predicted feasibility vs signed distance from threshold (final GP)")
-        st.plotly_chart(cf.signed_distance_vs_pf(ev["rse"], ev["p_final"],
-                                                 meta["feasible_rse"], ev["y"]),
-                        width="stretch", key=f"cb_sdist_{seed}_{lab}")
+    # Per-algo surrogate detail — tabs (the section is an expander; expanders can't
+    # nest). Each tab: signed-distance, lengthscale-evolution, and the per-algo
+    # acquisition value (kept off the shared plots since acqf scales aren't comparable).
+    st.markdown("###### Per-algorithm surrogate detail")
+    for tab, (i, a) in zip(st.tabs([f"{a.label} · {a.policy}" for a in algos]),
+                           enumerate(algos)):
+        with tab:
+            cols = st.columns(3)
+            with cols[0]:
+                st.caption("Pred. feasibility vs signed distance — coloured by latent σ")
+                st.plotly_chart(cf.signed_distance_vs_pf(
+                    a.ev["rse"], a.ev["p_final"], a.meta["feasible_rse"], a.ev["sigma_final"]),
+                    width="stretch", key=f"cb_sdist_{seed}_{i}")
+            with cols[1]:
+                if a.ev["ls_evol"].size:
+                    st.caption("ARD lengthscale evolution across refits")
+                    st.plotly_chart(cf.lengthscale_heatmap(
+                        a.ev["ls_evol"], cf.edge_labels(a.meta["n_cores"]), a.ev["ls_steps"]),
+                        width="stretch", key=f"cb_lsh_{seed}_{i}")
+                else:
+                    st.caption("Kernel has no ARD lengthscale evolution.")
+            with cols[2]:
+                st.caption("Acquisition value at chosen candidate (this acqf's own scale)")
+                st.plotly_chart(cf.acqf_value_single(
+                    a.acq["steps"], a.acq["acqf_value"], a.acq["feasible"], a.acq["acqf_used"]),
+                    width="stretch", key=f"cb_acq_{seed}_{i}")
 
-    if meta["acqf"] == "ficr" and np.isfinite(acq["infeasible_frac"]).any():
-        st.caption("ficr interpolation weights")
-        st.plotly_chart(cf.ficr_weights(acq["steps"], acq["infeasible_frac"], meta["ficr_t"],
-                                        reset_steps=reset_steps),
-                        width="stretch", key=f"cb_ficr_{seed}_{lab}")
+    # Algorithm-specific plots — half-width each.
+    specific = [a for a in algos
+                if a.meta["acqf"] == "ficr" and np.isfinite(a.acq["infeasible_frac"]).any()]
+    if specific:
+        st.markdown("###### Algorithm-specific")
+        for i, a in enumerate(specific):
+            cols = st.columns(2)
+            with cols[0]:
+                st.caption(f"{a.label} — ficr interpolation weights")
+                st.plotly_chart(cf.ficr_weights(a.acq["steps"], a.acq["infeasible_frac"],
+                                                a.meta["ficr_t"]),
+                                width="stretch", key=f"cb_ficr_{seed}_{i}")
 
-    if ev["ls_evol"].size:
-        st.caption("ARD lengthscale evolution across refits (flat over steps — cBOSS "
-                   "freezes kernel hypers after the init fit; bands show per-edge importance)")
-        st.plotly_chart(cf.lengthscale_heatmap(ev["ls_evol"], cf.edge_labels(meta["n_cores"]),
-                                               ev["ls_steps"], reset_steps=reset_steps),
-                        width="stretch", key=f"cb_lsh_{seed}_{lab}")
+    # One cleanse action for every config's gp_states.pt on this page.
+    _render_gp_states_cleanse(runs_dir, [a.cd for a in algos], seed, "feas")
 
-    variables = [(ev["cr"], "CR", "log"),
-                 (ev["xnorm"], "||ranks||", "linear"),
-                 (np.log10(np.clip(ev["rse"], 1e-300, None)), "log10 RSE", "linear")]
-    st.caption("OOS pairs — final GP (errors highlighted)")
-    st.plotly_chart(cf.pairs(variables, ev["y"], ev["p_final"], meta["feasible_rse"]),
-                    width="stretch", key=f"cb_pairs_{seed}_{lab}")
+
+def _render_resets_table(algos: list[SimpleNamespace]) -> None:
+    """One row per algo: the BO steps where its feasibility GP was hard-reset, plus
+    its NotPSDError count — replaces the per-panel reset markers."""
+    rows = []
+    for a in algos:
+        rs = _reset_steps(a.ev)
+        rows.append({
+            "algorithm": a.label,
+            "policy": a.policy,
+            "hard-reset BO steps": ", ".join(str(int(s)) for s in rs) if rs.size else "—",
+            "fit errors (NotPSD)": int(a.meta.get("n_fit_errors", 0)),
+        })
+    st.caption("Hard resets (fresh full GP fit) and fitting errors per algorithm")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")

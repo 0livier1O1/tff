@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 import torch
 from scipy.stats import spearmanr
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -55,7 +55,14 @@ def _diag_dir(config_dir: Path) -> Path:
 
 def has_cboss_diagnostics(config_dir: Path) -> bool:
     d = _diag_dir(config_dir)
-    return all((d / f).exists() for f in ("oos_metrics.csv", "oos_eval.npz", "meta.json"))
+    if not all((d / f).exists() for f in ("oos_metrics.csv", "oos_eval.npz", "meta.json")):
+        return False
+    # Stale caches lack newer fields — the latent-σ array (``sigma_final``) and the
+    # balanced-accuracy metric column (``bal_accuracy``, which replaced raw accuracy).
+    # Treat them as not-yet-generated so the Generate button reappears and rebuilds them.
+    if "sigma_final" not in np.load(d / "oos_eval.npz").files:
+        return False
+    return "bal_accuracy" in pd.read_csv(d / "oos_metrics.csv", nrows=0).columns
 
 
 def load_cboss_diagnostics(config_dir: Path):
@@ -70,6 +77,13 @@ def load_cboss_diagnostics(config_dir: Path):
 def _auc(y, p) -> float:
     """ROC-AUC, or NaN when only one class is present."""
     return float(roc_auc_score(y, p)) if np.min(y) != np.max(y) else float("nan")
+
+
+def _bacc(y, p) -> float:
+    """Balanced accuracy (mean of per-class recall) at the 0.5 threshold. Unlike raw
+    accuracy it isn't won by the majority 'everything-infeasible' predictor under the
+    heavy class imbalance — chance is 0.5 regardless of the feasible fraction."""
+    return float(balanced_accuracy_score(y, (np.asarray(p) >= 0.5).astype(int)))
 
 
 def generate_cboss_diagnostics(config_dir: Path) -> Path:
@@ -106,11 +120,17 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
     xnorm = np.linalg.norm(oos["X"].astype(float), axis=1)
     yk = y[keep]
     p_post, p_final = rr.post_init_proba_oos[keep], rr.final_proba_oos[keep]
+    sigma_final = rr.final_sigma_oos[keep]
 
-    metrics = [
+    # Start the per-refit curve at the *post-init* GP (step n_init-1) so every algo's
+    # curve begins from the shared initialization — otherwise the first plotted point is
+    # the first BO refit, by which each acqf has already added its own (different)
+    # candidate, making identically-initialised algos look like they start apart.
+    metrics = [dict(step=int(rr.n_init - 1),
+                    bal_accuracy=_bacc(yk, p_post), roc_auc=_auc(yk, p_post))]
+    metrics += [
         dict(step=int(step),
-             accuracy=float(((p_all[keep] >= 0.5).astype(int) == yk).mean()),
-             roc_auc=_auc(yk, p_all[keep]))
+             bal_accuracy=_bacc(yk, p_all[keep]), roc_auc=_auc(yk, p_all[keep]))
         for step, p_all in zip(rr.steps, rr.proba_oos)
     ]
 
@@ -130,7 +150,7 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
     pd.DataFrame(metrics).to_csv(out / "oos_metrics.csv", index=False)
     np.savez(out / "oos_eval.npz",
              y=yk, cr=oos["cr"][keep], xnorm=xnorm[keep], rse=oos["rse"][keep],
-             rse_all=oos["rse"], p_post=p_post, p_final=p_final,
+             rse_all=oos["rse"], p_post=p_post, p_final=p_final, sigma_final=sigma_final,
              ls=(rr.final_lengthscales if rr.final_lengthscales is not None
                  else np.array([])),
              ls_evol=rr.lengthscales, ls_steps=rr.steps, proba_gen=rr.proba_gen,
