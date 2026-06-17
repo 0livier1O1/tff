@@ -40,17 +40,31 @@ def _contract_auto(eq, operands, np_path, out_bytes, peak_bytes):
     A contraction whose output alone won't fit raises ``MemoryLimitExceeded`` so
     callers surface it as OOM-infeasible instead of crashing the run.
     """
-    # Settle pending async work so freed blocks are reclaimed and the free-memory
-    # reading (which sizes the slice/no-slice decision) is accurate.
-    cp.cuda.Stream.null.synchronize()
+    # Comfortably-small contraction: take the fast un-sliced path immediately,
+    # without a (serializing) device sync — the common low-rank case.
+    total = int(cp.cuda.Device().mem_info[1])
+    if peak_bytes + out_bytes < 0.5 * total:
+        return cp.einsum(eq, *operands, optimize=np_path)
+    # Large: settle pending async work so freed blocks are reclaimed and the
+    # free-memory reading (which sizes the slice/no-slice decision) is accurate.
+    cp.cuda.Device().synchronize()
     free, _ = cp.cuda.Device().mem_info
     if peak_bytes + out_bytes + _SLICE_SAFETY_BYTES < free:
         return cp.einsum(eq, *operands, optimize=np_path)
     budget = int(free - out_bytes - _SLICE_SAFETY_BYTES)
     if budget <= 0:
         raise MemoryLimitExceeded(int(free), int(out_bytes + _SLICE_SAFETY_BYTES), 0)
-    return cutn.contract(eq, *operands,
-                         options=cutn.NetworkOptions(memory_limit=budget))
+    # Explicit Network + free() so the (per-equation) sliced workspace is released
+    # after each call; the one-shot cutn.contract retains it and the distinct env
+    # equations would otherwise accumulate workspaces and exhaust memory. The
+    # returned output is a separate allocation that survives the free.
+    net = cutn.Network(eq, *operands,
+                       options=cutn.NetworkOptions(memory_limit=budget))
+    try:
+        net.contract_path()
+        return net.contract()
+    finally:
+        net.free()
 
 
 # Contraction-workspace budget handed to cuTensorNet's path planner. Expressed as
@@ -947,6 +961,16 @@ class cuTensorNetwork:
             self.eq, [c.shape for c in self.cores], itembytes)
         recon_bytes = int(target.size) * itembytes
 
+        # "big mode" = some contraction is large enough to need slicing (and hence
+        # the cuTensorNet workspace management below). Skip that per-core cleanup
+        # entirely for ordinary low-rank structures so they keep the fast path.
+        total = int(cp.cuda.Device().mem_info[1])
+        big_mode = (
+            max(p + n_r * n_c * itembytes
+                for (_, _, n_r, n_c, _, p) in env_specs) >= 0.5 * total
+            or recon_peak + recon_bytes >= 0.5 * total
+        )
+
         loss_history = []
         for _ in range(max_epochs):
             for k in range(N):
@@ -975,12 +999,14 @@ class cuTensorNetwork:
                 core_shape = [int(x) for x in self.adj_matrix[k].tolist()]
                 self.cores[k] = _pam_fold(new_Gk, k, core_shape, xp)
 
-                # Release the (per-core, differently shaped) environment matrix and
-                # solve temporaries back to the OS so they don't starve the next
-                # core's sliced-contraction workspace on high-rank structures.
-                del M, new_Gk
-                xp.cuda.Stream.null.synchronize()
-                xp.get_default_memory_pool().free_all_blocks()
+                # On high-rank (sliced) structures, release the per-core env
+                # matrix + solve temporaries back to the OS so they don't starve
+                # the next core's sliced-contraction workspace. Skipped in the
+                # ordinary fast-path regime where the pool simply reuses blocks.
+                if big_mode:
+                    del M, new_Gk
+                    xp.cuda.Device().synchronize()
+                    xp.get_default_memory_pool().free_all_blocks()
 
             recon = _contract_auto(self.eq, list(self.cores), full_path,
                                    recon_bytes, recon_peak)
