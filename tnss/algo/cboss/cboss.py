@@ -235,10 +235,11 @@ class CBOSS(BOSSBase):
         if not self.verbose:
             return
         bcr = self._best_feasible_cr(Y_cr, Y_feas)
+        oom = "  [OOM: too large to contract]" if row["eval_status"] == "oom" else ""
         print(f"[cBO {b+1}/{self.budget}|{row['acqf_used']}] CR={row['cr']:.5f}  "
               f"RSE={row['rse']:.5f}  feas={row['feasible']}  PF={row['pf_pred']:.3f}  "
               f"best_feas_CR={bcr:.5f}  GP={row['gp_fit_time_s']:.1f}s  "
-              f"acqf={row['suggest_time_s']:.1f}s  eval={row['eval_time_s']:.1f}s")
+              f"acqf={row['suggest_time_s']:.1f}s  eval={row['eval_time_s']:.1f}s{oom}")
 
     def _record_surrogate(self, feas: FeasibilityGP, *, step: int, phase: str,
                           fit_error: bool = False):

@@ -175,10 +175,11 @@ class BOSS(BOSSBase):
         if not self.verbose:
             return
         best_obj = float(self._get_objective(Y_rse, Y_cr).min())
+        oom = "  [OOM: too large to contract]" if row["eval_status"] == "oom" else ""
         print(f"[BO {b+1}/{self.budget}] obj={row['objective']:.5f}  "
               f"RSE={row['rse']:.5f}  CR={row['cr']:.5f}  feas={row['feasible']}  "
               f"best_obj={best_obj:.5f}  GP={row['gp_fit_time_s']:.1f}s  "
-              f"acqf={row['suggest_time_s']:.1f}s  eval={row['eval_time_s']:.1f}s")
+              f"acqf={row['suggest_time_s']:.1f}s  eval={row['eval_time_s']:.1f}s{oom}")
 
     # ------------------------------------------------------------------
     # GP fitting / conditioning

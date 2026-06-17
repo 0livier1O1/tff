@@ -107,8 +107,10 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
             help=RUN_NAME,
         )
 
-    _algo_hdr, _algo_clear = st.sidebar.columns([2, 1], vertical_alignment="bottom")
+    _algo_hdr, _algo_import, _algo_clear = st.sidebar.columns(
+        [2, 1, 1], vertical_alignment="bottom")
     _algo_hdr.markdown("### Algorithms")
+    _render_import_algos(_algo_import)
     if _algo_clear.button(
         "Clear all", key="clear_all_algos", width="stretch", type="primary",
         help="Remove all algorithm configs at once",
@@ -116,6 +118,35 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
         st.session_state["algo_configs"] = []
         st.rerun()
     render_algo_configs(cfg)
+
+
+def _render_import_algos(col) -> None:
+    """Small popover (next to 'Clear all') to import all algorithm configs from
+    another run's config.json into the current draft. Imported configs are
+    appended, skipping any config_id already present so a double-import can't
+    collide on the seed_<k>/<config_id>_<policy>/ output dir."""
+    with col.popover("Import", width="stretch",
+                     help="Import all algorithm configs from another run"):
+        runs_dir = ROOT / "artifacts" / "runs"
+        runs = sorted(
+            [d.name for d in runs_dir.iterdir()
+             if d.is_dir() and (d / "config.json").exists()],
+            reverse=True,
+        ) if runs_dir.exists() else []
+        if not runs:
+            st.caption("No runs with a config.json to import from.")
+            return
+        sel = st.selectbox("Import algos from run", runs, key="import_algos_run")
+        with open(runs_dir / sel / "config.json") as f:
+            imported = [algo_config_from_dict(d)
+                        for d in json.load(f).get("algo_configs", [])]
+        st.caption(f"{len(imported)} algo config(s) in this run.")
+        if st.button(f"Import {len(imported)} algos", key="import_algos_do",
+                     width="stretch", disabled=not imported):
+            existing = st.session_state.setdefault("algo_configs", [])
+            have = {a.config_id for a in existing}
+            existing.extend(a for a in imported if a.config_id not in have)
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------

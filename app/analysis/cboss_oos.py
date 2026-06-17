@@ -137,7 +137,7 @@ def _run_worker(shard_path, out_path, target_path, decomp) -> None:
     tag = os.environ.get("CUDA_VISIBLE_DEVICES", "?")
     for i, row in enumerate(X):
         A = _triu_to_full(torch.tensor(row, dtype=torch.double), t_shape)
-        c, r, _et, _recon, _ls, _ctn = _eval_tn(target, A, **decomp)
+        c, r, _et, _recon, _ls, _ctn, _status = _eval_tn(target, A, **decomp)
         rse[i], cr[i] = r, c
         print(f"\r[gpu {tag}] {i + 1}/{len(X)}", end="", flush=True)
     print(f"\r[gpu {tag}] {len(X)}/{len(X)} done")

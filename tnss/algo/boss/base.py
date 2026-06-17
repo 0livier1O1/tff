@@ -28,6 +28,9 @@ import cupy as cp
 import torch
 from torch import Tensor
 
+from cuquantum.memory import MemoryLimitExceeded
+from cupy.cuda.memory import OutOfMemoryError
+
 from botorch.utils.transforms import unnormalize
 
 from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
@@ -46,14 +49,41 @@ def _col(x: float) -> Tensor:
     return torch.tensor([[x]], dtype=torch.double)
 
 
+def _adj_cr(A_cp) -> float:
+    """Compression ratio (``network_size / target_size``) straight from the
+    adjacency, with no GPU network build — mirrors
+    :meth:`cuTensorNetwork.network_size` / ``target_size``. Lets us still report
+    a CR for structures too large to contract (see :func:`_eval_tn`)."""
+    A = cp.asarray(A_cp).astype(cp.int64)
+    net = float(cp.prod(A, axis=1).sum())
+    tgt = float(cp.prod(cp.diagonal(A)))
+    return net / tgt
+
+
 def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
              backend="cupy", dtype="float32",
-             init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
+             init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250,
+             return_recon=False):
     """Eval using cuTensorNetwork decompose (supports sgd, pam, als).
 
-    Returns ``(cr, best_rse, eval_time, recon, best_losses, contraction_stats)``
-    where ``best_losses`` is the loss trajectory of the best restart and
-    ``contraction_stats`` is the cuTensorNet path/autotune cost dict.
+    Single shared decomposition path for the whole search family — BOSS, CBOSS,
+    RandomSearch and TnALE all route through this so target normalization, the
+    best-of-``n_runs`` restart loop and OOM handling are identical across methods.
+
+    Returns ``(cr, best_rse, eval_time, recon, best_losses, contraction_stats,
+    eval_status)`` where ``best_losses`` is the loss trajectory of the best
+    restart, ``contraction_stats`` is the cuTensorNet path/autotune cost dict,
+    and ``eval_status`` is ``"ok"`` or ``"oom"``. ``recon`` is the dense
+    reconstruction but it requires a full contraction, so it is only computed
+    when ``return_recon`` is set — otherwise it is ``None`` (all current callers
+    discard it).
+
+    A candidate whose contraction workspace exceeds the GPU memory budget cannot
+    be evaluated. That is a *computation* constraint, not an RSE feasibility
+    failure: we don't crash the run — we return ``best_rse = 1.0`` (so the BO
+    records it as infeasible and steers away), the deterministic CR, and
+    ``eval_status = "oom"`` so downstream analysis can tell it apart from
+    structures that were decomposed but simply hit high RSE.
     """
     t0 = time.time()
     tgt_np = target.numpy() if hasattr(target, 'numpy') else target
@@ -68,25 +98,38 @@ def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
     tgt_norm = float(cp.linalg.norm(tgt_cp))
     tgt_cp = tgt_cp / tgt_norm
     A_cp = cp.asarray(A_int.numpy() if hasattr(A_int, 'numpy') else A_int)
-    ntwrk = cuTensorNetwork(A_cp, backend=backend, dtype=dtype)
-    cr = float(ntwrk.network_size()) / float(ntwrk.target_size())
+    try:
+        ntwrk = cuTensorNetwork(A_cp, backend=backend, dtype=dtype)
+        cr = float(ntwrk.network_size()) / float(ntwrk.target_size())
 
-    best_rse = float("inf")
-    best_losses: list[float] = []
-    for _ in range(n_runs):
-        losses = ntwrk.decompose(
-            tgt_cp, max_epochs=maxiter, method=method,
-            init_lr=init_lr, momentum=momentum,
-            loss_patience=loss_patience, lr_patience=lr_patience,
-        )
-        val = float(losses[-1]) if losses else float("inf")
-        if val < best_rse:
-            best_rse = val
-            best_losses = [float(x) for x in losses]
-        if best_rse < min_rse:
-            break
-    eval_time = time.time() - t0
-    return cr, best_rse, eval_time, ntwrk.contract() * tgt_norm, best_losses, ntwrk.contraction_stats
+        best_rse = float("inf")
+        best_losses: list[float] = []
+        for _ in range(n_runs):
+            losses = ntwrk.decompose(
+                tgt_cp, max_epochs=maxiter, method=method,
+                init_lr=init_lr, momentum=momentum,
+                loss_patience=loss_patience, lr_patience=lr_patience,
+            )
+            val = float(losses[-1]) if losses else float("inf")
+            if val < best_rse:
+                best_rse = val
+                best_losses = [float(x) for x in losses]
+            if best_rse < min_rse:
+                break
+        eval_time = time.time() - t0
+        recon = ntwrk.contract() * tgt_norm if return_recon else None
+        return (cr, best_rse, eval_time, recon,
+                best_losses, ntwrk.contraction_stats, "ok")
+    except (MemoryLimitExceeded, OutOfMemoryError) as exc:
+        # Network too large to contract within the GPU memory budget. Treat as a
+        # compute-infeasible point (rse=1) rather than aborting the whole run.
+        eval_time = time.time() - t0
+        stats = {
+            "oom": True,
+            "oom_limit": int(getattr(exc, "limit", 0) or 0),
+            "oom_requirement": int(getattr(exc, "requirement", 0) or 0),
+        }
+        return _adj_cr(A_cp), 1.0, eval_time, None, [], stats, "oom"
 
 
 class BOSSBase:
@@ -198,7 +241,8 @@ class BOSSBase:
             self._log_step(b, row, X, Y_rse, Y_cr, Y_feas)
 
             atomic_write_json(progress_file, {"phase": "bo", "step": b + 1,
-                                               "budget": self.budget})
+                                               "budget": self.budget,
+                                               "oom": self._oom_count()})
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -247,7 +291,7 @@ class BOSSBase:
         subclass-specific columns (e.g. cBOSS's pf_pred / acqf_used)."""
         x_int_flat = self._to_int(x_std).squeeze(0)
         A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-        cr, rse, eval_time, _, losses, ctn_stats = self._evaluate(A_int)
+        cr, rse, eval_time, _, losses, ctn_stats, eval_status = self._evaluate(A_int)
         feasible = int(rse <= self.feasible_rse)
 
         row = {
@@ -262,6 +306,9 @@ class BOSSBase:
             "objective_lambda": self.lamda,
             "feasible": feasible,
             "feasible_rse": self.feasible_rse,
+            # "ok" or "oom": distinguishes an RSE-infeasible point (decomposed,
+            # high RSE) from one that was too large to contract on the GPU.
+            "eval_status": eval_status,
             "eval_time_s": eval_time,
             "gp_fit_time_s": gp_fit_time,
             "suggest_time_s": suggest_time,
@@ -273,6 +320,11 @@ class BOSSBase:
         self.decomp_traces.append({"step": step, "phase": phase, "losses": losses})
         self.contraction_traces.append({"step": step, "phase": phase, **(ctn_stats or {})})
         return row
+
+    def _oom_count(self) -> int:
+        """Number of structures so far skipped as too large to contract — surfaced
+        live in the dashboard's Active Runs table via progress.json."""
+        return sum(1 for r in self.rows if r.get("eval_status") == "oom")
 
     def _init_phase(self, progress_file):
         """Evaluate the initial design; return (X, Y_rse, Y_cr, Y_feas, T)."""
@@ -286,10 +338,12 @@ class BOSSBase:
             rse_l.append(row["rse"]); cr_l.append(row["cr"])
             feas_l.append(row["feasible"]); t_l.append(row["eval_time_s"])
             if self.verbose:
+                oom = "  [OOM: too large to contract]" if row["eval_status"] == "oom" else ""
                 print(f"[Init {i+1}/{self.n_init}] CR={row['cr']:.5f}  "
-                      f"RSE={row['rse']:.5f}  feas={row['feasible']}  obj={row['objective']:.5f}")
+                      f"RSE={row['rse']:.5f}  feas={row['feasible']}  obj={row['objective']:.5f}{oom}")
             atomic_write_json(progress_file, {"phase": "init", "step": i + 1,
-                                               "budget": self.n_init})
+                                               "budget": self.n_init,
+                                               "oom": self._oom_count()})
         return (X,
                 torch.tensor(rse_l, dtype=torch.double).unsqueeze(1),
                 torch.tensor(cr_l, dtype=torch.double).unsqueeze(1),

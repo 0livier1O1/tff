@@ -163,12 +163,13 @@ def _auto_refresh_panel(ROOT: Path) -> None:
             pf = algo_dir / "progress.json"
             done_f = algo_dir / ".done"
 
-            phase, started_at = "", None
+            phase, started_at, oom = "", None, 0
             if pf.exists():
                 try:
                     pg = json.loads(pf.read_text())
                     started_at = pg.get("started_at")
                     phase = pretty_phase(pg.get("phase", ""))
+                    oom = int(pg.get("oom", 0))
                 except Exception:
                     pass
             completed_at = done_f.stat().st_mtime if done_f.exists() else None
@@ -181,6 +182,7 @@ def _auto_refresh_panel(ROOT: Path) -> None:
                 "Status":    status,
                 "Phase":     phase,
                 "Step":      step,
+                "OOM":       oom,
                 "Submitted": _fmt_ts(submitted_at),
                 "Started":   _fmt_ts(started_at),
                 "Duration":  _fmt_dur(started_at, completed_at),

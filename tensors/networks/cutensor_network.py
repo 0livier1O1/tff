@@ -3,9 +3,65 @@ import time
 import torch
 import numpy as np
 import cupy as cp
+import opt_einsum as oe
 
 from torch import Tensor
 from cuquantum import tensornet as cutn
+from cuquantum.memory import MemoryLimitExceeded
+from cupy.cuda.memory import OutOfMemoryError
+
+
+# Headroom (bytes) reserved on top of the output tensor when sizing the
+# auto-sliced contraction workspace budget, for allocator/framework overhead.
+_SLICE_SAFETY_BYTES = 512 * 1024 ** 2
+
+
+def _oe_path_peak(eq, shapes, itembytes):
+    """opt_einsum contraction path (in cupy/numpy ``'einsum_path'`` format) and
+    its largest-intermediate size in bytes. opt_einsum's estimate is reliable;
+    numpy's ``einsum_path`` under-reports the largest intermediate for dense
+    networks (it returns the naive path with speedup 1.0), which would route huge
+    contractions down the un-sliced cp.einsum branch and exhaust the pool."""
+    path, info = oe.contract_path(
+        eq, *[np.empty(s, dtype=np.int8) for s in shapes], optimize="auto")
+    return ["einsum_path", *path], float(info.largest_intermediate) * itembytes
+
+
+def _contract_auto(eq, operands, np_path, out_bytes, peak_bytes):
+    """Contract ``eq`` over cupy ``operands``, slicing only when it won't fit.
+
+    Fast path: an un-sliced ``cp.einsum`` with the precomputed NumPy ``np_path``,
+    chosen up front whenever the largest intermediate (``peak_bytes``) plus the
+    output fit in free GPU memory (the common, low-rank case — no slicing, no
+    overhead). Otherwise the contraction goes through cuTensorNet with automatic
+    slicing sized to the free memory (reserving ``out_bytes`` for the result).
+    The decision is made from the path estimate rather than by letting cp.einsum
+    OOM, because a failed cupy allocation does not reliably release its pool.
+    A contraction whose output alone won't fit raises ``MemoryLimitExceeded`` so
+    callers surface it as OOM-infeasible instead of crashing the run.
+    """
+    # Settle pending async work so freed blocks are reclaimed and the free-memory
+    # reading (which sizes the slice/no-slice decision) is accurate.
+    cp.cuda.Stream.null.synchronize()
+    free, _ = cp.cuda.Device().mem_info
+    if peak_bytes + out_bytes + _SLICE_SAFETY_BYTES < free:
+        return cp.einsum(eq, *operands, optimize=np_path)
+    budget = int(free - out_bytes - _SLICE_SAFETY_BYTES)
+    if budget <= 0:
+        raise MemoryLimitExceeded(int(free), int(out_bytes + _SLICE_SAFETY_BYTES), 0)
+    return cutn.contract(eq, *operands,
+                         options=cutn.NetworkOptions(memory_limit=budget))
+
+
+# Contraction-workspace budget handed to cuTensorNet's path planner. Expressed as
+# a fraction of *total* device memory; the planner raises a clean, catchable
+# ``MemoryLimitExceeded`` when a candidate's workspace would exceed this — before
+# any real allocation is attempted. Kept strictly below 100% so the remaining
+# headroom (~5% ≈ 1.2 GB on a 24 GB A5000) covers the core/target/output
+# tensors, ensuring an over-budget structure fails as MemoryLimitExceeded rather
+# than as a hard CUDA out-of-memory mid-contraction. Raised from cuTensorNet's
+# 80% default to admit slightly larger (but still allocatable) networks.
+_DEFAULT_MEMORY_LIMIT = "95%"
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +298,7 @@ class cuTensorNetwork:
         init_std=0.1,
         backend="cupy",
         dtype="float32",
+        memory_limit: Union[int, str, None] = None,
     ) -> None:
         if adj_matrix is None:
             if cores is None:
@@ -253,6 +310,8 @@ class cuTensorNetwork:
         # TODO What about ranks?
         self.backend = backend.lower()
         self.dtype_name = dtype.lower()
+        # Workspace budget for the cuTensorNet path planner (GPU/cupy backend).
+        self.memory_limit = _DEFAULT_MEMORY_LIMIT if memory_limit is None else memory_limit
         if self.backend == "torch":
             self.adj_matrix = torch.maximum(adj_matrix, adj_matrix.T).to(
                 dtype=torch.int
@@ -306,12 +365,23 @@ class cuTensorNetwork:
     def _rebuild_network(self):
         if self.backend == "cupy":
             self._qualifiers = self._build_cupy_qualifiers()
-            self.ntwrk = cutn.Network(self.eq, *self.cores, qualifiers=self._qualifiers)
+            options = cutn.NetworkOptions(memory_limit=self.memory_limit)
+            self.ntwrk = cutn.Network(
+                self.eq, *self.cores, qualifiers=self._qualifiers, options=options
+            )
         else:
             self.ntwrk = cutn.Network(self.eq, *self.cores)
         
         # Native cuTensorNet optimizer is sufficient on a dedicated A5000.
-        self.ntwrk.contract_path()
+        # Path planning can exceed the memory budget for very large (especially
+        # gradient-qualified) networks. Gradient-free methods (PAM/ALS) never
+        # contract self.ntwrk, so a failure here is deferred rather than fatal —
+        # the SGD/Adam paths re-plan in _plan_and_autotune and surface the OOM
+        # through _eval_tn's handler.
+        try:
+            self.ntwrk.contract_path()
+        except MemoryLimitExceeded:
+            pass
 
     def _plan_and_autotune(self, autotune_iterations=5):
         """Plan the contraction path and autotune, recording cost into ``self.contraction_stats``.
@@ -817,11 +887,18 @@ class cuTensorNetwork:
         self, target, tol=None, max_epochs=1000, rho=0.1,
         **kwargs
     ):
-        """PAM — optimized CuPy/Torch port of decomp_pam.
+        """PAM — optimized CuPy port of decomp_pam.
 
-        Same algorithm as decomp_pam / _pam_fctn_comp_partial + pinv, but faster:
-          - xp.einsum(optimize=path) replaces sequential tensordot for env contraction
-          - xp.linalg.solve replaces pinv (tempA is symmetric PD; LU >> SVD)
+        Same algorithm as decomp_pam / _pam_fctn_comp_partial + pinv, but faster
+        and memory-robust:
+          - env / reconstruction contractions go through :func:`_contract_auto`,
+            which falls back to auto-sliced cuTensorNet when the intermediates
+            don't fit (so high-rank structures are evaluable, not OOM-crashing);
+          - the per-core ridge solve uses the push-through identity to solve in
+            ``min(n_rows, n_cols)`` dimensions. For an over-parameterised core
+            (``n_cols = prod(bond ranks) > n_rows = prod(other modes)``) this
+            solves the bounded ``MMᵀ`` system instead of the rank-sized ``MᵀM``,
+            giving the identical update at a cost set by the problem, not R.
         """
         if self.backend != "cupy":
             raise NotImplementedError(
@@ -830,6 +907,7 @@ class cuTensorNetwork:
 
         xp = cp
         target = xp.asarray(target).astype(self.cores[0].dtype, copy=False)
+        itembytes = int(target.itemsize)
         eps = xp.finfo(target.dtype).eps
         target_norm = xp.maximum(xp.linalg.norm(target), eps)
         N = len(self.cores)
@@ -860,39 +938,52 @@ class cuTensorNetwork:
             n_rows = int(np.prod([label_to_dim[c] for c in other_phys]))
             n_cols = int(np.prod([label_to_dim[c] for c in shared_bonds]))
 
-            # Find path once using numpy (CPU-side is fast for N=6)
-            path_info = np.einsum_path(
-                env_eq,
-                *[np.empty(self.cores[i].shape) for i in other_ids],
-                optimize="optimal",
-            )
-            path = path_info[0]
-            env_specs.append((env_eq, other_ids, n_rows, n_cols, path))
+            # Path + largest-intermediate once (CPU-side, fast for these sizes).
+            path, peak_bytes = _oe_path_peak(
+                env_eq, [self.cores[i].shape for i in other_ids], itembytes)
+            env_specs.append((env_eq, other_ids, n_rows, n_cols, path, peak_bytes))
 
-        full_path_info = np.einsum_path(
-            self.eq, *[np.empty(c.shape) for c in self.cores], optimize="optimal"
-        )
-        full_path = full_path_info[0]
+        full_path, recon_peak = _oe_path_peak(
+            self.eq, [c.shape for c in self.cores], itembytes)
+        recon_bytes = int(target.size) * itembytes
 
         loss_history = []
         for _ in range(max_epochs):
             for k in range(N):
-                env_eq, other_ids, n_rows, n_cols, path_arg = env_specs[k]
+                env_eq, other_ids, n_rows, n_cols, path_arg, env_peak = env_specs[k]
                 Xk = _pam_unfold(target, k, xp)
                 Gk = _pam_unfold(self.cores[k], k, xp)
 
-                M = xp.einsum(
-                    env_eq, *[self.cores[i] for i in other_ids], optimize=path_arg
+                M = _contract_auto(
+                    env_eq, [self.cores[i] for i in other_ids], path_arg,
+                    n_rows * n_cols * itembytes, env_peak,
                 ).reshape(n_rows, n_cols)
-                tempC = Xk @ M + rho * Gk
-                tempA = M.T @ M + rho * xp.eye(n_cols, dtype=Gk.dtype)
+
+                # Ridge / proximal core update solved in the smaller dimension
+                # (push-through identity — identical result):
+                #   n_cols-space  (MᵀM)  when the core is determined,
+                #   n_rows-space  (MMᵀ)  when it is over-parameterised (high rank).
+                if n_cols <= n_rows:
+                    tempA = M.T @ M + rho * xp.eye(n_cols, dtype=Gk.dtype)
+                    tempC = Xk @ M + rho * Gk
+                    new_Gk = xp.linalg.solve(tempA, tempC.T).T
+                else:
+                    S = M @ M.T + rho * xp.eye(n_rows, dtype=Gk.dtype)
+                    resid = Xk - Gk @ M.T
+                    new_Gk = Gk + xp.linalg.solve(S, resid.T).T @ M
 
                 core_shape = [int(x) for x in self.adj_matrix[k].tolist()]
-                self.cores[k] = _pam_fold(
-                    xp.linalg.solve(tempA, tempC.T).T, k, core_shape, xp
-                )
+                self.cores[k] = _pam_fold(new_Gk, k, core_shape, xp)
 
-            recon = xp.einsum(self.eq, *self.cores, optimize=full_path)
+                # Release the (per-core, differently shaped) environment matrix and
+                # solve temporaries back to the OS so they don't starve the next
+                # core's sliced-contraction workspace on high-rank structures.
+                del M, new_Gk
+                xp.cuda.Stream.null.synchronize()
+                xp.get_default_memory_pool().free_all_blocks()
+
+            recon = _contract_auto(self.eq, list(self.cores), full_path,
+                                   recon_bytes, recon_peak)
             loss_val = xp.linalg.norm(recon - target) / target_norm
             loss_history.append(float(loss_val.item()))
             if tol is not None and loss_history[-1] <= tol:

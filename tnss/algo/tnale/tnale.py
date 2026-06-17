@@ -11,7 +11,8 @@ import numpy as np
 import torch
 from botorch.utils.transforms import unnormalize
 
-from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
+from tensors.networks.cutensor_network import contraction_scalar_row
+from tnss.algo.boss.base import _eval_tn
 from tnss.algo.init_designs import sample_init_points, INIT_DESIGNS
 from tnss.algo.tnale.structure import Structure
 from tnss.algo.tnale.neighborhood import (
@@ -201,6 +202,7 @@ class TnALE:
             atomic_write_json(progress_file, {
                 "phase": "interpolation" if self._in_init_phase else "main",
                 "step": step + 1, "budget": self.budget,
+                "oom": self._oom_count(),
             })
 
         return self.rows
@@ -458,42 +460,23 @@ class TnALE:
     def _eval_one(
         self, s: Structure, update_idx: int | None
     ) -> tuple[float, float, float]:
-        """Run cuTensorNetwork decomposition on one structure. Returns (rse, cr, time_s)."""
-        t0 = time.time()
-        A = cp.asarray(s.to_network_adj())
-        net = cuTensorNetwork(A, backend=self.backend, dtype=self.dtype)
-        cr = float(net.network_size()) / float(net.target_size())
-
-        best_rse = float("inf")
-        best_losses: list[float] = []
-        for _ in range(self.n_runs):
-            losses = net.decompose(
-                self._target_cp,
-                max_epochs=self.maxiter_tn,
-                method=self.decomp_method,
-                init_lr=self.init_lr,
-                momentum=self.momentum,
-                loss_patience=self.loss_patience,
-                lr_patience=self.lr_patience,
-                verbose=False
-            )
-            rse = float(losses[-1]) if losses else float("inf")
-            if rse < best_rse:
-                best_rse = rse
-                best_losses = [float(x) for x in losses]
-            if best_rse < self.min_rse:
-                break
-
-        elapsed = time.time() - t0
-        contraction_stats = net.contraction_stats
+        """Decompose one structure via the shared :func:`_eval_tn` path (same
+        target normalization, restart loop and OOM handling as BOSS). Returns
+        (rse, cr, time_s)."""
+        cr, best_rse, elapsed, _recon, best_losses, contraction_stats, eval_status = _eval_tn(
+            self._target_cp, s.to_network_adj(),
+            self.maxiter_tn, self.n_runs, self.min_rse,
+            method=self.decomp_method, backend=self.backend, dtype=self.dtype,
+            init_lr=self.init_lr, momentum=self.momentum,
+            loss_patience=self.loss_patience, lr_patience=self.lr_patience,
+        )
 
         if best_rse < self.best_rse:
             self.best_rse = best_rse
             self.best_cr = cr
 
-        self._record(s, best_rse, cr, elapsed, best_losses, contraction_stats)
+        self._record(s, best_rse, cr, elapsed, best_losses, contraction_stats, eval_status)
 
-        del net, A
         gc.collect()
         if cp.get_default_memory_pool() is not None:
             cp.get_default_memory_pool().free_all_blocks()
@@ -654,6 +637,7 @@ class TnALE:
                 best_ranks = ranks.copy()
             atomic_write_json(progress_file, {
                 "phase": "init", "step": i + 1, "budget": self.n_init,
+                "oom": self._oom_count(),
             })
         self._in_pooled_init = False
 
@@ -666,6 +650,11 @@ class TnALE:
     # Row recording and output
     # ------------------------------------------------------------------
 
+    def _oom_count(self) -> int:
+        """Structures skipped as too large to contract — surfaced live in the
+        dashboard Active Runs table via progress.json."""
+        return sum(1 for r in self.rows if r.get("eval_status") == "oom")
+
     def _record(
         self,
         s: Structure,
@@ -674,6 +663,7 @@ class TnALE:
         elapsed: float,
         losses: list[float] | None = None,
         contraction_stats: dict | None = None,
+        eval_status: str = "ok",
     ) -> None:
         self.eval_count += 1
         now = time.time()
@@ -698,6 +688,7 @@ class TnALE:
                 "best_cr": self.best_cr,
                 "sparsity": cr,
                 "objective": cr + self.lambda_fitness * rse,
+                "eval_status": eval_status,
                 "decomp_time": elapsed,
                 "step_time_s": step_time,
                 **contraction_scalar_row(contraction_stats),

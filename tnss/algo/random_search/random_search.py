@@ -11,7 +11,8 @@ from torch import Tensor
 
 import cupy as cp
 
-from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
+from tensors.networks.cutensor_network import contraction_scalar_row
+from tnss.algo.boss.base import _eval_tn
 from tnss.algo.init_designs import sample_init_points, INIT_DESIGNS
 from tnss.utils import triu_to_adj_matrix, cr_of_normalized, to_int_ranks, atomic_write_json
 
@@ -21,48 +22,6 @@ def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
     return triu_to_adj_matrix(x_int.double().unsqueeze(0), diag=t_shape).squeeze()
 
 
-def _eval_tn(target, adj, maxiter, n_runs, min_rse, *, method="pam",
-             backend="cupy", dtype="float32",
-             init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
-    """Evaluate one candidate with cuTensorNetwork decomposition.
-
-    Returns ``(cr, best_rse, elapsed, best_losses, contraction_stats)`` where
-    ``best_losses`` is the loss trajectory of the restart that achieved the
-    best RSE and ``contraction_stats`` is the cuTensorNet path/autotune cost
-    dict (identical across restarts — topology is fixed).
-    """
-    t0 = time.time()
-    tgt_np = target.numpy() if hasattr(target, "numpy") else target
-    target_cp = cp.asarray(tgt_np)
-    adj_cp = cp.asarray(adj.numpy() if hasattr(adj, "numpy") else adj)
-    net = cuTensorNetwork(adj_cp, backend=backend, dtype=dtype)
-    cr = float(net.network_size()) / float(net.target_size())
-
-    best_rse = float("inf")
-    best_losses: list[float] = []
-    for _ in range(n_runs):
-        losses = net.decompose(
-            target_cp,
-            max_epochs=maxiter,
-            method=method,
-            init_lr=init_lr,
-            momentum=momentum,
-            loss_patience=loss_patience,
-            lr_patience=lr_patience,
-        )
-        rse = float(losses[-1]) if losses else float("inf")
-        if rse < best_rse:
-            best_rse = rse
-            best_losses = [float(x) for x in losses]
-        if best_rse < min_rse:
-            break
-
-    elapsed = time.time() - t0
-    contraction_stats = net.contraction_stats
-    del net, adj_cp, target_cp
-    if cp.get_default_memory_pool() is not None:
-        cp.get_default_memory_pool().free_all_blocks()
-    return cr, best_rse, elapsed, best_losses, contraction_stats
 
 
 class RandomSearch:
@@ -133,6 +92,11 @@ class RandomSearch:
         self.train_Y_cr: list[float] = []
         self.train_t: list[float] = []
 
+    def _oom_count(self) -> int:
+        """Structures skipped as too large to contract — surfaced live in the
+        dashboard Active Runs table via progress.json."""
+        return sum(1 for r in self.rows if r.get("eval_status") == "oom")
+
     def run(self, progress_file: Path | None = None) -> list[dict]:
         if self.init_method in INIT_DESIGNS:
             self._pooled_init(progress_file)
@@ -142,7 +106,8 @@ class RandomSearch:
             row = self._observe(step=step_offset + step, phase="random")
             atomic_write_json(
                 progress_file,
-                {"phase": "random", "step": step + 1, "budget": self.budget},
+                {"phase": "random", "step": step + 1, "budget": self.budget,
+                 "oom": self._oom_count()},
             )
 
             if self.verbose:
@@ -197,7 +162,8 @@ class RandomSearch:
                 )
             atomic_write_json(
                 progress_file,
-                {"phase": "init", "step": i + 1, "budget": self.n_init},
+                {"phase": "init", "step": i + 1, "budget": self.n_init,
+                 "oom": self._oom_count()},
             )
 
     def _observe(self, *, step: int, phase: str, x_int_flat: Tensor | None = None) -> dict:
@@ -207,7 +173,7 @@ class RandomSearch:
         sample_time = time.time() - t0
         adj = _triu_to_full(x_int_flat, self.t_shape).int()
 
-        cr, rse, eval_time, losses, ctn_stats = _eval_tn(
+        cr, rse, eval_time, _recon, losses, ctn_stats, eval_status = _eval_tn(
             self.target,
             adj,
             self.maxiter_tn,
@@ -220,6 +186,8 @@ class RandomSearch:
             loss_patience=self.loss_patience,
             lr_patience=self.lr_patience,
         )
+        if cp.get_default_memory_pool() is not None:
+            cp.get_default_memory_pool().free_all_blocks()
         objective = float(cr + self.lamda * rse)
 
         row = {
@@ -231,6 +199,7 @@ class RandomSearch:
             "current_cr": cr,
             "objective": objective,
             "objective_lambda": self.lamda,
+            "eval_status": eval_status,
             "eval_time_s": eval_time,
             "decomp_time_s": eval_time,
             "sample_time_s": sample_time,
