@@ -34,6 +34,7 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 from tnss.algo.boss.base import BOSSBase, _eval_tn, _triu_to_full  # noqa: F401 (re-exported)
 from tnss.algo.boss.means import make_mean, MEANS
 from tnss.kernels.input_warp_kernel import maybe_warp
+from tnss.kernels.round_kernel import maybe_round
 from tnss.kernels.weighted_shortest_path import WeightedShortestPathKernel
 
 
@@ -53,6 +54,9 @@ class BOSS(BOSSBase):
     mean          : GP mean — 'constant' or a learned 'linear' trend in the ranks
     wsp_mode      : shortest-path kernel variant ('matern'/'bogrape'/'soft'/'ewsp')
     input_warp    : wrap the kernel in a learned per-dim input warp (Kumaraswamy CDF)
+    round_inputs  : snap kernel inputs to the integer rank lattice (Garrido-Merchán
+                    & Hernández-Lobato 2020 integer transform) so the GP models the
+                    objective as piecewise-constant over each rank cell
     acqf_optimizer: 'mip' (discrete local search; default) or 'gradient' (L-BFGS-B)
     """
 
@@ -85,6 +89,7 @@ class BOSS(BOSSBase):
         mean: str = "constant",
         wsp_mode: str = "matern",
         input_warp: bool = False,
+        round_inputs: bool = False,
         acqf_optimizer: str = "mip",
         seed: int | None = None,
         verbose: bool = True,
@@ -114,6 +119,7 @@ class BOSS(BOSSBase):
         self.mean = mean
         self.wsp_mode = wsp_mode
         self.input_warp = input_warp
+        self.round_inputs = round_inputs
         self.acqf_optimizer = acqf_optimizer
 
         # Mean factory over the normalized rank vector (fresh module per GP build).
@@ -127,7 +133,8 @@ class BOSS(BOSSBase):
         else:
             base = lambda: WeightedShortestPathKernel(
                 num_nodes=self.N, weight_bounds=(1.0, float(self.max_rank)), mode=self.wsp_mode)
-        self._kernel = lambda: ScaleKernel(maybe_warp(base(), self.D, self.input_warp))
+        self._kernel = lambda: ScaleKernel(maybe_round(
+            maybe_warp(base(), self.D, self.input_warp), self.max_rank, self.round_inputs))
         self._gp_state = None
 
     # ------------------------------------------------------------------

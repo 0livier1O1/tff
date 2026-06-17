@@ -25,6 +25,7 @@ from linear_operator.utils.errors import NotPSDError
 
 from tnss.algo.boss.means import make_mean
 from tnss.kernels.input_warp_kernel import maybe_warp
+from tnss.kernels.round_kernel import maybe_round
 from tnss.kernels.weighted_shortest_path import WeightedShortestPathKernel
 
 STRATEGIES = {"whitened": VariationalStrategy, "unwhitened": UnwhitenedVariationalStrategy}
@@ -43,10 +44,12 @@ MAX_CONSEC_FIT_ERRORS = 5
 
 
 def make_kernel(name: str, D: int, N: int, max_rank: int, wsp_mode: str = "matern",
-                input_warp: bool = False):
+                input_warp: bool = False, round_inputs: bool = False):
     """ScaleKernel over the rank vector. matern52/matern32/rbf are ARD; the
     weighted-shortest-path kernel is topology-aware over the N-core bond graph.
-    With ``input_warp`` the base kernel is wrapped in a learned per-dim warp."""
+    With ``input_warp`` the base kernel is wrapped in a learned per-dim warp; with
+    ``round_inputs`` its inputs are snapped to the integer rank lattice (outermost,
+    so rounding precedes any warp)."""
     if name in _NU:
         base = MaternKernel(nu=_NU[name], ard_num_dims=D)
     elif name == "rbf":
@@ -56,7 +59,7 @@ def make_kernel(name: str, D: int, N: int, max_rank: int, wsp_mode: str = "mater
             num_nodes=N, weight_bounds=(1.0, float(max_rank)), mode=wsp_mode)
     else:
         raise ValueError(f"unknown kernel {name!r}")
-    return ScaleKernel(maybe_warp(base, D, input_warp))
+    return ScaleKernel(maybe_round(maybe_warp(base, D, input_warp), max_rank, round_inputs))
 
 
 class FeasibilityGP(SingleTaskVariationalGP):
@@ -82,7 +85,7 @@ class FeasibilityGP(SingleTaskVariationalGP):
 
     def __init__(self, train_X, train_Y, *, D, N, max_rank, t_shape=None,
                  kernel="matern", mean="constant", var_strategy="whitened", wsp_mode="matern",
-                 input_warp=False, full_epochs=400, refine_epochs=60,
+                 input_warp=False, round_inputs=False, full_epochs=400, refine_epochs=60,
                  lr=0.1, tol=1e-4, patience=10):
         if var_strategy not in STRATEGIES:
             raise ValueError(f"var_strategy must be one of {list(STRATEGIES)}")
@@ -90,7 +93,7 @@ class FeasibilityGP(SingleTaskVariationalGP):
             train_X, train_Y,
             likelihood=BernoulliLikelihood(),
             mean_module=make_mean(mean, D, N=N, max_rank=max_rank, t_shape=t_shape),
-            covar_module=make_kernel(kernel, D, N, max_rank, wsp_mode, input_warp),
+            covar_module=make_kernel(kernel, D, N, max_rank, wsp_mode, input_warp, round_inputs),
             variational_strategy=STRATEGIES[var_strategy],
             inducing_points=train_X,
             learn_inducing_points=False,
@@ -100,6 +103,7 @@ class FeasibilityGP(SingleTaskVariationalGP):
         self._cfg = dict(D=D, N=N, max_rank=max_rank, t_shape=t_shape,
                          kernel=kernel, mean=mean,
                          var_strategy=var_strategy, wsp_mode=wsp_mode, input_warp=input_warp,
+                         round_inputs=round_inputs,
                          full_epochs=full_epochs, refine_epochs=refine_epochs,
                          lr=lr, tol=tol, patience=patience)
         self.full_epochs = full_epochs

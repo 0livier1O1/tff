@@ -52,7 +52,7 @@ def _gp_cfg(algo: dict, D: int, N: int, max_rank: int, t_shape) -> dict:
         D=D, N=N, max_rank=max_rank, t_shape=t_shape,
         kernel=algo["kernel"], mean=algo["mean"],
         var_strategy=algo[f"{p}_var_strategy"], wsp_mode=algo[f"{p}_wsp_mode"],
-        input_warp=algo["input_warp"],
+        input_warp=algo["input_warp"], round_inputs=algo["round_inputs"],
         full_epochs=int(algo[f"{p}_gp_epochs"]),
         refine_epochs=int(algo[f"{p}_gp_refine_epochs"]),
         tol=float(algo[f"{p}_gp_tol"]), patience=int(algo[f"{p}_gp_patience"]),

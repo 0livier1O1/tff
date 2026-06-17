@@ -25,7 +25,7 @@ GROUP_FIELDS: dict[str, tuple[str, ...]] = {
                "decomp_loss_patience", "decomp_lr_patience"),
     "init":   ("init_method", "n_init", "cr_warp_lambda", "cr_pool_bias"),
     "search": ("budget", "max_rank", "n_runs", "feasible_rse", "lambda_fitness"),
-    "gp":     ("kernel", "mean", "input_warp", "freq_update",
+    "gp":     ("kernel", "mean", "input_warp", "round_inputs", "freq_update",
                "var_strategy", "wsp_mode", "gp_epochs", "gp_refine_epochs",
                "gp_tol", "gp_patience", "gp_reset_every", "raw_samples", "num_restarts"),
 }

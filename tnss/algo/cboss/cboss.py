@@ -54,6 +54,7 @@ class CBOSS(BOSSBase):
     mean          : feasibility-GP latent mean ('constant' or learned 'linear' in the ranks)
     var_strategy  : 'whitened' or 'unwhitened' variational strategy
     input_warp    : wrap the kernel in a learned per-dim input warp (Kumaraswamy CDF)
+    round_inputs  : snap kernel inputs to the integer rank lattice (integer transform)
     wsp_mode      : shortest-path kernel variant (only for the wsp kernel)
     gp_epochs     : max Adam epochs for the full ELBO fit at init
     gp_refine_epochs / gp_tol / gp_patience : per-refresh budget + ELBO early-stop
@@ -88,6 +89,7 @@ class CBOSS(BOSSBase):
         var_strategy: str = "whitened",
         wsp_mode: str = "matern",
         input_warp: bool = False,
+        round_inputs: bool = False,
         gp_epochs: int = 400,
         freq_update: int = 5,
         gp_refine_epochs: int = 60,
@@ -120,6 +122,7 @@ class CBOSS(BOSSBase):
         self.var_strategy = var_strategy
         self.wsp_mode = wsp_mode
         self.input_warp = input_warp
+        self.round_inputs = round_inputs
         self.gp_epochs = gp_epochs
         self.gp_refine_epochs = gp_refine_epochs
         self.gp_tol = gp_tol
@@ -158,7 +161,7 @@ class CBOSS(BOSSBase):
         feas = FeasibilityGP(
             X, Y_feas, D=self.D, N=self.N, max_rank=self.max_rank, t_shape=self.t_shape,
             kernel=self.kernel, mean=self.mean, var_strategy=self.var_strategy, wsp_mode=self.wsp_mode,
-            input_warp=self.input_warp,
+            input_warp=self.input_warp, round_inputs=self.round_inputs,
             full_epochs=self.gp_epochs, refine_epochs=self.gp_refine_epochs,
             tol=self.gp_tol, patience=self.gp_patience,
         ).fit(epochs=self.gp_epochs, freeze_hypers=False)

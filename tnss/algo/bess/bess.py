@@ -62,7 +62,7 @@ class BESS(BOSSBase):
                   (subset of the n_ref diagnostic design; caps its O((M+b)^2) cost)
     n_ref       : size of the fixed reference design used to estimate the
                   integrated boundary error E each step
-    kernel/mean/var_strategy/wsp_mode/input_warp : feasibility-GP configuration
+    kernel/mean/var_strategy/wsp_mode/input_warp/round_inputs : feasibility-GP configuration
                   (same surrogate as cBOSS)
     gp_epochs / gp_refine_epochs / gp_tol / gp_patience / gp_reset_every : GP fit
                   budgets and refresh cadence (same semantics as cBOSS)
@@ -100,6 +100,7 @@ class BESS(BOSSBase):
         var_strategy: str = "whitened",
         wsp_mode: str = "matern",
         input_warp: bool = False,
+        round_inputs: bool = False,
         gp_epochs: int = 400,
         freq_update: int = 5,
         gp_refine_epochs: int = 60,
@@ -136,6 +137,7 @@ class BESS(BOSSBase):
         self.var_strategy = var_strategy
         self.wsp_mode = wsp_mode
         self.input_warp = input_warp
+        self.round_inputs = round_inputs
         self.gp_epochs = gp_epochs
         self.gp_refine_epochs = gp_refine_epochs
         self.gp_tol = gp_tol
@@ -160,7 +162,7 @@ class BESS(BOSSBase):
         feas = FeasibilityGP(
             X, Y_feas, D=self.D, N=self.N, max_rank=self.max_rank, t_shape=self.t_shape,
             kernel=self.kernel, mean=self.mean, var_strategy=self.var_strategy,
-            wsp_mode=self.wsp_mode, input_warp=self.input_warp,
+            wsp_mode=self.wsp_mode, input_warp=self.input_warp, round_inputs=self.round_inputs,
             full_epochs=self.gp_epochs, refine_epochs=self.gp_refine_epochs,
             tol=self.gp_tol, patience=self.gp_patience,
         ).fit(epochs=self.gp_epochs, freeze_hypers=False)

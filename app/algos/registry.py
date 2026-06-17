@@ -65,7 +65,8 @@ def _build_boss(acfg, adj_np, target_np, seed):
         max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
         freq_update=acfg.freq_update, lamda=acfg.lambda_fitness, n_runs=acfg.n_runs,
         acqf=_acqf(acfg), ucb_beta=acfg.ucb_beta, kernel=acfg.kernel, mean=acfg.mean,
-        input_warp=acfg.input_warp, seed=seed, verbose=True, **_decomp_kwargs(acfg),
+        input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,
+        seed=seed, verbose=True, **_decomp_kwargs(acfg),
     )
 
 
@@ -78,7 +79,7 @@ def _build_cboss(acfg, adj_np, target_np, seed):
         n_runs=acfg.n_runs, acqf=_acqf(acfg), ficr_t=acfg.cboss_ficr_t,
         lamda=acfg.lambda_fitness, seek_feasible_first=acfg.cboss_seek_feasible_first,
         kernel=acfg.kernel, mean=acfg.mean, var_strategy=acfg.var_strategy,
-        wsp_mode=acfg.wsp_mode, input_warp=acfg.input_warp,
+        wsp_mode=acfg.wsp_mode, input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,
         gp_epochs=acfg.gp_epochs, freq_update=acfg.freq_update,
         gp_refine_epochs=acfg.gp_refine_epochs, gp_tol=acfg.gp_tol,
         gp_patience=acfg.gp_patience, gp_reset_every=acfg.gp_reset_every,
@@ -99,7 +100,7 @@ def _build_bess(acfg, adj_np, target_np, seed):
         tmse_eps=acfg.bess_tmse_eps, sur_obs_noise=acfg.bess_sur_obs_noise,
         sur_ref_size=acfg.bess_sur_ref_size, n_ref=acfg.bess_n_ref,
         kernel=acfg.kernel, mean=acfg.mean, var_strategy=acfg.var_strategy,
-        wsp_mode=acfg.wsp_mode, input_warp=acfg.input_warp,
+        wsp_mode=acfg.wsp_mode, input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,
         gp_epochs=acfg.gp_epochs, freq_update=acfg.freq_update,
         gp_refine_epochs=acfg.gp_refine_epochs, gp_tol=acfg.gp_tol,
         gp_patience=acfg.gp_patience, gp_reset_every=acfg.gp_reset_every,

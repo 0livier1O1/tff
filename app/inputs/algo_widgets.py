@@ -474,6 +474,12 @@ BO_INPUT_WARP_HELP = (
     "at init). Lets a stationary kernel model non-stationarity — sharper at the "
     "feasibility boundary, where the un-warped kernel tends to be over-smooth."
 )
+BO_ROUND_HELP = (
+    "Snap the kernel inputs to the integer rank lattice before computing the covariance "
+    "(Garrido-Merchán & Hernández-Lobato 2020 integer transform). Points in the same rank "
+    "cell get distance 0, so the GP models the objective as piecewise-constant over each "
+    "cell instead of wasting length-scale on within-cell variation that can't exist."
+)
 
 
 def _render_cr_stratified_opts(acfg, key_prefix: str) -> None:
@@ -506,6 +512,7 @@ def _render_feasibility_gp_group(acfg) -> None:
          f"{p}_var_strategy_{cid}", help="Variational strategy.")
     _sel(st, acfg, "mean", "Mean function", BO_MEANS, f"{p}_mean_{cid}", help=BO_MEAN_HELP)
     _chk(st, acfg, "input_warp", "Use Input Warping", f"{p}_input_warp_{cid}", help=BO_INPUT_WARP_HELP)
+    _chk(st, acfg, "round_inputs", "Round to integers", f"{p}_round_inputs_{cid}", help=BO_ROUND_HELP)
     if acfg.kernel == "weighted_shortest_path":
         _sel(st, acfg, "wsp_mode", "WSP mode", ["matern", "bogrape", "soft", "ewsp"],
              f"{p}_wsp_mode_{cid}", help="Shortest-path kernel variant.")
@@ -569,6 +576,7 @@ def _render_boss(acfg: BOSSConfig) -> None:
     with _group("Surrogate / GP"):
         _sel(st, acfg, "mean", "GP mean function", BO_MEANS, f"boss_mean_{cid}", help=BO_MEAN_HELP)
         _chk(st, acfg, "input_warp", "Use Input Warping", f"boss_input_warp_{cid}", help=BO_INPUT_WARP_HELP)
+        _chk(st, acfg, "round_inputs", "Round to integers", f"boss_round_inputs_{cid}", help=BO_ROUND_HELP)
         _num(st, acfg, "freq_update", "Freq update (GP hyper-refit)", f"boss_freq_update_{cid}",
              min_value=1, max_value=1000,
              help="Re-optimize GP hyperparameters every N BO steps; the GP still conditions "

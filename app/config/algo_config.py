@@ -81,6 +81,7 @@ class AlgoConfig:
     kernel: str = "matern"
     mean: str = "constant"          # GP mean for the BO families: 'constant' | 'linear' | 'log_size'
     input_warp: bool = False        # wrap the BO-family kernel in a learned per-dim input warp
+    round_inputs: bool = False      # snap BO-family kernel inputs to the integer rank lattice
     ucb_beta: float = 2.0
     # Surrogate refresh cadence for the BO families (BOSS/cBOSS): re-fit the GP
     # (hyperparameters for BOSS, variational dist for cBOSS) every N steps.
