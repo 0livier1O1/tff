@@ -156,37 +156,49 @@ class BOSSConfig(AlgoConfig):
 
 
 # ---------------------------------------------------------------------------
+# Feasibility-GP families (cBOSS, BESS) — shared surrogate config
+# ---------------------------------------------------------------------------
+
+@dataclass(kw_only=True)
+class FeasibilityGPConfig:
+    """Surrogate + acquisition-optimizer parameters shared by the variational
+    feasibility-GP families (cBOSS and BESS). Both configure the *same*
+    FeasibilityGP, so these live here once with un-prefixed names rather than as
+    duplicated cboss_*/bess_* fields. (kernel/mean/input_warp/freq_update are the
+    even-more-shared base fields on AlgoConfig.) Subclasses may override a default
+    that genuinely differs — e.g. BESS sets gp_reset_every=0.
+    """
+    var_strategy: str = "whitened"      # whitened | unwhitened
+    wsp_mode: str = "matern"            # only for the wsp kernel
+    gp_epochs: int = 400                # full fit at init
+    # (refresh cadence is the shared base field `freq_update`)
+    gp_refine_epochs: int = 60          # per warm-started refresh
+    gp_tol: float = 1e-4
+    gp_patience: int = 10
+    # Every N BO steps, hard-reset the surrogate with a fresh full fit (kept only if
+    # its ELBO wins) to escape warm-start drift / local minima. 0 = never reset.
+    gp_reset_every: int = 25
+
+    # Acquisition optimizer (discrete local search)
+    raw_samples: int = 256
+    num_restarts: int = 10
+
+
+# ---------------------------------------------------------------------------
 # cBOSS (constrained BOSS)
 # ---------------------------------------------------------------------------
 
 @dataclass(kw_only=True)
-class CBOSSConfig(AlgoConfig):
+class CBOSSConfig(FeasibilityGPConfig, AlgoConfig):
     family: str = "cboss"
 
     # All shared search fields (init_method, feasible_rse, budget, max_rank,
     # lambda_fitness, kernel, …) inherit the base defaults so they match the
-    # other families.
+    # other families; the feasibility-GP surrogate fields come from the mixin.
 
     cboss_ficr_t: float = 1.0               # interpolation exponent (cboss-ficr only)
     cboss_seek_feasible_first: bool = True
-
-    # Feasibility GP surrogate (var_strategy/wsp_mode are cBOSS-specific; the
-    # constant/linear `mean` is a shared base field)
-    cboss_var_strategy: str = "whitened"    # whitened | unwhitened
-    cboss_wsp_mode: str = "matern"          # only for the wsp kernel
-    cboss_gp_epochs: int = 400              # full fit at init
-    # (refresh cadence is the shared base field `freq_update`)
-    cboss_gp_refine_epochs: int = 60
-    cboss_gp_tol: float = 1e-4
-    cboss_gp_patience: int = 10
-    # Every N BO steps, hard-reset the surrogate with a fresh full fit (kept only if
-    # its ELBO wins) to escape warm-start drift / local minima. 0 = never reset.
-    cboss_gp_reset_every: int = 25
-
-    # Acquisition optimizer (discrete local search) + MC samples for cei
-    cboss_mc_samples: int = 128
-    cboss_raw_samples: int = 256
-    cboss_num_restarts: int = 10
+    cboss_mc_samples: int = 128             # MC samples for the cei acquisition
 
 
 # ---------------------------------------------------------------------------
@@ -196,8 +208,12 @@ class CBOSSConfig(AlgoConfig):
 # ---------------------------------------------------------------------------
 
 @dataclass(kw_only=True)
-class BESSConfig(AlgoConfig):
+class BESSConfig(FeasibilityGPConfig, AlgoConfig):
     family: str = "bess"
+
+    # Feasibility-GP surrogate fields come from FeasibilityGPConfig (same surrogate
+    # as cBOSS); BESS defaults to never hard-resetting it.
+    gp_reset_every: int = 0                 # 0 = never hard-reset
 
     # Acquisition (the contour finder is selected by policy: bess-cucb/tmse/sur).
     bess_cucb_gamma_mode: str = "constant"  # 'constant' | 'adaptive' (paper §3.2)
@@ -206,21 +222,6 @@ class BESSConfig(AlgoConfig):
     bess_sur_obs_noise: float = 1.0         # sur probit implicit observation noise τ²
     bess_sur_ref_size: int = 512            # sur look-ahead reference points
     bess_n_ref: int = 2048                  # reference design for the boundary-error E
-
-    # Feasibility GP surrogate (same surrogate as cBOSS; kernel/mean/input_warp
-    # are shared base fields).
-    bess_var_strategy: str = "whitened"     # whitened | unwhitened
-    bess_wsp_mode: str = "matern"           # only for the wsp kernel
-    bess_gp_epochs: int = 400               # full fit at init
-    # (refresh cadence is the shared base field `freq_update`)
-    bess_gp_refine_epochs: int = 60
-    bess_gp_tol: float = 1e-4
-    bess_gp_patience: int = 10
-    bess_gp_reset_every: int = 0            # 0 = never hard-reset
-
-    # Acquisition optimizer (discrete local search)
-    bess_raw_samples: int = 256
-    bess_num_restarts: int = 10
 
 
 # ---------------------------------------------------------------------------
@@ -300,8 +301,8 @@ def algo_config_from_dict(d: dict[str, Any]) -> AlgoConfig:
         raise ValueError("Config dict missing 'family' discriminator")
     cls = _CONFIG_CLS[fam]
     # Drop keys that aren't fields of this subclass: serialized configs from
-    # earlier schema versions (e.g. a since-renamed `cboss_mean`) would otherwise
-    # crash reconstruction. Unknown keys fall back to the field's current default.
+    # earlier schema versions would otherwise crash reconstruction. Unknown keys
+    # fall back to the field's current default.
     valid = {f.name for f in fields(cls)}
     return cls(**{k: v for k, v in d.items() if k in valid})
 

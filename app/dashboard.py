@@ -29,6 +29,15 @@ st.markdown(
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 
+    /* Sidebar background tinted a touch darker than default so the (white)
+       algorithm/parameter expander cards stand out against it. */
+    section[data-testid="stSidebar"] {
+        background-color: #dde3ec !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] details {
+        background-color: #ffffff !important;
+    }
+
     /* Hide only the expand/collapse chevron on popover buttons (its own
        wrapper), keeping the button's own label icon. */
     [data-testid="stPopoverButton"] [class*="e1jdirsb1"],
