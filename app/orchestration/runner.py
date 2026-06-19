@@ -192,11 +192,16 @@ def _merge_algo_configs(existing: list[dict], new: list[dict]) -> list[dict]:
     return merged
 
 
-def _write_manifest(path: Path, pid_file: Path, root: Path, jobs: list[dict]) -> None:
-    """(Over)write a fresh dispatch manifest atomically."""
+def _write_manifest(path: Path, pid_file: Path, root: Path, jobs: list[dict],
+                    max_gpus: int | None = None) -> None:
+    """(Over)write a fresh dispatch manifest atomically.
+
+    `max_gpus` caps the dispatcher's GPU pool (None = use every GPU); 1 confines
+    the whole run to a single GPU so jobs run sequentially."""
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(
-        {"pid_file": str(pid_file), "cwd": str(root), "jobs": jobs}, indent=2,
+        {"pid_file": str(pid_file), "cwd": str(root),
+         "max_gpus": max_gpus, "jobs": jobs}, indent=2,
     ))
     tmp.replace(path)
 
@@ -331,7 +336,8 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         # Write a fresh manifest for a brand-new dispatcher. If we appended to a
         # manifest whose dispatcher then died, keep it (old+new; .done skipped).
         if not dispatcher_alive or not manifest_path.exists():
-            _write_manifest(manifest_path, pid_file, ROOT, manifest_jobs)
+            _write_manifest(manifest_path, pid_file, ROOT, manifest_jobs,
+                            max_gpus=None if cfg.parallel_gpus else 1)
         if cfg.use_tmux and cfg.tmux_session:
             dispatch = (
                 f"cd {shlex.quote(str(ROOT))} && "

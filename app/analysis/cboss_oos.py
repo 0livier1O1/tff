@@ -18,7 +18,6 @@ step; reruns only decompose structures missing from the cache.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -31,33 +30,31 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# The decomposition kwargs of ``_eval_tn`` that define a feasibility label. Two
-# runs with the same values share one OOS cache; differing values get separate
-# caches (via the signature) so labels are never mixed across decomp settings.
-DECOMP_KEYS = ("maxiter", "n_runs", "min_rse", "method",
-               "init_lr", "momentum", "loss_patience", "lr_patience")
+# Canonical OOS decomposition presets, keyed by method. The OOS feasibility labels
+# are decomposed with a FIXED spec (not the run's own settings) so the labelled set
+# is stable per (problem, seed, method) and a run can be scored against either
+# method's labels. Epoch budgets come from the dense method benchmark
+# (reports/decomp/decomp_benchmark.py): the gradient ``adam`` fit needs ~1000+ epochs
+# while the alternating ``agd`` reaches comparable RSE in ~200 sweeps.
+OOS_METHODS = ("adam", "agd")
+_OOS_DECOMP = {
+    # The adam preset reproduces the original run-derived labels exactly (these were
+    # the cBOSS/BESS run settings), so the pre-existing ADAM cache is reused once it
+    # is renamed to the method-named file (see the migration note in load_or_build_oos).
+    "adam": dict(maxiter=1000, n_runs=1, min_rse=0.01, method="adam",
+                 init_lr=0.01, momentum=0.9, loss_patience=500, lr_patience=50),
+    # agd recipe from the benchmark's COMMON_KW + EPOCHS["agd"]=200; loss-patience is
+    # left effectively off so the full 200 sweeps run and the asymptotic RSE is reached.
+    "agd": dict(maxiter=200, n_runs=1, min_rse=0.01, method="agd",
+                init_lr=0.01, momentum=0.9, loss_patience=10**9, lr_patience=50),
+}
 
 
-def decomp_kwargs_from_algo(algo: dict) -> dict:
-    """Map an algo-config dict to ``_eval_tn``'s decomposition kwargs — the same
-    ones ``BOSSBase._evaluate`` passes, so the OOS labels match the run."""
-    return dict(
-        maxiter=int(algo["decomp_epochs"]),
-        n_runs=int(algo.get("n_runs", 1)),
-        min_rse=float(algo["feasible_rse"]),
-        method=str(algo["decomp_method"]),
-        init_lr=algo["decomp_init_lr"],
-        momentum=float(algo["decomp_momentum"]),
-        loss_patience=int(algo["decomp_loss_patience"]),
-        lr_patience=int(algo["decomp_lr_patience"]),
-    )
-
-
-def _decomp_sig(decomp: dict) -> str:
-    """8-hex signature of the decomp kwargs so caches with different settings don't
-    collide (and matching ones are shared)."""
-    blob = json.dumps({k: decomp[k] for k in DECOMP_KEYS}, sort_keys=True)
-    return hashlib.md5(blob.encode()).hexdigest()[:8]
+def _oos_decomp(method: str) -> dict:
+    """The fixed ``_eval_tn`` decomposition kwargs for an OOS labelling method."""
+    if method not in _OOS_DECOMP:
+        raise ValueError(f"oos_method must be one of {OOS_METHODS}, got {method!r}")
+    return dict(_OOS_DECOMP[method])
 
 
 def _target_path(repo_root: Path, problem_id: str, seed: int) -> Path:
@@ -72,9 +69,10 @@ def _load_target(path: Path):
     return torch.from_numpy(arr).to(torch.double)
 
 
-def _cache_path(repo_root: Path, problem_id: str, seed: int, sig: str) -> Path:
+def _cache_path(repo_root: Path, problem_id: str, seed: int, method: str) -> Path:
+    """Method-named OOS cache, so the file says which decomposition labelled it."""
     return (repo_root / "artifacts" / "oos_testsets" / problem_id
-            / f"seed_{seed}__{sig}.npz")
+            / f"seed_{seed}__{method}.npz")
 
 
 # OOS design shaping via the shared cr_stratified init knobs: space points evenly in
@@ -177,16 +175,23 @@ def _build(missing: np.ndarray, target_path: Path, decomp: dict, cache_dir: Path
 
 
 def load_or_build_oos(repo_root, problem_id: str, seed: int, algo: dict,
-                      n: int = 1000) -> dict:
+                      n: int = 1000, oos_method: str = "adam") -> dict:
     """Return ``{X (n,D int), rse (n,), cr (n,)}`` for the OOS set, building +
     caching on first call.
 
-    `algo` is the run's algo-config dict (decomp settings + ``max_rank``). The
-    cache is shared by every algo with matching problem/seed/decomp signature.
+    The structures are fixed per (problem, seed); only ``max_rank`` is read from
+    `algo`. The feasibility labels are decomposed with ``oos_method``'s canonical
+    preset (see ``_OOS_DECOMP``), so the cache is shared by every run on that
+    problem/seed and is independent of the run's own decomposition settings.
+
+    Migration note: the original caches were named by an opaque decomp-signature
+    hash (``seed_{s}__94beefb9.npz`` == the adam preset). Those were renamed to
+    ``seed_{s}__adam.npz`` so this method-named loader reuses them without
+    re-decomposing.
     """
     repo_root = Path(repo_root)
-    decomp = decomp_kwargs_from_algo(algo)
-    cache = _cache_path(repo_root, problem_id, seed, _decomp_sig(decomp))
+    decomp = _oos_decomp(oos_method)
+    cache = _cache_path(repo_root, problem_id, seed, oos_method)
     target_path = _target_path(repo_root, problem_id, seed)
 
     target = _load_target(target_path)

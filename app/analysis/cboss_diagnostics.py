@@ -49,12 +49,14 @@ def _family(config_dir: Path) -> str:
     return _algo_config(config_dir).get("family", "cboss")
 
 
-def _diag_dir(config_dir: Path) -> Path:
-    return config_dir / "analysis" / _family(config_dir)
+def _diag_dir(config_dir: Path, oos_method: str = "adam") -> Path:
+    """Diagnostics cache, keyed by the OOS labelling method so ADAM- and AGD-scored
+    diagnostics coexist (the dashboard selector switches between them)."""
+    return config_dir / "analysis" / _family(config_dir) / oos_method
 
 
-def has_cboss_diagnostics(config_dir: Path) -> bool:
-    d = _diag_dir(config_dir)
+def has_cboss_diagnostics(config_dir: Path, oos_method: str = "adam") -> bool:
+    d = _diag_dir(config_dir, oos_method)
     if not all((d / f).exists() for f in ("oos_metrics.csv", "oos_eval.npz", "meta.json")):
         return False
     # Stale caches lack newer fields — the latent-σ array (``sigma_final``) and the
@@ -65,9 +67,9 @@ def has_cboss_diagnostics(config_dir: Path) -> bool:
     return "bal_accuracy" in pd.read_csv(d / "oos_metrics.csv", nrows=0).columns
 
 
-def load_cboss_diagnostics(config_dir: Path):
+def load_cboss_diagnostics(config_dir: Path, oos_method: str = "adam"):
     """(metrics_df, oos_eval_npz, acqf_trace_npz, meta_dict) from the cache."""
-    d = _diag_dir(config_dir)
+    d = _diag_dir(config_dir, oos_method)
     return (pd.read_csv(d / "oos_metrics.csv"),
             np.load(d / "oos_eval.npz"),
             np.load(d / "acqf_trace.npz", allow_pickle=True),
@@ -86,9 +88,10 @@ def _bacc(y, p) -> float:
     return float(balanced_accuracy_score(y, (np.asarray(p) >= 0.5).astype(int)))
 
 
-def generate_cboss_diagnostics(config_dir: Path) -> Path:
-    """Replay the run's feasibility GP, score every refit on the shared OOS set,
-    and cache the computed data. Returns the diagnostics dir."""
+def generate_cboss_diagnostics(config_dir: Path, oos_method: str = "adam") -> Path:
+    """Replay the run's feasibility GP, score every refit on the shared OOS set
+    (decomposed with ``oos_method``'s preset), and cache the computed data. Returns
+    the diagnostics dir."""
     config_dir = Path(config_dir)
     algo = _algo_config(config_dir)
     feasible_rse = float(algo["feasible_rse"])
@@ -98,8 +101,9 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
     seed = int(config_dir.parent.name.split("_")[1])
     problem_id = json.loads((config_dir.parents[1] / "config.json").read_text())["problem_id"]
 
-    # Shared OOS test set (decomposed with the run's settings; builds on first use).
-    oos = load_or_build_oos(ROOT, problem_id, seed, algo, n=N_OOS)
+    # Shared OOS test set (decomposed with oos_method's canonical preset; builds on
+    # first use). Independent of the run's own decomposition settings.
+    oos = load_or_build_oos(ROOT, problem_id, seed, algo, n=N_OOS, oos_method=oos_method)
     target = _load_target(_target_path(ROOT, problem_id, seed))
 
     # Generating structure (synthetic problems only): the ground-truth adjacency's
@@ -145,7 +149,7 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
     n_error_resets = int((gp_phase == "error-reset").sum())
     n_periodic_resets = int((gp_phase == "reset").sum())
 
-    out = _diag_dir(config_dir)
+    out = _diag_dir(config_dir, oos_method)
     out.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(metrics).to_csv(out / "oos_metrics.csv", index=False)
     np.savez(out / "oos_eval.npz",
@@ -179,7 +183,7 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
 
     n_cores = int(round((1 + (1 + 8 * oos["X"].shape[1]) ** 0.5) / 2))
     (out / "meta.json").write_text(json.dumps(dict(
-        feasible_rse=feasible_rse, n_oos=int(len(oos["X"])),
+        feasible_rse=feasible_rse, n_oos=int(len(oos["X"])), oos_method=oos_method,
         n_scored=n_scored, n_excluded=n_excluded,
         acqf=acqf, ficr_t=ficr_t, n_cores=n_cores,
         pf_mae=pf_mae, pf_spearman=pf_rho,
@@ -193,6 +197,10 @@ def generate_cboss_diagnostics(config_dir: Path) -> Path:
 
 if __name__ == "__main__":
     import argparse
+    from app.analysis.cboss_oos import OOS_METHODS
     ap = argparse.ArgumentParser()
     ap.add_argument("config_dir", help="a cBOSS result dir (has cboss_results.npz, traces.csv)")
-    generate_cboss_diagnostics(Path(ap.parse_args().config_dir))
+    ap.add_argument("--oos-method", choices=OOS_METHODS, default="adam",
+                    help="Decomposition method used to label the OOS feasibility set.")
+    a = ap.parse_args()
+    generate_cboss_diagnostics(Path(a.config_dir), oos_method=a.oos_method)

@@ -96,6 +96,7 @@ def _build_bess(acfg, adj_np, target_np, seed):
         cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
         max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
         n_runs=acfg.n_runs, lamda=acfg.lambda_fitness, acqf=_acqf(acfg),
+        surrogate=acfg.bess_surrogate, rse_transform=acfg.bess_rse_transform,
         cucb_gamma_mode=acfg.bess_cucb_gamma_mode, cucb_gamma=acfg.bess_cucb_gamma,
         tmse_eps=acfg.bess_tmse_eps, sur_obs_noise=acfg.bess_sur_obs_noise,
         sur_ref_size=acfg.bess_sur_ref_size, n_ref=acfg.bess_n_ref,

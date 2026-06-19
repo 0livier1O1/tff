@@ -22,7 +22,7 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import algo_config_from_dict
-from app.config.constants import SEEDS, TMUX_SESSION, RUN_NAME
+from app.config.constants import SEEDS, TMUX_SESSION, RUN_NAME, PARALLEL_GPUS
 from app.inputs.problem import render_problem_section, _render_problem_summary
 from app.inputs.algo_widgets import render_algo_configs
 from app.analysis.analyze import render_analyze_sidebar
@@ -86,10 +86,16 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
     cfg.seeds_str = st.sidebar.text_input("Random Seeds (csv)", key="seeds_str_input", help=SEEDS)
     _all, _free = all_gpus(), free_gpus()
     _busy = [g for g in _all if g not in _free]
+    cfg.parallel_gpus = st.sidebar.toggle(
+        "Parallelize across GPUs", value=True, help=PARALLEL_GPUS,
+    )
+    _mode = ("jobs run one per free GPU; busy ones are skipped until they clear."
+             if cfg.parallel_gpus else
+             "confined to a single free GPU; jobs run sequentially.")
     st.sidebar.caption(
         f"GPUs **{', '.join(map(str, _all))}**"
         + (f" · busy now: {', '.join(map(str, _busy))}" if _busy else " · all free")
-        + " — jobs run one per free GPU; busy ones are skipped until they clear."
+        + f" — {_mode}"
     )
     if cfg.extend_mode:
         cfg.overwrite = st.sidebar.toggle(

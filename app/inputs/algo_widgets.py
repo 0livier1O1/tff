@@ -46,7 +46,7 @@ from app.config.constants import (
     TNALE_PERM_SAMPLES, TNALE_PERM_RADIUS,
 )
 
-ENGINES = ["sgd", "adam", "pam", "als"]
+ENGINES = ["sgd", "adam", "pam", "als", "agd"]
 
 
 # ---------------------------------------------------------------------------

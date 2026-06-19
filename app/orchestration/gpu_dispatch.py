@@ -9,6 +9,7 @@ Manifest (written by app.orchestration.runner.launch_run):
     {
       "pid_file": "<run>/run.pid",
       "cwd": "<repo root>",
+      "max_gpus": null,          # cap on the GPU pool; null = every GPU, 1 = one GPU
       "jobs": [
         {"cmd": [...], "algo_dir": "...", "label": "...",
          "seed": 1, "policy": "boss-ei"},
@@ -83,6 +84,13 @@ def main(manifest_path: str) -> None:
         Path(pid_file).write_text(str(os.getpid()))
 
     pool = all_gpus()
+    # max_gpus caps the pool (None = every GPU). When confined to a single GPU,
+    # prefer one that's free right now so we don't queue behind external work.
+    max_gpus = manifest.get("max_gpus")
+    if max_gpus:
+        avail = set(free_gpus())
+        preferred = [g for g in pool if g in avail] or pool
+        pool = preferred[:max_gpus]
     print(f"[dispatch] GPU pool: {pool}", flush=True)
 
     seen: set[str] = set()

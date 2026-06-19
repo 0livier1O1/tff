@@ -24,6 +24,7 @@ from app.config.sidebar_config import SidebarConfig
 from app.analysis.cboss_diagnostics import (
     generate_cboss_diagnostics, has_cboss_diagnostics, load_cboss_diagnostics,
 )
+from app.analysis.cboss_oos import OOS_METHODS
 from app.plotting import cboss_figures as cf
 from app.analysis.debug_script import write_debug_script, SUPPORTED_FAMILIES
 from app.analysis.diagnostics import (
@@ -173,10 +174,13 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
     _render_row_actions(repo_root, records)
 
     # -----------------------------------------------------------------------
-    # Tabs: problem description, results summary, per-seed diagnostics
+    # Tabs: problem description, results summary, and the three per-seed
+    # diagnostic views (Performance / Decomposition / Surrogate) promoted to
+    # the top level, then a debug instance.
     # -----------------------------------------------------------------------
-    tab_problem, tab_summary, tab_diag, tab_debug = st.tabs(
-        ["Problem Description", "Results Summary", "Diagnostics", "Debug Instance"]
+    tab_problem, tab_summary, tab_perf, tab_decomp, tab_surr, tab_debug = st.tabs(
+        ["Problem Description", "Results Summary", "Performance", "Decomposition",
+         "Surrogate diagnostics", "Debug Instance"]
     )
 
     with tab_problem:
@@ -185,8 +189,14 @@ def render_analyze_main(cfg: SidebarConfig, repo_root: Path) -> None:
     with tab_summary:
         render_results_summary(repo_root)
 
-    with tab_diag:
-        _render_diagnostics(repo_root)
+    with tab_perf:
+        _render_performance(repo_root)
+
+    with tab_decomp:
+        _render_decomposition(repo_root)
+
+    with tab_surr:
+        _render_surrogate_diagnostics(repo_root)
 
     with tab_debug:
         _render_debug_instance(repo_root)
@@ -317,37 +327,80 @@ def _render_problem_descriptions(
 
 
 # ---------------------------------------------------------------------------
-# Diagnostics tab — one sub-tab per selected seed
+# Diagnostic views — Performance / Decomposition / Surrogate, each one sub-tab
+# per selected seed. Promoted to top-level tabs (no longer nested under a single
+# "Diagnostics" tab).
 # ---------------------------------------------------------------------------
 
-def _render_diagnostics(repo_root: Path) -> None:
-    """One tab per seed among the selected results, each split into Performance,
-    Decomposition (per-config decomposition-loss curves), and Surrogate diagnostics."""
+def _diag_context(repo_root: Path):
+    """Shared setup for the per-seed diagnostic views. Returns
+    ``(keys, df, runs_dir, seeds)`` or ``None`` after showing an info message
+    when nothing usable is selected."""
     keys = st.session_state.get("selected_result_keys", [])
     if not keys:
         st.info("Select one or more completed results in the table above.")
-        return
+        return None
 
     df = load_traces(repo_root, keys)
     if df.empty:
         st.info("No trace data found for the selected results.")
-        return
+        return None
 
     runs_dir = repo_root / "artifacts" / "runs"
     seeds = sorted(df["seed"].unique())
+    return keys, df, runs_dir, seeds
+
+
+def _render_performance(repo_root: Path) -> None:
+    """Per-seed performance summary, one sub-tab per selected seed."""
+    ctx = _diag_context(repo_root)
+    if ctx is None:
+        return
+    keys, df, runs_dir, seeds = ctx
+    for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
+        with tab:
+            render_seed_performance(repo_root, keys, int(seed))
+
+
+def _render_decomposition(repo_root: Path) -> None:
+    """Per-config decomposition-loss curves, one sub-tab per selected seed."""
+    ctx = _diag_context(repo_root)
+    if ctx is None:
+        return
+    keys, df, runs_dir, seeds = ctx
+    for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
+        with tab:
+            _render_decomp_traces(runs_dir, df[df["seed"] == seed], int(seed))
+
+
+def _render_surrogate_diagnostics(repo_root: Path) -> None:
+    """GP- and feasibility-surrogate diagnostics, one sub-tab per selected seed."""
+    ctx = _diag_context(repo_root)
+    if ctx is None:
+        return
+    keys, df, runs_dir, seeds = ctx
+    oos_method = _oos_method_selector(df)
     for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
         with tab:
             sdf = df[df["seed"] == seed]
-            perf_tab, decomp_tab, surr_tab = st.tabs(
-                ["Performance", "Decomposition", "Surrogate diagnostics"])
-            with perf_tab:
-                render_seed_performance(repo_root, keys, int(seed))
-            with decomp_tab:
-                _render_decomp_traces(runs_dir, sdf, int(seed))
-            with surr_tab:
-                _render_diag_generate_all(runs_dir, sdf, int(seed))
-                _render_gp_diagnostics(runs_dir, sdf, int(seed))
-                _render_cboss_diagnostics(runs_dir, sdf, int(seed))
+            _render_diag_generate_all(runs_dir, sdf, int(seed), oos_method)
+            _render_gp_diagnostics(runs_dir, sdf, int(seed))
+            _render_cboss_diagnostics(runs_dir, sdf, int(seed), oos_method)
+
+
+def _oos_method_selector(df: pd.DataFrame) -> str:
+    """Pick the decomposition method whose OOS labels the feasibility diagnostics are
+    scored against. The OOS feasibility set (RSE < threshold) is decomposed with this
+    method's fixed preset (see ``cboss_oos``); diagnostics are cached per method, so
+    switching re-scores against that labelled set without re-decomposing it."""
+    if not df["family"].isin(["cboss", "bess"]).any():
+        return "adam"
+    return st.selectbox(
+        "OOS decomposition", list(OOS_METHODS), index=0, key="oos_method",
+        help="Decomposition used to label the held-out feasibility test set. "
+             "'adam' = 1000-epoch gradient fit (the runs' own setting); 'agd' = "
+             "200-sweep alternating fit — comparable RSE, much cheaper (see the "
+             "method benchmark). Feasibility diagnostics are cached separately per method.")
 
 
 def _render_decomp_traces(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
@@ -380,10 +433,11 @@ def _render_decomp_traces(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
                     width="stretch", key=f"decomp_{seed}")
 
 
-def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> list[tuple]:
+def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int,
+                         oos_method: str) -> list[tuple]:
     """Every selected config at this seed whose surrogate diagnostics aren't cached yet,
     as ``(kind, config_dir, label)`` — ``kind`` is 'boss' (objective/RSE GP refit) or
-    'feas' (cBOSS/BESS replay + OOS scoring)."""
+    'feas' (cBOSS/BESS replay + OOS scoring, cached per ``oos_method``)."""
     out: list[tuple] = []
     boss = (sdf[sdf["family"] == "boss"][["run", "config_id", "label", "policy"]]
             .drop_duplicates())
@@ -397,16 +451,17 @@ def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> list[t
     for r in feas.itertuples(index=False):
         cd = (runs_dir / r.run / f"seed_{seed}"
               / f"{r.config_id}_{r.policy.replace('-', '_')}")
-        if (cd / f"{r.family}_results.npz").exists() and not has_cboss_diagnostics(cd):
+        if (cd / f"{r.family}_results.npz").exists() and not has_cboss_diagnostics(cd, oos_method):
             out.append(("feas", cd, r.label))
     return out
 
 
-def _render_diag_generate_all(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
+def _render_diag_generate_all(runs_dir: Path, sdf: pd.DataFrame, seed: int,
+                              oos_method: str) -> None:
     """One button that generates surrogate diagnostics for *every* not-yet-cached config
     at this seed (BOSS objective/RSE refit + cBOSS/BESS replay/OOS), in sequence, behind
     a single progress bar. Replaces the per-config Generate buttons."""
-    pending = _pending_diagnostics(runs_dir, sdf, seed)
+    pending = _pending_diagnostics(runs_dir, sdf, seed, oos_method)
     if not pending:
         return
     n = len(pending)
@@ -423,8 +478,9 @@ def _render_diag_generate_all(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> N
             generate_gp_diagnostics(cd, progress=lambda f, i=i, lab=lab: bar.progress(
                 (i + f) / n, text=f"GP refit — {lab}  ({(i + f) / n:.0%})"))
         else:
-            bar.progress(i / n, text=f"Replay + OOS — {lab}  (decomposes OOS on first use)")
-            generate_cboss_diagnostics(cd)
+            bar.progress(i / n, text=f"Replay + OOS [{oos_method}] — {lab}  "
+                                     f"(decomposes OOS on first use)")
+            generate_cboss_diagnostics(cd, oos_method)
     bar.empty()
     st.rerun()
 
@@ -614,25 +670,26 @@ def _render_debug_instance(repo_root: Path) -> None:
 # plotly, no tabs.
 # ---------------------------------------------------------------------------
 
-def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
+def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int,
+                              oos_method: str) -> None:
     """Single merged feasibility-classifier diagnostics page for *all* cBOSS/BESS
     configs at one seed. Each config's expensive replay + OOS scoring runs once behind
-    its own Generate button (cached under analysis/<family>/); once generated, the
-    configs are compared on shared plots (one colour per algo), with per-algo surrogate
-    detail in expanders below."""
+    its own Generate button (cached under analysis/<family>/<oos_method>/); once
+    generated, the configs are compared on shared plots (one colour per algo), with
+    per-algo surrogate detail in expanders below."""
     configs = (sdf[sdf["family"].isin(["cboss", "bess"])]
                [["run", "config_id", "label", "policy", "family"]].drop_duplicates())
     if configs.empty:
         return
 
-    with st.expander("Feasibility models", expanded=False):
+    with st.expander(f"Feasibility models  ·  OOS: {oos_method}", expanded=False):
         algos: list[SimpleNamespace] = []
         for r in configs.itertuples(index=False):
             cd = (runs_dir / r.run / f"seed_{seed}"
                   / f"{r.config_id}_{r.policy.replace('-', '_')}")
-            if not (cd / f"{r.family}_results.npz").exists() or not has_cboss_diagnostics(cd):
+            if not (cd / f"{r.family}_results.npz").exists() or not has_cboss_diagnostics(cd, oos_method):
                 continue
-            metrics, ev, acq, meta = load_cboss_diagnostics(cd)
+            metrics, ev, acq, meta = load_cboss_diagnostics(cd, oos_method)
             algos.append(SimpleNamespace(label=r.label, policy=r.policy, family=r.family,
                                          cd=cd, metrics=metrics, ev=ev, acq=acq, meta=meta))
 

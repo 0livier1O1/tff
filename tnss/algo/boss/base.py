@@ -60,51 +60,63 @@ def _adj_cr(A_cp) -> float:
     return net / tgt
 
 
-def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
-             backend="cupy", dtype="float32",
+def _eval_tn(target, A_int, maxiter, *, n_runs=1, min_rse=None, cores=None,
+             method="pam", backend="cupy", dtype="float32",
              init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250,
-             return_recon=False):
-    """Eval using cuTensorNetwork decompose (supports sgd, pam, als).
+             return_recon=False, return_cores=False):
+    """Decompose one candidate with cuTensorNetwork (sgd/pam/als) — the single shared
+    eval path for the whole search family (BOSS, CBOSS, RandomSearch, TnALE) *and*
+    FTBOSS's resumable / freeze-thaw decomposition.
 
-    Single shared decomposition path for the whole search family — BOSS, CBOSS,
-    RandomSearch and TnALE all route through this so target normalization, the
-    best-of-``n_runs`` restart loop and OOM handling are identical across methods.
+    Runs up to ``maxiter`` epochs of ``method`` on structure ``A_int``. Two regimes
+    share this one body:
+
+    - **Fresh best-of-restarts** (``cores=None``): each of ``n_runs`` attempts starts
+      from an independent random init — decomposition is non-convex and a random init
+      can stall in a poor basin, so the best restart is kept. A new network is built
+      per attempt because ``decompose()`` mutates cores in place. The restart loop
+      early-stops once a run dips below ``min_rse`` (``None`` = no early stop).
+    - **Warm continuation** (``cores`` given, host arrays from a prior
+      :meth:`cuTensorNetwork.get_cores`): the first attempt resumes that exact
+      trajectory, so resuming for ``maxiter`` more epochs reproduces a single
+      uninterrupted run continued from the checkpoint. FTBOSS uses ``n_runs=1,
+      min_rse=None`` here to keep the full realized partial curve.
+
+    The target is unit-normalized before decomposition. RSE is scale-invariant
+    (``||recon-target|| / ||target||``), so ``losses`` and ``best_rse`` are identical to
+    the unnormalized case, but the landscape is friendlier — SGD/Adam start from O(1)
+    loss instead of ``||target||/||cores_init||`` (often 1e3-1e4), avoiding early
+    LR-decay thrash. Reconstruction is rescaled back before returning.
 
     Returns ``(cr, best_rse, eval_time, recon, best_losses, contraction_stats,
-    eval_status)`` where ``best_losses`` is the loss trajectory of the best
-    restart, ``contraction_stats`` is the cuTensorNet path/autotune cost dict,
-    and ``eval_status`` is ``"ok"`` or ``"oom"``. ``recon`` is the dense
-    reconstruction but it requires a full contraction, so it is only computed
-    when ``return_recon`` is set — otherwise it is ``None`` (all current callers
-    discard it).
+    eval_status, new_cores)``. ``recon`` (a full contraction) is computed only when
+    ``return_recon``; ``new_cores`` (host checkpoint of the best network) only when
+    ``return_cores`` — both ``None`` otherwise.
 
-    A candidate whose contraction workspace exceeds the GPU memory budget cannot
-    be evaluated. That is a *computation* constraint, not an RSE feasibility
-    failure: we don't crash the run — we return ``best_rse = 1.0`` (so the BO
-    records it as infeasible and steers away), the deterministic CR, and
-    ``eval_status = "oom"`` so downstream analysis can tell it apart from
-    structures that were decomposed but simply hit high RSE.
+    A candidate whose contraction workspace exceeds the GPU memory budget cannot be
+    evaluated. That is a *computation* constraint, not an RSE feasibility failure: we
+    return ``best_rse = 1.0`` (so the BO records it as infeasible and steers away), the
+    deterministic CR, empty losses, and ``eval_status = "oom"`` so downstream analysis
+    can tell it apart from structures that were decomposed but simply hit high RSE.
     """
     t0 = time.time()
     tgt_np = target.numpy() if hasattr(target, 'numpy') else target
     tgt_cp = cp.asarray(tgt_np)
-    # Normalize the target to unit norm before decomposition. RSE is
-    # scale-invariant (||recon - target|| / ||target||), so the loss
-    # trajectory and final best_rse are identical to the unnormalized case,
-    # but the optimization landscape is much friendlier — SGD/Adam start
-    # from O(1) loss instead of ||target||/||cores_init|| (often 1e3-1e4),
-    # which avoids early LR-decay thrash and divergence. Reconstruction
-    # is rescaled back to the original magnitude before returning.
     tgt_norm = float(cp.linalg.norm(tgt_cp))
     tgt_cp = tgt_cp / tgt_norm
     A_cp = cp.asarray(A_int.numpy() if hasattr(A_int, 'numpy') else A_int)
     try:
-        ntwrk = cuTensorNetwork(A_cp, backend=backend, dtype=dtype)
-        cr = float(ntwrk.network_size()) / float(ntwrk.target_size())
-
+        cr = None
         best_rse = float("inf")
         best_losses: list[float] = []
-        for _ in range(n_runs):
+        best_ntwrk = None
+        for attempt in range(n_runs):
+            # Warm-start only the first attempt; any further restarts are fresh
+            # (cores=None -> random init, see cuTensorNetwork.__init__).
+            warm = cores if attempt == 0 else None
+            ntwrk = cuTensorNetwork(A_cp, cores=warm, backend=backend, dtype=dtype)
+            if cr is None:
+                cr = float(ntwrk.network_size()) / float(ntwrk.target_size())
             losses = ntwrk.decompose(
                 tgt_cp, max_epochs=maxiter, method=method,
                 init_lr=init_lr, momentum=momentum,
@@ -114,12 +126,14 @@ def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
             if val < best_rse:
                 best_rse = val
                 best_losses = [float(x) for x in losses]
-            if best_rse < min_rse:
+                best_ntwrk = ntwrk
+            if min_rse is not None and best_rse < min_rse:
                 break
         eval_time = time.time() - t0
-        recon = ntwrk.contract() * tgt_norm if return_recon else None
-        return (cr, best_rse, eval_time, recon,
-                best_losses, ntwrk.contraction_stats, "ok")
+        recon = best_ntwrk.contract() * tgt_norm if return_recon else None
+        new_cores = best_ntwrk.get_cores() if return_cores else None
+        return (cr, best_rse, eval_time, recon, best_losses,
+                best_ntwrk.contraction_stats, "ok", new_cores)
     except (MemoryLimitExceeded, OutOfMemoryError) as exc:
         # Network too large to contract within the GPU memory budget. Treat as a
         # compute-infeasible point (rse=1) rather than aborting the whole run.
@@ -129,7 +143,7 @@ def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
             "oom_limit": int(getattr(exc, "limit", 0) or 0),
             "oom_requirement": int(getattr(exc, "requirement", 0) or 0),
         }
-        return _adj_cr(A_cp), 1.0, eval_time, None, [], stats, "oom"
+        return _adj_cr(A_cp), 1.0, eval_time, None, [], stats, "oom", None
 
 
 class BOSSBase:
@@ -271,7 +285,7 @@ class BOSSBase:
     def _evaluate(self, A_int: Tensor):
         """Evaluate one candidate structure with cuTensorNetwork."""
         return _eval_tn(
-            self.target, A_int, self.maxiter_tn, self.n_runs, self.min_rse,
+            self.target, A_int, self.maxiter_tn, n_runs=self.n_runs, min_rse=self.min_rse,
             method=self.decomp_method, init_lr=self.init_lr, momentum=self.momentum,
             loss_patience=self.loss_patience, lr_patience=self.lr_patience,
         )
@@ -291,7 +305,7 @@ class BOSSBase:
         subclass-specific columns (e.g. cBOSS's pf_pred / acqf_used)."""
         x_int_flat = self._to_int(x_std).squeeze(0)
         A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-        cr, rse, eval_time, _, losses, ctn_stats, eval_status = self._evaluate(A_int)
+        cr, rse, eval_time, _, losses, ctn_stats, eval_status, _ = self._evaluate(A_int)
         feasible = int(rse <= self.feasible_rse)
 
         row = {

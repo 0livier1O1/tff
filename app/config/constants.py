@@ -21,6 +21,12 @@ TMUX_SESSION = (
     "if the browser disconnects. Start one with `tmux new -s boss`."
 )
 
+PARALLEL_GPUS = (
+    "Distribute jobs across all free GPUs, one job per GPU, running them "
+    "concurrently. Disable to confine the whole run to a single GPU "
+    "(jobs run sequentially), leaving the others free for other work."
+)
+
 RUN_NAME = "Artifacts are saved to artifacts/<run_name>/. Use a descriptive name to identify this experiment."
 
 SELECTED_ALGORITHMS = (
@@ -45,8 +51,10 @@ DECOMP_ENGINE = (
     "Optimization backend for fitting tensor network cores:\n"
     "- **sgd**: SGD with momentum — fast, predictable, good default.\n"
     "- **adam**: Adam — adaptive per-parameter LR, often converges in fewer epochs.\n"
-    "- **pam**: Projection-Alternating Method — coordinate descent, no LR needed.\n"
-    "- **als**: Alternating Least Squares — closed-form updates, exact per-core step."
+    "- **pam**: Proximal Alternating Minimization — exact per-core proximal solve, no LR needed.\n"
+    "- **als**: Alternating Least Squares — closed-form updates, exact per-core step.\n"
+    "- **agd**: Alternating Gradient Descent — one per-core gradient step (exact line search), "
+    "no inverse; fastest of the alternating methods and near-Adam accuracy."
 )
 
 DECOMP_INIT_LR = (

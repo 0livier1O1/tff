@@ -15,6 +15,8 @@ class SidebarConfig:
     algo_configs: list[AlgoConfig] = field(default_factory=list)
     # Run control
     seeds_str: str = "1"
+    # Spread jobs across all free GPUs (one per GPU); False confines the run to one GPU
+    parallel_gpus: bool = True
     use_tmux: bool = False
     tmux_session: str | None = None
     run_name: str = ""

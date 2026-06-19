@@ -216,6 +216,12 @@ class BESSConfig(FeasibilityGPConfig, AlgoConfig):
     # as cBOSS); BESS defaults to never hard-resetting it.
     gp_reset_every: int = 0                 # 0 = never hard-reset
 
+    # Surrogate over the boundary: 'classifier' (the Bernoulli FeasibilityGP, with
+    # the threshold in the 0/1 labels) or 'regression' (exact SingleTaskGP on the
+    # transformed RSE margin T(rho)-T(rse), boundary at the latent zero-contour).
+    bess_surrogate: str = "classifier"      # 'classifier' | 'regression'
+    bess_rse_transform: str = "log"         # regression target transform: 'log' | 'identity'
+
     # Acquisition (the contour finder is selected by policy: bess-cucb/tmse/sur).
     bess_cucb_gamma_mode: str = "constant"  # 'constant' | 'adaptive' (paper §3.2)
     bess_cucb_gamma: float = 1.96           # straddle constant (constant mode)

@@ -32,7 +32,9 @@ from torch.quasirandom import SobolEngine
 from botorch.optim import optimize_acqf_discrete_local_search
 
 from tnss.algo.boss.base import BOSSBase
-from tnss.algo.cboss.feasibility import FeasibilityGP, MAX_CONSEC_FIT_ERRORS
+from tnss.algo.boss.means import make_mean
+from tnss.algo.boss.regression_gp import RegressionGP
+from tnss.algo.cboss.feasibility import FeasibilityGP, MAX_CONSEC_FIT_ERRORS, make_kernel
 from tnss.algo.bess.acquisitions import ContourUCB, TargetedMSE, ContourSUR, _latent_moments
 
 _SQRT2 = 2.0 ** 0.5
@@ -49,6 +51,16 @@ class BESS(BOSSBase):
 
     Parameters beyond the shared base set
     -------------------------------------
+    surrogate   : 'classifier' (default — the variational Bernoulli FeasibilityGP,
+                  boundary at the latent zero-contour because the threshold lives in
+                  the 0/1 labels) or 'regression' (an exact SingleTaskGP on a
+                  transformed RSE margin; see ``rse_transform``)
+    rse_transform : regression-surrogate target transform, 'log' (default) or
+                  'identity'. The GP models the signed margin ``T(rho) - T(rse)`` so
+                  feasible (rse <= rho) maps to margin >= 0 and the boundary
+                  rse = rho to margin = 0 — keeping the acquisitions (which use
+                  ``|mu|`` with the contour at 0) unchanged across both surrogates.
+                  Ignored when ``surrogate='classifier'``.
     acqf        : 'cucb' (contour-UCB / straddle), 'tmse' (targeted MSE), or
                   'sur' (stepwise uncertainty reduction — look-ahead, expensive)
     cucb_gamma_mode : 'constant' (use cucb_gamma) or 'adaptive' (the paper's §3.2
@@ -83,6 +95,8 @@ class BESS(BOSSBase):
         maxiter_tn: int = 1000,
         n_runs: int = 1,
         lamda: float = 1.0,
+        surrogate: str = "classifier",
+        rse_transform: str = "log",
         acqf: str = "cucb",
         cucb_gamma_mode: str = "constant",
         cucb_gamma: float = 1.96,
@@ -122,10 +136,16 @@ class BESS(BOSSBase):
             freq_update=freq_update, raw_samples=raw_samples,
             num_restarts=num_restarts, seed=seed, verbose=verbose,
         )
+        assert surrogate in ("classifier", "regression"), (
+            f"surrogate must be 'classifier' or 'regression', got {surrogate!r}")
+        assert rse_transform in ("log", "identity"), (
+            f"rse_transform must be 'log' or 'identity', got {rse_transform!r}")
         assert acqf in ("cucb", "tmse", "sur"), (
             f"acqf must be 'cucb', 'tmse', or 'sur', got {acqf!r}")
         assert cucb_gamma_mode in ("constant", "adaptive"), (
             f"cucb_gamma_mode must be 'constant' or 'adaptive', got {cucb_gamma_mode!r}")
+        self.surrogate_type = surrogate
+        self.rse_transform = rse_transform
         self.acqf = acqf
         self.cucb_gamma_mode = cucb_gamma_mode
         self.cucb_gamma = cucb_gamma
@@ -152,12 +172,42 @@ class BESS(BOSSBase):
         eng = SobolEngine(self.D, scramble=True, seed=seed)
         self._ref_X = eng.draw(n_ref).to(torch.double)
 
+        # Regression surrogate: a stateful exact-GP builder over the same kernel/
+        # mean config as the classifier. Built lazily-once here (factories are
+        # cheap); unused in classifier mode.
+        self._reg = None
+        if surrogate == "regression":
+            self._reg = RegressionGP(
+                mean_factory=lambda: make_mean(
+                    self.mean, self.D, N=self.N, max_rank=self.max_rank, t_shape=self.t_shape),
+                kernel_factory=lambda: make_kernel(
+                    self.kernel, self.D, self.N, self.max_rank, self.wsp_mode,
+                    self.input_warp, self.round_inputs),
+            )
+
     # ------------------------------------------------------------------
     # Surrogate hooks — identical surrogate to cBOSS (FeasibilityGP)
     # ------------------------------------------------------------------
 
+    def _margin(self, Y_rse: Tensor) -> Tensor:
+        """Regression target: signed transformed margin to the threshold,
+        ``T(rho) - T(rse)``, with ``T`` the (monotone) ``rse_transform``. Feasible
+        (rse <= rho) maps to margin >= 0 and the boundary rse = rho to margin = 0 —
+        mirroring the classifier's latent zero-contour so the acquisitions (which
+        use ``|mu|`` with the contour at 0) carry over unchanged."""
+        rho = torch.as_tensor(self.feasible_rse, dtype=Y_rse.dtype)
+        if self.rse_transform == "log":
+            return rho.clamp_min(1e-12).log() - Y_rse.clamp_min(1e-12).log()
+        return rho - Y_rse
+
     def _build_surrogate(self, X, Y_rse, Y_cr, Y_feas):
         # The only full (hyperparameter) fit happens here, on the init data.
+        if self.surrogate_type == "regression":
+            t0 = time.time()
+            model = self._reg.fit(X, self._margin(Y_rse))
+            self._carried_gp_fit_time = time.time() - t0
+            self._record_regression(model, step=self.n_init - 1, phase="init")
+            return model
         t0 = time.time()
         feas = FeasibilityGP(
             X, Y_feas, D=self.D, N=self.N, max_rank=self.max_rank, t_shape=self.t_shape,
@@ -176,7 +226,7 @@ class BESS(BOSSBase):
             acqf = TargetedMSE(feas, eps=self.tmse_eps)
         elif self.acqf == "sur":
             acqf = ContourSUR(feas, ref_X=self._ref_X[:self.sur_ref_size],
-                              obs_noise=self.sur_obs_noise)
+                              obs_noise=self._sur_obs_noise(feas))
         else:  # cucb
             gamma = self._cucb_gamma(feas)
             acqf = ContourUCB(feas, gamma=gamma)
@@ -197,19 +247,20 @@ class BESS(BOSSBase):
             "acqf_value": float(acq_value),
             "acqf_used": self.acqf,
             "cucb_gamma": gamma,   # resolved gamma for cucb (None for tmse/sur)
-            "gp_elbo": feas.final_elbo,
+            "gp_elbo": getattr(feas, "final_elbo", None),  # classifier only
             "infeasible_frac": float((Y_feas.squeeze(-1) == 0).double().mean()),
             **self._boundary_diag(feas, cand),
         }
         return cand, extra, suggest_time
 
     @torch.no_grad()
-    def _cucb_gamma(self, feas: FeasibilityGP) -> float:
+    def _cucb_gamma(self, feas) -> float:
         """Exploration weight for cucb. 'constant' returns the fixed value; the
         paper's §3.2 'adaptive' choice scales it to the current latent posterior
         over the reference design — ``gamma_n = IQR(mu) / (3 * mean sigma)`` — so the
         ``gamma*sigma`` term stays commensurate with the typical ``|mu|`` as the
-        surrogate's latent range grows."""
+        surrogate's latent range grows. Surrogate-agnostic: ``mu``/``sigma`` are the
+        latent posterior moments of either the classifier or the regression GP."""
         if self.cucb_gamma_mode == "constant":
             return float(self.cucb_gamma)
         feas.eval()
@@ -217,7 +268,31 @@ class BESS(BOSSBase):
         q25, q75 = torch.quantile(mu, torch.tensor([0.25, 0.75], dtype=mu.dtype))
         return float((q75 - q25) / (3.0 * sigma.mean()).clamp_min(1e-12))
 
+    @torch.no_grad()
+    def _sur_obs_noise(self, feas) -> float:
+        """Observation-noise variance ``tau^2`` for sur's kriging look-ahead, in the
+        same (latent posterior) units as the variance it downdates. For the
+        classifier this is the probit link's implicit unit noise (``sur_obs_noise``,
+        default 1.0). For the regression GP it is the *fitted* noise mapped back
+        through the outcome ``Standardize`` into the margin's units."""
+        if self.surrogate_type != "regression":
+            return self.sur_obs_noise
+        noise = float(feas.likelihood.noise.mean())
+        stdv = float(feas.outcome_transform.stdvs.reshape(-1)[0])
+        return noise * stdv ** 2
+
     def _post_observe(self, feas, X, Y_rse, Y_cr, Y_feas, b):
+        if self.surrogate_type == "regression":
+            # Mirror BOSS's exact-GP refresh: condition on all data each step,
+            # re-optimize the hyperparameters only every freq_update steps.
+            reopt = (b + 1) % self.freq_update == 0
+            Y_ = self._margin(Y_rse)
+            t0 = time.time()
+            model = self._reg.fit(X, Y_) if reopt else self._reg.condition(X, Y_)
+            self._carried_gp_fit_time = time.time() - t0
+            self._record_regression(model, step=self.n_init + b,
+                                    phase="refit" if reopt else "refresh")
+            return model
         # Same surrogate-refresh policy as cBOSS: re-condition on all data every
         # step (variational refine); re-optimize ALL parameters every freq_update
         # steps; hard-reset (kept only if its ELBO wins) on the periodic schedule
@@ -259,11 +334,15 @@ class BESS(BOSSBase):
         mu_r, sigma_r = _latent_moments(feas, ref)
         normal = torch.distributions.Normal(0.0, 1.0)
         boundary_err = normal.cdf(-(mu_r.abs() / sigma_r))
+        # P(feasible): classifier marginalizes the probit link (proba); the
+        # regression GP gives P(margin >= 0) = Phi(mu / sigma) directly.
+        pf = (float(normal.cdf(mu_c / sigma_c).item()) if self.surrogate_type == "regression"
+              else float(feas.proba(cand).item()))
         return {
             "cand_mu": float(mu_c.item()),
             "cand_sigma": float(sigma_c.item()),
             "cand_abs_mu": float(mu_c.abs().item()),
-            "pf_pred": float(feas.proba(cand).item()),
+            "pf_pred": pf,
             "boundary_error_E": float(boundary_err.mean().item()),
             "ref_mean_sigma": float(sigma_r.mean().item()),
             "ref_feasible_frac": float((mu_r >= 0).double().mean().item()),
@@ -282,6 +361,16 @@ class BESS(BOSSBase):
             "epochs_run": feas.epochs_run,
             "elbo_history": list(feas.elbo_history),
             "state_dict": {k: v.detach().cpu() for k, v in feas.state_dict().items()},
+        })
+
+    def _record_regression(self, model, *, step: int, phase: str):
+        """Snapshot a regression-surrogate fit: just the state_dict (CPU tensors), so
+        the exact GP is reconstructable offline. The regression GP has no ELBO/epoch
+        diagnostics, so those classifier-only fields are omitted."""
+        self.gp_states.append({
+            "step": step,
+            "phase": phase,
+            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
         })
 
     def _log_step(self, b, row, X, Y_rse, Y_cr, Y_feas):

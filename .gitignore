@@ -24,3 +24,5 @@ context/TnALE/
 context/TNLS/
 context/tensor_networks/
 overleaf/
+*.pt
+*.tar.gz

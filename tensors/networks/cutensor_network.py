@@ -344,6 +344,7 @@ class cuTensorNetwork:
                 "float64": cp.float64,
             }[self.dtype_name]
 
+        self._bdtype = backend_dtype
         self.shape = self.adj_matrix.shape
         self.eq = einsum_expr(self.adj_matrix)
 
@@ -360,10 +361,7 @@ class cuTensorNetwork:
                 self.adj_matrix, init_std, self.backend, backend_dtype
             )
         else:
-            if self.backend == "torch":
-                self.cores = [core.clone().to(self.adj_matrix.device) for core in cores]
-            else:
-                self.cores = [core.copy() for core in cores]
+            self.cores = self._to_backend_cores(cores)
         self._rebuild_network()
 
     def _build_cupy_qualifiers(self):
@@ -396,6 +394,32 @@ class cuTensorNetwork:
             self.ntwrk.contract_path()
         except MemoryLimitExceeded:
             pass
+
+    # ------------------------------------------------------------------
+    # Core checkpointing (FTBOSS warm-start / thaw)
+    # ------------------------------------------------------------------
+
+    def _to_backend_cores(self, cores):
+        """Move core tensors (host numpy checkpoints or native cupy/torch arrays)
+        onto this network's backend device and dtype."""
+        if self.backend == "torch":
+            return [torch.as_tensor(c).to(self.adj_matrix.device, dtype=self._bdtype)
+                    for c in cores]
+        return [cp.asarray(c).astype(self._bdtype, copy=False) for c in cores]
+
+    def get_cores(self):
+        """Host (numpy) copies of the current cores — checkpoint a partially
+        decomposed structure off the GPU so it can be warm-started later."""
+        if self.backend == "torch":
+            return [c.detach().cpu().numpy() for c in self.cores]
+        return [cp.asnumpy(c) for c in self.cores]
+
+    def set_cores(self, cores):
+        """Load cores (host or device) and rebuild the network so a subsequent
+        :meth:`decompose` warm-continues from them. Returns ``self``."""
+        self.cores = self._to_backend_cores(cores)
+        self._rebuild_network()
+        return self
 
     def _plan_and_autotune(self, autotune_iterations=5):
         """Plan the contraction path and autotune, recording cost into ``self.contraction_stats``.
@@ -524,6 +548,8 @@ class cuTensorNetwork:
                 warm_losses = self._decompose_pam(**warm_kw)
             elif warm_start_method == "als":
                 warm_losses = self._decompose_als_cp(**warm_kw)
+            elif warm_start_method == "agd":
+                warm_losses = self._decompose_agd(**warm_kw)
             elif warm_start_method == "sgd":
                 sgd_kw = dict(
                     target=target,
@@ -559,6 +585,8 @@ class cuTensorNetwork:
             main_losses = self._decompose_als_cp(**main_kwargs)
         elif method == "pam":
             main_losses = self._decompose_pam(**main_kwargs)
+        elif method == "agd":
+            main_losses = self._decompose_agd(**main_kwargs)
         elif method in ("sgd", "adam"):
             if self.backend == "torch":
                 main_losses = self._decompose_torch_sgd(**main_kwargs)
@@ -899,7 +927,7 @@ class cuTensorNetwork:
 
     def _decompose_pam(
         self, target, tol=None, max_epochs=1000, rho=0.1,
-        **kwargs
+        verbose=False, **kwargs
     ):
         """PAM — optimized CuPy port of decomp_pam.
 
@@ -921,55 +949,9 @@ class cuTensorNetwork:
 
         xp = cp
         target = xp.asarray(target).astype(self.cores[0].dtype, copy=False)
-        itembytes = int(target.itemsize)
-        eps = xp.finfo(target.dtype).eps
-        target_norm = xp.maximum(xp.linalg.norm(target), eps)
         N = len(self.cores)
-
-        # Pre-compute per-core environment equations and paths once
-        lhs, rhs = self.eq.split("->")
-        input_terms = lhs.split(",")
-        label_to_dim = {
-            label: int(dim)
-            for i in range(self.dim)
-            for label, dim in zip(input_terms[i], self.cores[i].shape)
-        }
-
-        env_specs = []
-        for k in range(self.dim):
-            other_ids = [i for i in range(self.dim) if i != k]
-            env_terms = [input_terms[i] for i in other_ids]
-            shared_bonds = "".join(
-                [
-                    c
-                    for c in input_terms[k]
-                    if any(c in input_terms[j] for j in other_ids)
-                ]
-            )
-            other_phys = "".join([c for c in rhs if c != rhs[k]])
-            env_eq = ",".join(env_terms) + "->" + other_phys + shared_bonds
-
-            n_rows = int(np.prod([label_to_dim[c] for c in other_phys]))
-            n_cols = int(np.prod([label_to_dim[c] for c in shared_bonds]))
-
-            # Path + largest-intermediate once (CPU-side, fast for these sizes).
-            path, peak_bytes = _oe_path_peak(
-                env_eq, [self.cores[i].shape for i in other_ids], itembytes)
-            env_specs.append((env_eq, other_ids, n_rows, n_cols, path, peak_bytes))
-
-        full_path, recon_peak = _oe_path_peak(
-            self.eq, [c.shape for c in self.cores], itembytes)
-        recon_bytes = int(target.size) * itembytes
-
-        # "big mode" = some contraction is large enough to need slicing (and hence
-        # the cuTensorNet workspace management below). Skip that per-core cleanup
-        # entirely for ordinary low-rank structures so they keep the fast path.
-        total = int(cp.cuda.Device().mem_info[1])
-        big_mode = (
-            max(p + n_r * n_c * itembytes
-                for (_, _, n_r, n_c, _, p) in env_specs) >= 0.5 * total
-            or recon_peak + recon_bytes >= 0.5 * total
-        )
+        (itembytes, target_norm, env_specs, full_path, recon_peak,
+         recon_bytes, big_mode) = self._alt_env_setup(target)
 
         loss_history = []
         for _ in range(max_epochs):
@@ -1012,6 +994,119 @@ class cuTensorNetwork:
                                    recon_bytes, recon_peak)
             loss_val = xp.linalg.norm(recon - target) / target_norm
             loss_history.append(float(loss_val.item()))
+            if verbose:
+                d = (loss_history[-1] - loss_history[-2]) if len(loss_history) > 1 else float("nan")
+                print(f"[pam {len(loss_history):>4}/{max_epochs}] "
+                      f"rse={loss_history[-1]:.4e}  Δ={d:+.2e}")
+            if tol is not None and loss_history[-1] <= tol:
+                break
+
+        return loss_history
+
+    def _alt_env_setup(self, target):
+        """Shared setup for the alternating decomposers (PAM / AGD).
+
+        Builds, once: each core's environment einsum (contract all *other*
+        cores) with its opt_einsum path and largest-intermediate estimate; the
+        full reconstruction path; and a ``big_mode`` flag for whether any
+        contraction is large enough to need cuTensorNet slicing + the per-core
+        workspace cleanup. Returns ``(itembytes, target_norm, env_specs,
+        full_path, recon_peak, recon_bytes, big_mode)`` where each ``env_specs``
+        entry is ``(env_eq, other_ids, n_rows, n_cols, path, peak_bytes)``.
+        """
+        xp = cp
+        itembytes = int(target.itemsize)
+        eps = xp.finfo(target.dtype).eps
+        target_norm = xp.maximum(xp.linalg.norm(target), eps)
+
+        lhs, rhs = self.eq.split("->")
+        input_terms = lhs.split(",")
+        label_to_dim = {
+            label: int(dim)
+            for i in range(self.dim)
+            for label, dim in zip(input_terms[i], self.cores[i].shape)
+        }
+        env_specs = []
+        for k in range(self.dim):
+            other_ids = [i for i in range(self.dim) if i != k]
+            env_terms = [input_terms[i] for i in other_ids]
+            shared_bonds = "".join(
+                c for c in input_terms[k]
+                if any(c in input_terms[j] for j in other_ids))
+            other_phys = "".join(c for c in rhs if c != rhs[k])
+            env_eq = ",".join(env_terms) + "->" + other_phys + shared_bonds
+            n_rows = int(np.prod([label_to_dim[c] for c in other_phys]))
+            n_cols = int(np.prod([label_to_dim[c] for c in shared_bonds]))
+            path, peak_bytes = _oe_path_peak(
+                env_eq, [self.cores[i].shape for i in other_ids], itembytes)
+            env_specs.append((env_eq, other_ids, n_rows, n_cols, path, peak_bytes))
+
+        full_path, recon_peak = _oe_path_peak(
+            self.eq, [c.shape for c in self.cores], itembytes)
+        recon_bytes = int(target.size) * itembytes
+        total = int(cp.cuda.Device().mem_info[1])
+        big_mode = (
+            max(p + n_r * n_c * itembytes
+                for (_, _, n_r, n_c, _, p) in env_specs) >= 0.5 * total
+            or recon_peak + recon_bytes >= 0.5 * total
+        )
+        return (itembytes, target_norm, env_specs, full_path, recon_peak,
+                recon_bytes, big_mode)
+
+    def _decompose_agd(self, target, tol=None, max_epochs=1000,
+                       verbose=False, **kwargs):
+        """AGD — alternating first-order FCTN decomposition.
+
+        Sweeps the cores using the environment matrix ``M`` (same gradient-free,
+        auto-sliced contractions as PAM) and updates each core with a single
+        gradient step on ``½‖X_(k) − G_k Mᵀ‖²`` — no inverse and no Gram matrix
+        ``MᵀM``. The step is the exact line-search optimum for the per-core
+        quadratic, ``α* = ‖g‖²/‖g Mᵀ‖²`` (no tuning).
+        """
+        if self.backend != "cupy":
+            raise NotImplementedError(
+                f"AGD decomposition requires backend='cupy', got '{self.backend}'.")
+        xp = cp
+        target = xp.asarray(target).astype(self.cores[0].dtype, copy=False)
+        N = len(self.cores)
+        (itembytes, target_norm, env_specs, full_path, recon_peak,
+         recon_bytes, big_mode) = self._alt_env_setup(target)
+
+        loss_history = []
+        for t in range(max_epochs):
+            for k in range(N):
+                env_eq, other_ids, n_rows, n_cols, path_arg, env_peak = env_specs[k]
+                Xk = _pam_unfold(target, k, xp)
+                M = _contract_auto(
+                    env_eq, [self.cores[i] for i in other_ids], path_arg,
+                    n_rows * n_cols * itembytes, env_peak,
+                ).reshape(n_rows, n_cols)
+
+                Gk = _pam_unfold(self.cores[k], k, xp)
+
+                # Gradient of ½‖Xk − Gk Mᵀ‖²  w.r.t. Gk  (no MᵀM, no inverse).
+                grad = (Gk @ M.T - Xk) @ M       # (I_k, n_cols)
+                # AGD: exact line search  α* = ‖g‖²/‖g Mᵀ‖²  (no tuning).
+                gMt = grad @ M.T
+                alpha = float((grad * grad).sum()) / (float((gMt * gMt).sum()) + 1e-30)
+                new_Gk = Gk - alpha * grad
+
+                core_shape = [int(x) for x in self.adj_matrix[k].tolist()]
+                self.cores[k] = _pam_fold(new_Gk, k, core_shape, xp)
+
+                if big_mode:
+                    del M, grad, new_Gk
+                    xp.cuda.Device().synchronize()
+                    xp.get_default_memory_pool().free_all_blocks()
+
+            recon = _contract_auto(self.eq, list(self.cores), full_path,
+                                   recon_bytes, recon_peak)
+            loss_val = xp.linalg.norm(recon - target) / target_norm
+            loss_history.append(float(loss_val.item()))
+            if verbose:
+                d = (loss_history[-1] - loss_history[-2]) if len(loss_history) > 1 else float("nan")
+                print(f"[agd {len(loss_history):>4}/{max_epochs}] "
+                      f"rse={loss_history[-1]:.4e}  Δ={d:+.2e}")
             if tol is not None and loss_history[-1] <= tol:
                 break
 
@@ -1091,7 +1186,7 @@ def sim_tensor_from_adj(A, std_dev=0.1, backend="torch", dtype="float32", seed=N
 if __name__ == "__main__":
     torch.manual_seed(1)
 
-    N = 5
+    N = 7
     max_rank = 7
     A = random_adj_matrix(N, max_rank)
     tgt, cores = sim_tensor_from_adj(A, backend="cupy", dtype="float32")
@@ -1100,6 +1195,6 @@ if __name__ == "__main__":
 
     ctn = cuTensorNetwork(A, backend="cupy", dtype="float32")
     loss = ctn.decompose(
-        tgt, tol=1e-8, init_lr=0.5, loss_patience=2500, max_epochs=5000, method="sgd"
+        tgt, tol=1e-8, init_lr=0.01, lr_patience=250, loss_patience=2500, max_epochs=200, method="pam", verbose=True
     )
     print(loss)

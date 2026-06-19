@@ -44,18 +44,18 @@ class ReplayResult:
 
 
 def _gp_cfg(algo: dict, D: int, N: int, max_rank: int, t_shape) -> dict:
-    """FeasibilityGP construction kwargs from the run's algo-config dict. The
-    surrogate fields are family-prefixed identically for cBOSS (``cboss_*``) and
-    BESS (``bess_*``) — both wrap the same FeasibilityGP — so read them by family."""
-    p = algo.get("family", "cboss")
+    """FeasibilityGP construction kwargs from the run's algo-config dict. cBOSS and
+    BESS wrap the same FeasibilityGP and share its surrogate config via
+    ``FeasibilityGPConfig``, so these fields are stored un-prefixed (``var_strategy``,
+    ``gp_epochs``, …) — read them directly."""
     return dict(
         D=D, N=N, max_rank=max_rank, t_shape=t_shape,
         kernel=algo["kernel"], mean=algo["mean"],
-        var_strategy=algo[f"{p}_var_strategy"], wsp_mode=algo[f"{p}_wsp_mode"],
+        var_strategy=algo["var_strategy"], wsp_mode=algo["wsp_mode"],
         input_warp=algo["input_warp"], round_inputs=algo["round_inputs"],
-        full_epochs=int(algo[f"{p}_gp_epochs"]),
-        refine_epochs=int(algo[f"{p}_gp_refine_epochs"]),
-        tol=float(algo[f"{p}_gp_tol"]), patience=int(algo[f"{p}_gp_patience"]),
+        full_epochs=int(algo["gp_epochs"]),
+        refine_epochs=int(algo["gp_refine_epochs"]),
+        tol=float(algo["gp_tol"]), patience=int(algo["gp_patience"]),
     )
 
 

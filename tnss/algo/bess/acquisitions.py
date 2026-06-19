@@ -32,11 +32,14 @@ from botorch.utils.transforms import t_batch_mode_transform
 
 
 def _latent_moments(feas_gp, x: Tensor) -> tuple[Tensor, Tensor]:
-    """Latent posterior (mean, std) of the feasibility GP at ``x`` (shape (n, D)).
+    """Latent posterior (mean, std) of the boundary surrogate at ``x`` (shape (n, D)).
 
     Returns ``mu`` and ``sigma = sqrt(var)`` both shape ``(n,)`` — the *pre-link*
     moments, so the boundary is ``mu = 0`` and ``sigma`` is the latent (not
-    class-probability) uncertainty."""
+    class-probability) uncertainty. Surrogate-agnostic: this only reads
+    ``posterior(x).mean``/``.variance``, so it works equally on the variational
+    classifier (``FeasibilityGP``) and on an exact ``SingleTaskGP`` regression on
+    the transformed RSE margin — both put the feasibility boundary at ``mu = 0``."""
     post = feas_gp.posterior(x)
     mu = post.mean.squeeze(-1)
     sigma = post.variance.clamp_min(1e-12).sqrt().squeeze(-1)
