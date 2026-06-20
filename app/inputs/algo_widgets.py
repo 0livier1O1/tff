@@ -790,17 +790,18 @@ def _render_ftboss(acfg: FTBOSSConfig) -> None:
              min_value=1, max_value=4096, help="Thaw-able structures whose cores are kept (rest evicted).")
 
     with _group("Surrogate / GP", _algo_badge(acfg)):
-        _sel(st, acfg, "ftboss_ft_kernel", "Curve kernel", ["freeze_thaw"],
-             f"ftboss_kernel_{cid}",
-             help="Analytic Swersky-2014 freeze-thaw kernel (asymptote field k_x = Matérn-2.5 "
-                  "ARD). 'deep_freeze_thaw' (DyHPO) is implemented but not yet wired to the "
-                  "level-set acquisition.")
+        _sel(st, acfg, "ftboss_ft_kernel", "Curve kernel",
+             ["freeze_thaw", "deep_freeze_thaw"], f"ftboss_kernel_{cid}",
+             help="'freeze_thaw' = analytic Swersky-2014 kernel (asymptote field k_x = "
+                  "Matérn-2.5 ARD); its asymptote is the t→∞ query. 'deep_freeze_thaw' = "
+                  "learned DyHPO deep kernel over the observed curve; dense-only, and its "
+                  "'asymptote' is the predicted RSE at the max-fidelity budget.")
         _sel(st, acfg, "ftboss_gp_fit", "GP fit backend",
              ["woodbury", "hierarchical", "dense"], f"ftboss_gp_fit_{cid}",
-             help="How the freeze-thaw GP is fit — all give the same posterior, differing "
-                  "only in linear algebra. 'woodbury'/'hierarchical' exploit the kernel's "
-                  "block structure (O(Σtₙ³+N³), much faster); 'dense' is the plain "
-                  "gpytorch ExactGP (O(M³)).")
+             help="How the analytic GP is fit — all give the same posterior, differing only "
+                  "in linear algebra. 'woodbury'/'hierarchical' exploit the kernel's block "
+                  "structure (O(Σtₙ³+N³), much faster); 'dense' is the plain gpytorch ExactGP "
+                  "(O(M³)). Ignored for the deep kernel (always dense).")
         _sel(st, acfg, "mean", "GP mean function", BO_MEANS, f"ftboss_mean_{cid}", help=BO_MEAN_HELP)
         _chk(st, acfg, "input_warp", "Use Input Warping", f"ftboss_input_warp_{cid}", help=BO_INPUT_WARP_HELP)
         _chk(st, acfg, "round_inputs", "Round to integers", f"ftboss_round_inputs_{cid}", help=BO_ROUND_HELP)

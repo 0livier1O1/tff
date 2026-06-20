@@ -24,12 +24,14 @@ from app.config.sidebar_config import SidebarConfig
 from app.analysis.cboss_diagnostics import (
     generate_cboss_diagnostics, has_cboss_diagnostics, load_cboss_diagnostics,
 )
-from app.analysis.cboss_oos import OOS_METHODS
+from app.analysis.cboss_oos import oos_method_for_config
+from app.analysis.cboss_diagnostics import _algo_config
 from app.plotting import cboss_figures as cf
 from app.analysis.debug_script import write_debug_script, SUPPORTED_FAMILIES
 from app.analysis.diagnostics import (
     generate_gp_diagnostics, has_gp_diagnostics, load_gp_diagnostics, load_rse_cr,
 )
+from app.analysis.ftboss_diagnostics import generate_ftboss_diagnostics
 from app.plotting import figures
 from app.plotting.traces import load_traces
 from app.problem_io import load_problem
@@ -42,6 +44,28 @@ from app.analysis.results_summary import render_results_summary, render_seed_per
 # ---------------------------------------------------------------------------
 # Sidebar — run picker
 # ---------------------------------------------------------------------------
+
+def _runs_pref_path(repo_root: Path) -> Path:
+    """Where the last Runs selection is remembered (gitignored, user-local)."""
+    return repo_root / "artifacts" / ".dashboard_prefs.json"
+
+
+def _load_pref_runs(repo_root: Path) -> list[str]:
+    p = _runs_pref_path(repo_root)
+    if p.exists():
+        try:
+            return list(json.loads(p.read_text()).get("selected_runs", []))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return []
+
+
+def _save_pref_runs(repo_root: Path, runs: list[str]) -> None:
+    try:
+        _runs_pref_path(repo_root).write_text(json.dumps({"selected_runs": runs}))
+    except OSError:
+        pass
+
 
 def render_analyze_sidebar(cfg: SidebarConfig, repo_root: Path) -> None:
     runs_dir = repo_root / "artifacts" / "runs"
@@ -57,12 +81,17 @@ def render_analyze_sidebar(cfg: SidebarConfig, repo_root: Path) -> None:
         st.sidebar.warning("No completed runs found.")
         return
 
+    # Default to the last selection (persisted across restarts), dropping any runs that
+    # have since been deleted; first render of a session seeds the widget from it.
+    saved = [r for r in _load_pref_runs(repo_root) if r in runs]
     cfg.selected_runs = st.sidebar.multiselect(
         "Runs", runs,
-        default=cfg.selected_runs or runs[:1],
-        help="Pick one or more runs to merge into the algorithms table.",
+        default=saved or cfg.selected_runs or runs[:1],
+        help="Pick one or more runs to merge into the algorithms table. "
+             "Your selection is remembered across restarts.",
         key="analyze_selected_runs",
     )
+    _save_pref_runs(repo_root, cfg.selected_runs)
 
 
 # ---------------------------------------------------------------------------
@@ -374,34 +403,26 @@ def _render_decomposition(repo_root: Path) -> None:
 
 
 def _render_surrogate_diagnostics(repo_root: Path) -> None:
-    """GP- and feasibility-surrogate diagnostics, one sub-tab per selected seed."""
+    """GP- and feasibility-surrogate diagnostics, one sub-tab per selected seed.
+
+    Each feasibility config is scored against the OOS set decomposed with **its own**
+    decomposition method (``cboss_oos.oos_method_for_config``) — no global adam/agd
+    choice — so every algorithm is labelled the way it actually decomposed."""
     ctx = _diag_context(repo_root)
     if ctx is None:
         return
     keys, df, runs_dir, seeds = ctx
-    oos_method = _oos_method_selector(df)
     for tab, seed in zip(st.tabs([f"Seed {s}" for s in seeds]), seeds):
         with tab:
             sdf = df[df["seed"] == seed]
-            _render_diag_generate_all(runs_dir, sdf, int(seed), oos_method)
+            _render_diag_generate_all(runs_dir, sdf, int(seed))
             _render_gp_diagnostics(runs_dir, sdf, int(seed))
-            _render_cboss_diagnostics(runs_dir, sdf, int(seed), oos_method)
+            _render_cboss_diagnostics(runs_dir, sdf, int(seed))
 
 
-def _oos_method_selector(df: pd.DataFrame) -> str:
-    """Pick the decomposition method whose OOS labels the feasibility diagnostics are
-    scored against. The OOS feasibility set (RSE < threshold) is decomposed with this
-    method's fixed preset (see ``cboss_oos``); diagnostics are cached per method, so
-    switching re-scores against that labelled set without re-decomposing it."""
-    if not df["family"].isin(["cboss", "bess"]).any():
-        return "adam"
-    return st.radio(
-        "OOS decomposition", list(OOS_METHODS), index=0, key="oos_method",
-        horizontal=True,
-        help="Decomposition used to label the held-out feasibility test set. "
-             "'adam' = 1000-epoch gradient fit (the runs' own setting); 'agd' = "
-             "200-sweep alternating fit — comparable RSE, much cheaper (see the "
-             "method benchmark). Feasibility diagnostics are cached separately per method.")
+def _cfg_oos_method(cd: Path) -> str:
+    """The OOS labelling method for a config dir, from its own ``decomp_method``."""
+    return oos_method_for_config(_algo_config(cd))
 
 
 def _render_decomp_traces(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
@@ -434,11 +455,12 @@ def _render_decomp_traces(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
                     width="stretch", key=f"decomp_{seed}")
 
 
-def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int,
-                         oos_method: str) -> list[tuple]:
+def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> list[tuple]:
     """Every selected config at this seed whose surrogate diagnostics aren't cached yet,
-    as ``(kind, config_dir, label)`` — ``kind`` is 'boss' (objective/RSE GP refit) or
-    'feas' (cBOSS/BESS replay + OOS scoring, cached per ``oos_method``)."""
+    as ``(kind, config_dir, label, oos_method)`` — ``kind`` is 'boss' (objective/RSE GP
+    refit), 'feas' (cBOSS/BESS replay + OOS scoring) or 'ftboss' (freeze-thaw asymptote
+    OOS scoring). The OOS scorings are cached in the cBOSS format, each keyed by the
+    config's **own** decomposition method (``oos_method``; ``None`` for BOSS, no OOS)."""
     out: list[tuple] = []
     boss = (sdf[sdf["family"] == "boss"][["run", "config_id", "label", "policy"]]
             .drop_duplicates())
@@ -446,42 +468,50 @@ def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int,
         cd = (runs_dir / r.run / f"seed_{seed}"
               / f"{r.config_id}_{r.policy.replace('-', '_')}")
         if not has_gp_diagnostics(cd):
-            out.append(("boss", cd, r.label))
-    feas = (sdf[sdf["family"].isin(["cboss", "bess"])]
+            out.append(("boss", cd, r.label, None))
+    # cBOSS/BESS/FTBOSS are all feasibility families scored on the shared OOS set, into
+    # the same cache format — only the generator differs (replay vs reload). Each is
+    # scored against the OOS set decomposed with its own method.
+    feas = (sdf[sdf["family"].isin(["cboss", "bess", "ftboss"])]
             [["run", "config_id", "label", "policy", "family"]].drop_duplicates())
     for r in feas.itertuples(index=False):
         cd = (runs_dir / r.run / f"seed_{seed}"
               / f"{r.config_id}_{r.policy.replace('-', '_')}")
-        if (cd / f"{r.family}_results.npz").exists() and not has_cboss_diagnostics(cd, oos_method):
-            out.append(("feas", cd, r.label))
+        om = _cfg_oos_method(cd)
+        if (cd / f"{r.family}_results.npz").exists() and not has_cboss_diagnostics(cd, om):
+            out.append(("ftboss" if r.family == "ftboss" else "feas", cd, r.label, om))
     return out
 
 
-def _render_diag_generate_all(runs_dir: Path, sdf: pd.DataFrame, seed: int,
-                              oos_method: str) -> None:
+def _render_diag_generate_all(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
     """One button that generates surrogate diagnostics for *every* not-yet-cached config
-    at this seed (BOSS objective/RSE refit + cBOSS/BESS replay/OOS), in sequence, behind
-    a single progress bar. Replaces the per-config Generate buttons."""
-    pending = _pending_diagnostics(runs_dir, sdf, seed, oos_method)
+    at this seed (BOSS objective/RSE refit + cBOSS/BESS/FTBOSS OOS scoring), in sequence,
+    behind a single progress bar. Each feasibility config is scored against the OOS set
+    decomposed with its own method."""
+    pending = _pending_diagnostics(runs_dir, sdf, seed)
     if not pending:
         return
     n = len(pending)
     if not st.button(f":material/play_arrow: Generate diagnostics — {n} config(s)",
                      type="primary", key=f"gen_all_{seed}",
                      help="One-step-ahead replay + OOS scoring for every BOSS / cBOSS / "
-                          "BESS config at this seed that isn't cached yet. Runs once "
-                          "(cBOSS/BESS decompose the shared OOS set on first use), cached."):
+                          "BESS / FTBOSS config at this seed that isn't cached yet. Runs "
+                          "once (decomposes each method's shared OOS set on first use), cached."):
         st.caption(f"{n} config(s) not generated yet — click to build them all.")
         return
     bar = st.progress(0.0, text="Generating diagnostics…")
-    for i, (kind, cd, lab) in enumerate(pending):
+    for i, (kind, cd, lab, om) in enumerate(pending):
         if kind == "boss":
             generate_gp_diagnostics(cd, progress=lambda f, i=i, lab=lab: bar.progress(
                 (i + f) / n, text=f"GP refit — {lab}  ({(i + f) / n:.0%})"))
-        else:
-            bar.progress(i / n, text=f"Replay + OOS [{oos_method}] — {lab}  "
+        elif kind == "ftboss":
+            bar.progress(i / n, text=f"Asymptote OOS [{om}] — {lab}  "
                                      f"(decomposes OOS on first use)")
-            generate_cboss_diagnostics(cd, oos_method)
+            generate_ftboss_diagnostics(cd, om)
+        else:
+            bar.progress(i / n, text=f"Replay + OOS [{om}] — {lab}  "
+                                     f"(decomposes OOS on first use)")
+            generate_cboss_diagnostics(cd, om)
     bar.empty()
     st.rerun()
 
@@ -665,34 +695,37 @@ def _render_debug_instance(repo_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Feasibility-classifier diagnostics — replay-based, scored on a shared OOS set
-# (see app/analysis/cboss_diagnostics.py). Shared by cBOSS and BESS: both wrap the
-# same FeasibilityGP, so the replay/OOS grid is identical. Compact side-by-side
-# plotly, no tabs.
+# Feasibility-model diagnostics — scored on a shared OOS set (see
+# app/analysis/cboss_diagnostics.py). cBOSS/BESS wrap the same FeasibilityGP (replayed);
+# FTBOSS scores its freeze-thaw asymptote posterior (reloaded). All three write the same
+# cache format and are compared here on the same plots. Compact side-by-side plotly.
 # ---------------------------------------------------------------------------
 
-def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int,
-                              oos_method: str) -> None:
-    """Single merged feasibility-classifier diagnostics page for *all* cBOSS/BESS
-    configs at one seed. Each config's expensive replay + OOS scoring runs once behind
-    its own Generate button (cached under analysis/<family>/<oos_method>/); once
-    generated, the configs are compared on shared plots (one colour per algo), with
-    per-algo surrogate detail in expanders below."""
-    configs = (sdf[sdf["family"].isin(["cboss", "bess"])]
+def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
+    """Single merged feasibility-model diagnostics page for *all* cBOSS/BESS/FTBOSS
+    configs at one seed. Each config's expensive OOS scoring runs once behind the
+    Generate button (cached under analysis/<family>/<oos_method>/); once generated, the
+    configs are compared on shared plots (one colour per algo), with per-algo surrogate
+    detail in expanders below. FTBOSS's 'P(feasible)' is its asymptote posterior. Each
+    config is scored against the OOS set decomposed with its **own** decomposition
+    method, so the label shown per algo carries that method."""
+    configs = (sdf[sdf["family"].isin(["cboss", "bess", "ftboss"])]
                [["run", "config_id", "label", "policy", "family"]].drop_duplicates())
     if configs.empty:
         return
 
-    with st.expander(f"Feasibility models  ·  OOS: {oos_method}", expanded=False):
+    with st.expander("Feasibility models  ·  OOS = each algo's own decomposition", expanded=False):
         algos: list[SimpleNamespace] = []
         for r in configs.itertuples(index=False):
             cd = (runs_dir / r.run / f"seed_{seed}"
                   / f"{r.config_id}_{r.policy.replace('-', '_')}")
-            if not (cd / f"{r.family}_results.npz").exists() or not has_cboss_diagnostics(cd, oos_method):
+            om = _cfg_oos_method(cd)
+            if not (cd / f"{r.family}_results.npz").exists() or not has_cboss_diagnostics(cd, om):
                 continue
-            metrics, ev, acq, meta = load_cboss_diagnostics(cd, oos_method)
+            metrics, ev, acq, meta = load_cboss_diagnostics(cd, om)
             algos.append(SimpleNamespace(label=r.label, policy=r.policy, family=r.family,
-                                         cd=cd, metrics=metrics, ev=ev, acq=acq, meta=meta))
+                                         cd=cd, metrics=metrics, ev=ev, acq=acq, meta=meta,
+                                         oos_method=om))
 
         if not algos:
             st.caption("Not generated yet — use the **Generate diagnostics** button above.")
@@ -752,7 +785,8 @@ def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], see
     # Scored-count + replay-fidelity summary (per algo; the replay must still mirror
     # the run's saved one-step-ahead pf for the diagnostics to be trustworthy).
     st.caption("  ·  ".join(
-        f"**{a.label}**: scored {a.meta['n_scored']}/{a.meta['n_scored'] + a.meta['n_excluded']}"
+        f"**{a.label}** [OOS: {a.meta.get('oos_method', '?')}]: "
+        f"scored {a.meta['n_scored']}/{a.meta['n_scored'] + a.meta['n_excluded']}"
         for a in algos))
     bad = [a for a in algos if not (a.meta["pf_mae"] < 0.05 and a.meta["pf_spearman"] > 0.95)]
     if bad:

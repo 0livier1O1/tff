@@ -91,9 +91,11 @@ class AlgoConfig:
     # (hyperparameters for BOSS, variational dist for cBOSS) every N steps.
     freq_update: int = 5
 
-    # Decomposition (every family runs a TN decomposition under the hood)
-    decomp_method: str = "adam"
-    decomp_epochs: int = 1000
+    # Decomposition (every family runs a TN decomposition under the hood). Default to
+    # the alternating ``agd`` engine — comparable RSE to adam at a fraction of the cost
+    # (see the decomp benchmark) — so all families share one cheap default.
+    decomp_method: str = "agd"
+    decomp_epochs: int = 250
     decomp_init_lr: float | None = 0.01
     decomp_momentum: float = 0.9
     decomp_loss_patience: int = 500
@@ -144,9 +146,9 @@ class MABSSConfig(AlgoConfig):
     dtype: str = "float32"
 
     # MABSS-specific decomp defaults
-    decomp_method: str = "adam"
+    decomp_method: str = "agd"
     decomp_momentum: float = 0.9
-    decomp_epochs: int = 200
+    decomp_epochs: int = 250
 
 
 

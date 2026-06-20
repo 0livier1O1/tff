@@ -29,15 +29,6 @@ st.markdown(
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 
-    /* Sidebar background tinted a touch darker than default so the (white)
-       algorithm/parameter expander cards stand out against it. */
-    section[data-testid="stSidebar"] {
-        background-color: #dde3ec !important;
-    }
-    section[data-testid="stSidebar"] [data-testid="stExpander"] details {
-        background-color: #ffffff !important;
-    }
-
     /* Hide only the expand/collapse chevron on popover buttons (its own
        wrapper), keeping the button's own label icon. */
     [data-testid="stPopoverButton"] [class*="e1jdirsb1"],
@@ -59,6 +50,25 @@ st.markdown(
     div[data-baseweb="tooltip"] > div {
         background-color: transparent !important;
     }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Sidebar tinted a touch off the default background so the algorithm/parameter
+# expander cards stand out against it. Colours flip with the active theme so
+# dark mode stays legible instead of forcing a light sidebar.
+_dark = getattr(getattr(st.context, "theme", None), "type", None) == "dark"
+_sidebar_bg, _card_bg = ("#13151c", "#262730") if _dark else ("#dde3ec", "#ffffff")
+st.markdown(
+    f"""
+    <style>
+    section[data-testid="stSidebar"] {{
+        background-color: {_sidebar_bg} !important;
+    }}
+    section[data-testid="stSidebar"] [data-testid="stExpander"] details {{
+        background-color: {_card_bg} !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True,

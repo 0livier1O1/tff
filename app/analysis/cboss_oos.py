@@ -58,6 +58,15 @@ def _oos_decomp(method: str) -> dict:
     return dict(_OOS_DECOMP[method])
 
 
+def oos_method_for_config(algo: dict) -> str:
+    """The OOS labelling method matching a config's **own** decomposition method, so an
+    algorithm is scored against the feasibility set decomposed the way it actually
+    decomposed (no global adam/agd choice). Falls back to ``"adam"`` for a decomposition
+    method without a canonical OOS preset (e.g. ``sgd``/``als``)."""
+    m = str(algo.get("decomp_method", "adam"))
+    return m if m in _OOS_DECOMP else "adam"
+
+
 def _target_path(repo_root: Path, problem_id: str, seed: int) -> Path:
     return (repo_root / "artifacts" / "problems" / problem_id
             / f"seed_{seed}" / "target_tensor.npz")
