@@ -173,12 +173,12 @@ class RandomSearch:
         sample_time = time.time() - t0
         adj = _triu_to_full(x_int_flat, self.t_shape).int()
 
-        cr, rse, eval_time, _recon, losses, ctn_stats, eval_status = _eval_tn(
+        cr, rse, eval_time, _recon, losses, ctn_stats, eval_status, _cores = _eval_tn(
             self.target,
             adj,
             self.maxiter_tn,
-            self.n_runs,
-            self.min_rse,
+            n_runs=self.n_runs,
+            min_rse=self.min_rse,
             method=self.decomp_method,
             dtype=self.dtype,
             init_lr=self.init_lr,

@@ -395,8 +395,9 @@ def _oos_method_selector(df: pd.DataFrame) -> str:
     switching re-scores against that labelled set without re-decomposing it."""
     if not df["family"].isin(["cboss", "bess"]).any():
         return "adam"
-    return st.selectbox(
+    return st.radio(
         "OOS decomposition", list(OOS_METHODS), index=0, key="oos_method",
+        horizontal=True,
         help="Decomposition used to label the held-out feasibility test set. "
              "'adam' = 1000-epoch gradient fit (the runs' own setting); 'agd' = "
              "200-sweep alternating fit — comparable RSE, much cheaper (see the "

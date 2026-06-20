@@ -5,7 +5,8 @@ Generates N **CR-stratified** TN structures (rank vectors) — evenly spaced in 
 compression ratio, so the set spans the low-CR / feasible region (which uniform-
 random ranks barely reach) as well as the high-CR end — decomposes each with a run's
 own decomposition settings via BOSS's ``_eval_tn`` path (the exact eval the run used),
-and caches RSE/CR keyed by (problem, seed, decomp-signature) so every algo on that
+and caches RSE/CR plus each structure's full decomposition loss trajectory, keyed by
+(problem, seed, decomposition method) so every algo on that
 problem/seed reuses the same labelled OOS set. Train-set overlap is allowed and
 filtered out at *scoring* time (see ``cboss_replay``), not here — so the cache is
 algo-independent.
@@ -132,19 +133,22 @@ def _run_worker(shard_path, out_path, target_path, decomp) -> None:
     t_shape = torch.tensor(target.shape, dtype=torch.double)
     rse = np.empty(len(X))
     cr = np.empty(len(X))
+    losses: list[list[float]] = []     # full decomposition RSE trajectory per structure
     tag = os.environ.get("CUDA_VISIBLE_DEVICES", "?")
     for i, row in enumerate(X):
         A = _triu_to_full(torch.tensor(row, dtype=torch.double), t_shape)
-        c, r, _et, _recon, _ls, _ctn, _status = _eval_tn(target, A, **decomp)
+        c, r, _et, _recon, ls, _ctn, _status, _cores = _eval_tn(target, A, **decomp)
         rse[i], cr[i] = r, c
+        losses.append([float(x) for x in ls])
         print(f"\r[gpu {tag}] {i + 1}/{len(X)}", end="", flush=True)
     print(f"\r[gpu {tag}] {len(X)}/{len(X)} done")
-    np.savez(out_path, X=X, rse=rse, cr=cr)
+    np.savez(out_path, X=X, rse=rse, cr=cr, losses=np.array(losses, dtype=object))
 
 
 def _build(missing: np.ndarray, target_path: Path, decomp: dict, cache_dir: Path) -> dict:
     """Decompose `missing` structures, GPU-sharded across all GPUs. Returns
-    {rank-tuple: (rse, cr)}."""
+    {rank-tuple: (rse, cr, losses)} where `losses` is the full decomposition
+    RSE trajectory (so its last value equals `rse`)."""
     from app.utils import all_gpus
 
     gpus = all_gpus()
@@ -168,21 +172,27 @@ def _build(missing: np.ndarray, target_path: Path, decomp: dict, cache_dir: Path
 
     out: dict = {}
     for _dev, sout, _p in procs:
-        o = np.load(sout)
-        for x, r, c in zip(o["X"], o["rse"], o["cr"]):
-            out[tuple(int(v) for v in x)] = (float(r), float(c))
+        o = np.load(sout, allow_pickle=True)
+        for x, r, c, l in zip(o["X"], o["rse"], o["cr"], o["losses"]):
+            out[tuple(int(v) for v in x)] = (float(r), float(c), [float(v) for v in l])
     return out
 
 
 def load_or_build_oos(repo_root, problem_id: str, seed: int, algo: dict,
                       n: int = 1000, oos_method: str = "adam") -> dict:
-    """Return ``{X (n,D int), rse (n,), cr (n,)}`` for the OOS set, building +
-    caching on first call.
+    """Return ``{X (n,D int), rse (n,), cr (n,), losses (n, object)}`` for the OOS
+    set, building + caching on first call.
 
     The structures are fixed per (problem, seed); only ``max_rank`` is read from
     `algo`. The feasibility labels are decomposed with ``oos_method``'s canonical
     preset (see ``_OOS_DECOMP``), so the cache is shared by every run on that
     problem/seed and is independent of the run's own decomposition settings.
+
+    ``losses`` is each structure's full decomposition RSE trajectory (so
+    ``losses[-1] == rse``), stored so smoothness / convergence can be inspected
+    offline. Caches written before trajectory storage was added carry no ``losses``
+    field; those structures come back with an empty trajectory until the cache is
+    rebuilt (the labels are unaffected).
 
     Migration note: the original caches were named by an opaque decomp-signature
     hash (``seed_{s}__94beefb9.npz`` == the adam preset). Those were renamed to
@@ -200,9 +210,12 @@ def load_or_build_oos(repo_root, problem_id: str, seed: int, algo: dict,
 
     have: dict = {}
     if cache.exists():
-        z = np.load(cache)
-        have = {tuple(int(v) for v in x): (float(r), float(c))
-                for x, r, c in zip(z["X"], z["rse"], z["cr"])}
+        z = np.load(cache, allow_pickle=True)
+        # Older caches predate trajectory storage and have no `losses` field.
+        traj = z["losses"] if "losses" in z.files else None
+        for j, (x, r, c) in enumerate(zip(z["X"], z["rse"], z["cr"])):
+            ls = [float(v) for v in traj[j]] if traj is not None else []
+            have[tuple(int(v) for v in x)] = (float(r), float(c), ls)
 
     missing = np.array([row for row in X
                         if tuple(int(v) for v in row) not in have], dtype=int)
@@ -214,12 +227,14 @@ def load_or_build_oos(repo_root, problem_id: str, seed: int, algo: dict,
         keys = list(have.keys())
         np.savez(cache, X=np.array(keys, dtype=int),
                  rse=np.array([have[k][0] for k in keys]),
-                 cr=np.array([have[k][1] for k in keys]))
+                 cr=np.array([have[k][1] for k in keys]),
+                 losses=np.array([have[k][2] for k in keys], dtype=object))
 
     keys = [tuple(int(v) for v in r) for r in X]
     return {"X": X,
             "rse": np.array([have[k][0] for k in keys]),
-            "cr": np.array([have[k][1] for k in keys])}
+            "cr": np.array([have[k][1] for k in keys]),
+            "losses": np.array([have[k][2] for k in keys], dtype=object)}
 
 
 def main() -> None:

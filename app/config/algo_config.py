@@ -25,12 +25,14 @@ MABSS_POLICIES = ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4"]
 BOSS_POLICIES  = ["boss-ei", "boss-ucb"]
 CBOSS_POLICIES = ["cboss-cei", "cboss-pf", "cboss-ficr"]
 BESS_POLICIES  = ["bess-cucb", "bess-tmse", "bess-sur"]
+# FTBOSS policy = Stage-1 shortlist acquisition (Stage-2 is always SUR); see FTBOSSConfig.
+FTBOSS_POLICIES = ["ftboss-cucb", "ftboss-tmse"]
 TNALE_POLICIES = ["tnale"]
 RANDOM_POLICIES = ["random"]
 
 POLICY_OPTIONS: list[str] = (
     MABSS_POLICIES + BOSS_POLICIES + CBOSS_POLICIES + BESS_POLICIES
-    + TNALE_POLICIES + RANDOM_POLICIES
+    + FTBOSS_POLICIES + TNALE_POLICIES + RANDOM_POLICIES
 )
 
 
@@ -43,6 +45,8 @@ def policy_family(policy: str) -> str:
         return "cboss"
     if policy in BESS_POLICIES:
         return "bess"
+    if policy in FTBOSS_POLICIES:
+        return "ftboss"
     if policy in TNALE_POLICIES:
         return "tnale"
     if policy in RANDOM_POLICIES:
@@ -232,6 +236,63 @@ class BESSConfig(FeasibilityGPConfig, AlgoConfig):
 
 
 # ---------------------------------------------------------------------------
+# FTBOSS (freeze-thaw / gray-box BO) — treats decomposition epochs as a fidelity
+# axis and learns the feasibility level set from the asymptote of partial loss
+# curves. Its surrogate is the freeze-thaw GP (NOT the feasibility classifier), so
+# its fields are ftboss_* rather than the FeasibilityGPConfig mixin.
+# ---------------------------------------------------------------------------
+
+@dataclass(kw_only=True)
+class FTBOSSConfig(AlgoConfig):
+    family: str = "ftboss"
+
+    # Freeze-thaw runs an alternating decomposition by default (PAM converges in
+    # ~250 sweeps vs ~1500 epochs for the gradient methods), so override the base
+    # gradient defaults; the fidelity rungs derive from this epoch budget.
+    decomp_method: str = "agd"
+    decomp_epochs: int = 250                 # = maxiter_tn (the per-structure epoch cap)
+    decomp_init_lr: float | None = None
+    decomp_momentum: float = 0.5
+    freq_update: int = 1                      # refit the freeze-thaw GP every round
+
+    # Surrogate kernel (only the analytic 'freeze_thaw' is wired to the acquisition;
+    # 'deep_freeze_thaw' has no closed-form look-ahead yet).
+    ftboss_ft_kernel: str = "freeze_thaw"
+
+    # Fidelity schedule. 0 = auto (= maxiter_tn // 10); tau_0 (seed) and delta_tau
+    # (thaw increment) are deliberately separate knobs.
+    ftboss_init_fidelity: int = 0            # tau_0
+    ftboss_fidelity_step: int = 0            # delta_tau
+    ftboss_max_fidelity: int = 0             # epoch cap per structure (0 = maxiter_tn)
+
+    # Basket / candidate pool.
+    ftboss_basket_old: int = 10              # B_old: started candidates scored per round
+    ftboss_basket_new: int = 3               # B_new: fresh candidates scored per round
+    ftboss_max_thawed: int = 32              # CPU-checkpointed (thaw-able) structures kept
+
+    # Curve preprocessing + freeze-thaw GP fit.
+    ftboss_gp_fit: str = "woodbury"          # fit backend: dense | woodbury | hierarchical
+    ftboss_curve_len: int = 30               # deep-kernel curve-branch resample length
+    ftboss_curve_bin: int = 1                # block-average smoothing window (1 = off)
+    ftboss_curve_stride: int = 1             # thinning stride (1 = off)
+    ftboss_curve_max_points: int = 64        # cap points/curve, tail-dense log-spaced (0 = off)
+    ftboss_gp_epochs: int = 300              # marginal-likelihood fit epochs
+    ftboss_gp_lr: float = 0.05
+
+    # Acquisition. Stage-1 shortlist selector is the policy (ftboss-cucb / ftboss-tmse);
+    # Stage-2 is always SUR. stage2_mode locks to 'A' (B/C not yet implemented).
+    ftboss_cucb_gamma_mode: str = "constant" # 'constant' | 'adaptive'
+    ftboss_cucb_gamma: float = 1.96          # straddle constant (constant mode)
+    ftboss_tmse_eps: float = 0.05            # tmse boundary band half-width (latent)
+    ftboss_feas_triage: bool = True          # gate the model-feasibility triage (off = keep all)
+    ftboss_eps_kill: float = 0.05            # triage: drop a thaw candidate when pi < this
+    ftboss_conf_feasible: float = 0.95       # triage: retire a resolved-feasible candidate
+    ftboss_n_ref: int = 2048                 # reference design for the boundary-error E
+    ftboss_sur_ref_size: int = 256           # SUR look-ahead reference subset
+    ftboss_stage2_mode: str = "A"            # 'A' only (B/C reserved)
+
+
+# ---------------------------------------------------------------------------
 # TnALE
 # ---------------------------------------------------------------------------
 
@@ -278,6 +339,7 @@ _CONFIG_CLS = {
     "boss":  BOSSConfig,
     "cboss": CBOSSConfig,
     "bess":  BESSConfig,
+    "ftboss": FTBOSSConfig,
     "tnale": TnALEConfig,
     "random": RandomSearchConfig,
 }

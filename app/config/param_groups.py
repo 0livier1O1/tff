@@ -41,7 +41,7 @@ GROUP_LABELS: dict[str, str] = {
 # (e.g. mabss has `kernel`/`mean` but no GP surrogate).
 _GROUP_FAMILIES: dict[str, set[str] | None] = {
     "decomp": None,                                   # all families run a decomposition
-    "init":   {"boss", "cboss", "bess", "tnale", "random"},   # mabss has no init design
+    "init":   {"boss", "cboss", "bess", "ftboss", "tnale", "random"},   # mabss has no init design
     "search": None,                                   # budget/max_rank are universal
     "gp":     {"boss", "cboss", "bess"},              # only the GP-surrogate families
 }

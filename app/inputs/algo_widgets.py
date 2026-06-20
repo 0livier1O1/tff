@@ -12,13 +12,16 @@ accidental cross-family field access.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 
 import streamlit as st
 
+from app.analysis.debug_script import write_debug_script_for_config, SUPPORTED_FAMILIES
+from app.orchestration.runner import _resolve_problem, parse_seeds
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import (
-    AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, BESSConfig, TnALEConfig,
-    RandomSearchConfig,
+    AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, BESSConfig, FTBOSSConfig,
+    TnALEConfig, RandomSearchConfig,
     POLICY_OPTIONS, new_algo_config, replace_policy, duplicate_algo_config,
 )
 from app.config.saved_algos import (
@@ -47,6 +50,8 @@ from app.config.constants import (
 )
 
 ENGINES = ["sgd", "adam", "pam", "als", "agd"]
+
+ROOT = Path(__file__).resolve().parents[2]  # app/inputs/algo_widgets.py -> repo root
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +166,8 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
         with exp_col.expander(f"**{acfg.label}**", expanded=False):
             _render_one_config(acfg)
         with menu_col.popover(":material/more_vert:", width="stretch",
-                              help="Save / duplicate / delete"):
-            _render_actions_menu(acfg)
+                              help="Save / duplicate / debug / delete"):
+            _render_actions_menu(acfg, cfg)
 
     _render_add_algorithm()
 
@@ -173,11 +178,12 @@ def render_algo_configs(cfg: SidebarConfig) -> None:
 # Per-config overflow menu — save to library / duplicate / delete
 # ---------------------------------------------------------------------------
 
-def _render_actions_menu(acfg: AlgoConfig) -> None:
-    """Contents of a config's ⋮ popover: save / duplicate / delete as three
-    horizontal icon buttons. Save uses the config's own label as the library name."""
+def _render_actions_menu(acfg: AlgoConfig, cfg: SidebarConfig) -> None:
+    """Contents of a config's ⋮ popover: save / duplicate / debug / delete as four
+    horizontal icon buttons. Save uses the config's own label as the library name;
+    debug emits a standalone script for this config on the selected problem/first seed."""
     cid = acfg.config_id
-    save_col, dup_col, del_col = st.columns(3)
+    save_col, dup_col, dbg_col, del_col = st.columns(4)
     if save_col.button(":material/bookmark_add:", key=f"save_btn_{cid}", width="stretch",
                        help=f"Save to library as '{acfg.label}'"):
         save_algo(acfg.label, acfg)
@@ -187,6 +193,16 @@ def _render_actions_menu(acfg: AlgoConfig) -> None:
                       help="Duplicate (same params, new id)"):
         st.session_state["algo_configs"].append(duplicate_algo_config(acfg))
         st.rerun()
+    dbg_ok = acfg.family in SUPPORTED_FAMILIES
+    if dbg_col.button(":material/bug_report:", key=f"debug_{cid}", width="stretch",
+                      disabled=not dbg_ok,
+                      help=("Generate a standalone debug script for this config"
+                            if dbg_ok else "Debug script not supported for this family")):
+        problem = _resolve_problem(cfg, ROOT)   # loads or mints+saves the selected problem
+        seeds = parse_seeds(cfg.seeds_str)
+        path = write_debug_script_for_config(ROOT, acfg, problem, seeds[0] if seeds else 1)
+        st.success("Debug script written — open in VSCode and run with F5:")
+        st.code(str(path), language=None)
     if del_col.button(":material/delete:", key=f"remove_{cid}", width="stretch",
                       type="primary", help="Delete this config"):
         st.session_state["algo_configs"] = [
@@ -294,6 +310,8 @@ def _render_one_config(acfg: AlgoConfig) -> None:
         _render_cboss(acfg)
     elif isinstance(acfg, BESSConfig):
         _render_bess(acfg)
+    elif isinstance(acfg, FTBOSSConfig):
+        _render_ftboss(acfg)
     elif isinstance(acfg, TnALEConfig):
         _render_tnale(acfg)
     elif isinstance(acfg, RandomSearchConfig):
@@ -709,6 +727,126 @@ def _render_bess(acfg: BESSConfig) -> None:
 
     with _group("Surrogate / GP"):
         _render_feasibility_gp_group(acfg)
+
+
+def _render_ftboss(acfg: FTBOSSConfig) -> None:
+    """FTBOSS (freeze-thaw gray-box BO): treats epochs as a fidelity axis and learns
+    the feasibility level set from the asymptote of partial loss curves. The Stage-1
+    shortlist acquisition is the policy (ftboss-cucb / ftboss-tmse); Stage-2 (thaw vs.
+    explore) is always SUR."""
+    cid = acfg.config_id
+    with _group("Acquisition", _algo_badge(acfg)):
+        st.markdown("*Stage 1 — shortlist (on the asymptote posterior)*")
+        if acfg.policy == "ftboss-cucb":
+            _sel(st, acfg, "ftboss_cucb_gamma_mode", "γ mode", ["constant", "adaptive"],
+                 f"ftboss_cucb_gamma_mode_{cid}",
+                 help="'constant' uses the straddle weight below; 'adaptive' is the paper's "
+                      "§3.2 γ_n = IQR(m⋆)/(3·mean σ_∞), recomputed each step.")
+            if acfg.ftboss_cucb_gamma_mode == "constant":
+                _num(st, acfg, "ftboss_cucb_gamma", "Straddle γ", f"ftboss_cucb_gamma_{cid}",
+                     min_value=0.0, step=0.1, format="%.2f",
+                     help="cUCB weight γ in a(x)=γ·σ_∞(x)−|μ_∞(x)−ρ|. 1.96 = classic straddle.")
+        else:  # ftboss-tmse
+            _num(st, acfg, "ftboss_tmse_eps", "tMSE band ε", f"ftboss_tmse_eps_{cid}",
+                 min_value=0.0, step=0.01, format="%.3f",
+                 help="Boundary band half-width (latent units) of the tMSE window centred on ρ.")
+        st.markdown("*Stage 2 — thaw vs. explore (SUR look-ahead)*")
+        s1, s2 = st.columns(2)
+        _num(s1, acfg, "ftboss_sur_ref_size", "SUR ref points", f"ftboss_sur_ref_{cid}",
+             min_value=16, max_value=8192, step=64,
+             help="Reference subset for the SUR block look-ahead. Caps its cost.")
+        _num(s2, acfg, "ftboss_n_ref", "Boundary-error ref points", f"ftboss_n_ref_{cid}",
+             min_value=64, max_value=16384, step=64,
+             help="Fixed reference design over which the integrated boundary error E is estimated.")
+        _chk(st, acfg, "ftboss_feas_triage", "Feasibility triage", f"ftboss_feas_triage_{cid}",
+             help="Prune thaw candidates by the surrogate's feasibility probability. Turn off "
+                  "early on when the GP is data-poor and overconfident — it may otherwise drop "
+                  "good structures it wrongly believes infeasible.")
+        if acfg.ftboss_feas_triage:
+            t1, t2 = st.columns(2)
+            _num(t1, acfg, "ftboss_eps_kill", "Triage ε_kill", f"ftboss_eps_kill_{cid}",
+                 min_value=0.0, max_value=1.0, step=0.01, format="%.2f",
+                 help="Drop a thaw candidate confidently infeasible (P(feasible) < this).")
+            _num(t2, acfg, "ftboss_conf_feasible", "Triage feasible π", f"ftboss_conf_{cid}",
+                 min_value=0.0, max_value=1.0, step=0.01, format="%.2f",
+                 help="Retire a candidate already observed-feasible with P(feasible) > this.")
+
+    _render_decomp_group(acfg)
+
+    with _group("Freeze-thaw schedule", _algo_badge(acfg)):
+        f1, f2, f3 = st.columns(3)
+        _num(f1, acfg, "ftboss_init_fidelity", "Seed epochs τ₀", f"ftboss_tau0_{cid}",
+             min_value=0, max_value=100000, help="Epochs a fresh structure gets. 0 = auto (maxiter//10).")
+        _num(f2, acfg, "ftboss_fidelity_step", "Thaw step Δτ", f"ftboss_dtau_{cid}",
+             min_value=0, max_value=100000, help="Epochs added per thaw. 0 = auto (maxiter//10).")
+        _num(f3, acfg, "ftboss_max_fidelity", "Epoch cap", f"ftboss_maxfid_{cid}",
+             min_value=0, max_value=1000000, help="Per-structure epoch cap. 0 = maxiter_tn.")
+        b1, b2, b3 = st.columns(3)
+        _num(b1, acfg, "ftboss_basket_old", "B_old", f"ftboss_bold_{cid}",
+             min_value=1, max_value=512, help="Started candidates scored each round.")
+        _num(b2, acfg, "ftboss_basket_new", "B_new", f"ftboss_bnew_{cid}",
+             min_value=1, max_value=512, help="Fresh candidates scored each round.")
+        _num(b3, acfg, "ftboss_max_thawed", "Max checkpoints", f"ftboss_maxthaw_{cid}",
+             min_value=1, max_value=4096, help="Thaw-able structures whose cores are kept (rest evicted).")
+
+    with _group("Surrogate / GP", _algo_badge(acfg)):
+        _sel(st, acfg, "ftboss_ft_kernel", "Curve kernel", ["freeze_thaw"],
+             f"ftboss_kernel_{cid}",
+             help="Analytic Swersky-2014 freeze-thaw kernel (asymptote field k_x = Matérn-2.5 "
+                  "ARD). 'deep_freeze_thaw' (DyHPO) is implemented but not yet wired to the "
+                  "level-set acquisition.")
+        _sel(st, acfg, "ftboss_gp_fit", "GP fit backend",
+             ["woodbury", "hierarchical", "dense"], f"ftboss_gp_fit_{cid}",
+             help="How the freeze-thaw GP is fit — all give the same posterior, differing "
+                  "only in linear algebra. 'woodbury'/'hierarchical' exploit the kernel's "
+                  "block structure (O(Σtₙ³+N³), much faster); 'dense' is the plain "
+                  "gpytorch ExactGP (O(M³)).")
+        _sel(st, acfg, "mean", "GP mean function", BO_MEANS, f"ftboss_mean_{cid}", help=BO_MEAN_HELP)
+        _chk(st, acfg, "input_warp", "Use Input Warping", f"ftboss_input_warp_{cid}", help=BO_INPUT_WARP_HELP)
+        _chk(st, acfg, "round_inputs", "Round to integers", f"ftboss_round_inputs_{cid}", help=BO_ROUND_HELP)
+        st.markdown("*Curve → GP inputs*")
+        c1, c2, c3 = st.columns(3)
+        _num(c1, acfg, "ftboss_curve_bin", "Curve bin", f"ftboss_cbin_{cid}",
+             min_value=1, max_value=1000, help="Block-average window to smooth a curve (1 = off).")
+        _num(c2, acfg, "ftboss_curve_stride", "Curve stride", f"ftboss_cstride_{cid}",
+             min_value=1, max_value=1000, help="Keep every k-th binned point (1 = off).")
+        _num(c3, acfg, "ftboss_curve_max_points", "Max points/curve", f"ftboss_cmaxpts_{cid}",
+             min_value=0, max_value=100000,
+             help="Cap GP rows per curve, log-spaced dense toward the converged tail "
+                  "(the asymptote-informative region). 0 = off. Main lever on GP fit cost.")
+        st.markdown("*GP fit*")
+        g1, g2 = st.columns(2)
+        _num(g1, acfg, "ftboss_gp_epochs", "GP fit epochs", f"ftboss_gpep_{cid}",
+             min_value=10, max_value=20000, step=10, help="Marginal-likelihood fit epochs (per round).")
+        _num(g2, acfg, "ftboss_gp_lr", "GP lr", f"ftboss_gplr_{cid}",
+             min_value=1e-4, max_value=1.0, step=0.01, format="%.3f", help="Adam LR for the GP fit.")
+        _num(st, acfg, "freq_update", "Refit every", f"ftboss_freq_{cid}",
+             min_value=1, max_value=1000, help="Refit the freeze-thaw GP every N rounds.")
+
+    with _group("Search & budget"):
+        c1, c2 = st.columns(2)
+        _num(c1, acfg, "budget", "Budget (rounds)", f"ftboss_budget_{cid}",
+             min_value=1, max_value=10000, help="Thaw/explore rounds after the seed basket.")
+        _num(c2, acfg, "max_rank", "Max Bond Rank", f"ftboss_max_bond_{cid}",
+             min_value=1, max_value=100, help="Upper bound on each searched bond rank.")
+        _num(st, acfg, "feasible_rse", "Feasible RSE (ρ)", f"ftboss_feasible_rse_{cid}",
+             format="%e",
+             help="Feasibility threshold ρ: a structure is feasible iff its asymptotic RSE ≤ ρ. "
+                  "FTBOSS learns this level set from partial curves.")
+        c5, c6 = st.columns(2)
+        _num(c5, acfg, "lambda_fitness", "λ fitness (plot)", f"ftboss_lambda_{cid}",
+             min_value=0.0, format="%f",
+             help="Only for the CR + λ·RSE comparison plot; FTBOSS does not optimize this.")
+        _num(c6, acfg, "n_runs", "N runs", f"ftboss_n_runs_{cid}",
+             min_value=1, max_value=10, help="Restarts for a fresh (cold) decomposition; warm thaws use 1.")
+
+    with _group("Initialization"):
+        c3, c4 = st.columns(2)
+        _num(c3, acfg, "n_init", "Seed structures (n_init)", f"ftboss_n_init_{cid}",
+             min_value=2, help="Structures seeding the basket, each decomposed for τ₀ epochs.")
+        _sel(c4, acfg, "init_method", "Init Design", BO_INIT_DESIGNS, f"ftboss_init_design_{cid}",
+             help=BO_INIT_DESIGN_HELP)
+        _render_cr_stratified_opts(acfg, f"ftboss_{cid}")
 
 
 def _render_random(acfg: RandomSearchConfig) -> None:

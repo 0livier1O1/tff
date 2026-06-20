@@ -463,9 +463,9 @@ class TnALE:
         """Decompose one structure via the shared :func:`_eval_tn` path (same
         target normalization, restart loop and OOM handling as BOSS). Returns
         (rse, cr, time_s)."""
-        cr, best_rse, elapsed, _recon, best_losses, contraction_stats, eval_status = _eval_tn(
+        cr, best_rse, elapsed, _recon, best_losses, contraction_stats, eval_status, _cores = _eval_tn(
             self._target_cp, s.to_network_adj(),
-            self.maxiter_tn, self.n_runs, self.min_rse,
+            self.maxiter_tn, n_runs=self.n_runs, min_rse=self.min_rse,
             method=self.decomp_method, backend=self.backend, dtype=self.dtype,
             init_lr=self.init_lr, momentum=self.momentum,
             loss_patience=self.loss_patience, lr_patience=self.lr_patience,
