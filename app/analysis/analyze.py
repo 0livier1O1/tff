@@ -23,7 +23,8 @@ import streamlit as st
 from app.config.sidebar_config import SidebarConfig
 from app.config.constants import (
     SUR_REFSIZE_CONVERGENCE, SUR_REFSIZE_NOISE, SUR_REFSIZE_EFFPOINTS,
-    SUR_GSUR_FIDELITY,
+    SUR_GSUR_FIDELITY, FT_CURVE_FORECAST, FT_CURVE_EVOLUTION,
+    FT_OOS_CURVES_UNAVAILABLE,
 )
 from app.analysis.cboss_diagnostics import (
     generate_cboss_diagnostics, has_cboss_diagnostics, load_cboss_diagnostics,
@@ -1000,8 +1001,7 @@ def _render_ftboss_curves(a: SimpleNamespace, seed: int, i: int, runs_dir: Path)
     else:
         oos = _ftboss_oos(a, seed, runs_dir)
         if oos.get("losses") is None:
-            st.caption("OOS curves unavailable (cache predates trajectory storage — rebuild "
-                       "the OOS set to enable the held-out curve view).")
+            st.caption(FT_OOS_CURVES_UNAVAILABLE)
             return
         feas_rse = float(a.meta["feasible_rse"])
         order = np.argsort(oos["cr"])                    # span the CR range in the picker
@@ -1018,14 +1018,11 @@ def _render_ftboss_curves(a: SimpleNamespace, seed: int, i: int, runs_dir: Path)
                             in_sample=in_sample, rse_transform=rse_transform)
     cols = st.columns(2)
     with cols[0]:
-        st.caption("Forecast at the final GP — prediction, ±2σ band, actual curve; thin "
-                   "verticals = strided points fed to the kernel; ◆ = t→∞ asymptote; ρ = "
-                   "feasibility threshold.")
+        st.caption(FT_CURVE_FORECAST)
         st.plotly_chart(cf.ft_curve_forecast(d1, pick), width="stretch",
                         key=f"ftcv_f1_{seed}_{i}")
     with cols[1]:
-        st.caption("Prediction vs epochs observed — light→dark as more of the curve is seen "
-                   "(in-sample: thaw levels; OOS: refits). Black = actual; band = latest.")
+        st.caption(FT_CURVE_EVOLUTION)
         st.plotly_chart(cf.ft_curve_evolution_fig(d2, pick), width="stretch",
                         key=f"ftcv_f2_{seed}_{i}")
 

@@ -436,3 +436,23 @@ SUR_GSUR_FIDELITY = (
     r"speed-up; dips mean the integral genuinely matters at those "
     r"steps. Ideally both lines hug 1.0."
 )
+
+# ---------------------------------------------------------------------------
+# Surrogate diagnostics — FTBOSS freeze-thaw curve prediction
+# ---------------------------------------------------------------------------
+
+FT_CURVE_FORECAST = (
+    "Forecast at the final GP — prediction, ±2σ band, actual curve; thin "
+    "verticals = strided points fed to the kernel; ◆ = t→∞ asymptote; ρ = "
+    "feasibility threshold."
+)
+
+FT_CURVE_EVOLUTION = (
+    "Prediction vs epochs observed — light→dark as more of the curve is seen "
+    "(in-sample: thaw levels; OOS: refits). Black = actual; band = latest."
+)
+
+FT_OOS_CURVES_UNAVAILABLE = (
+    "OOS curves unavailable (cache predates trajectory storage — rebuild the "
+    "OOS set to enable the held-out curve view)."
+)
