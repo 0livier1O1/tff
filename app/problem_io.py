@@ -106,14 +106,34 @@ def ensure_seed_materialized(repo_root: Path, problem: ProblemConfig, seed: int)
 
     sdir.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(problem, SyntheticProblemConfig):
-        _materialize_synthetic(problem, seed, sdir)
-    elif isinstance(problem, RealProblemConfig):
-        _materialize_real(problem, seed, sdir)
-    else:
-        raise TypeError(f"Unknown problem type: {type(problem).__name__}")
+    try:
+        if isinstance(problem, SyntheticProblemConfig):
+            _materialize_synthetic(problem, seed, sdir)
+        elif isinstance(problem, RealProblemConfig):
+            _materialize_real(problem, seed, sdir)
+        else:
+            raise TypeError(f"Unknown problem type: {type(problem).__name__}")
+    finally:
+        _release_gpu_memory()
 
     return sdir
+
+
+def _release_gpu_memory() -> None:
+    """Return cupy's GPU memory pool to the OS after target materialization.
+
+    The synthetic/real target is built by contracting the TN on the GPU (cupy). Left
+    alone, the long-running dashboard keeps cupy's pool allocated (~GBs), so
+    `free_gpus()` reports that GPU busy long after — and the run dispatcher skips it.
+    Freeing the pool drops the hold to cupy's base CUDA context (~300 MiB), under the
+    dispatcher's busy threshold. (cupy is the heavy/optional GPU dep — import late.)
+    """
+    try:
+        import cupy as cp
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:
+        pass
 
 
 def _materialize_synthetic(problem: SyntheticProblemConfig, seed: int, sdir: Path) -> None:

@@ -1,9 +1,10 @@
 """
-Tooltip strings for the BOSS dashboard sidebar.
+Tooltip strings for the BOSS dashboard.
 
 Organised by section: General, Decomposition (shared then per-algo),
-MABSS Advanced, BOSS Advanced, TnALE Advanced.
-Import specific strings by name into sidebar.py.
+MABSS Advanced, BOSS Advanced, TnALE Advanced, then Surrogate-diagnostics plot
+help (used in the Surrogate diagnostics tab, not the sidebar).
+Import specific strings by name (e.g. into sidebar.py or analyze.py).
 """
 
 # ---------------------------------------------------------------------------
@@ -11,13 +12,20 @@ Import specific strings by name into sidebar.py.
 # ---------------------------------------------------------------------------
 
 SEEDS = (
-    "Comma-separated integers. Each seed runs the full set of selected algorithms "
-    "independently, allowing statistical aggregation (mean ± std) across runs."
+    "Comma-separated integers, with inclusive ranges via `-` "
+    "(e.g. `1, 3-5, 7` → 1, 3, 4, 5, 7). Each seed runs the full set of selected "
+    "algorithms independently, allowing statistical aggregation (mean ± std) across runs."
 )
 
 TMUX_SESSION = (
     "Attach the run script to a live tmux session so the job continues "
     "if the browser disconnects. Start one with `tmux new -s boss`."
+)
+
+PARALLEL_GPUS = (
+    "Distribute jobs across all free GPUs, one job per GPU, running them "
+    "concurrently. Disable to confine the whole run to a single GPU "
+    "(jobs run sequentially), leaving the others free for other work."
 )
 
 RUN_NAME = "Artifacts are saved to artifacts/<run_name>/. Use a descriptive name to identify this experiment."
@@ -44,8 +52,10 @@ DECOMP_ENGINE = (
     "Optimization backend for fitting tensor network cores:\n"
     "- **sgd**: SGD with momentum — fast, predictable, good default.\n"
     "- **adam**: Adam — adaptive per-parameter LR, often converges in fewer epochs.\n"
-    "- **pam**: Projection-Alternating Method — coordinate descent, no LR needed.\n"
-    "- **als**: Alternating Least Squares — closed-form updates, exact per-core step."
+    "- **pam**: Proximal Alternating Minimization — exact per-core proximal solve, no LR needed.\n"
+    "- **als**: Alternating Least Squares — closed-form updates, exact per-core step.\n"
+    "- **agd**: Alternating Gradient Descent — one per-core gradient step (exact line search), "
+    "no inverse; fastest of the alternating methods and near-Adam accuracy."
 )
 
 DECOMP_INIT_LR = (
@@ -272,15 +282,9 @@ RANDOM_LAMBDA_FITNESS = (
     "Use the same value as BOSS/TnALE when comparing best-objective curves."
 )
 
-RANDOM_INIT_METHOD = (
-    "Initialization strategy before random search. "
-    "random = start directly with independent random samples. "
-    "sobol = first evaluate the same BOSS-style Sobol candidates and tag them as sobol_init."
-)
-
-RANDOM_N_SOBOL_INIT = (
-    "Number of Sobol initialization candidates to evaluate when Init Method = sobol. "
-    "Set this equal to BOSS n_init and TnALE Sobol Init Samples for a shared initialization."
+RANDOM_N_INIT = (
+    "Number of init candidates to evaluate for a pooled init design (sobol/lhs/"
+    "cr_stratified). Set this equal to BOSS/TnALE n_init for a shared initialization."
 )
 
 # ---------------------------------------------------------------------------
@@ -358,4 +362,97 @@ TNALE_PERM_RADIUS = (
     "Number of random transpositions composited per permutation sample "
     "(Algorithm 1 radius d). radius=1 = single adjacent swap; "
     "higher radius allows larger jumps in permutation space."
+)
+
+# ---------------------------------------------------------------------------
+# Surrogate diagnostics — BESS SUR / gSUR reference-size plots
+# (rendered in the Surrogate diagnostics tab; LaTeX in raw strings, the
+# Describe/Intuition break is a real "\n\n".)
+# ---------------------------------------------------------------------------
+
+SUR_REFSIZE_CONVERGENCE = (
+    r"**Describe.** The acquisition is SUR (Stepwise Uncertainty "
+    r"Reduction): it scores a candidate $x$ by the expected drop in "
+    r"boundary misclassification, averaged over $M$ reference points "
+    r"$u$,  $\mathrm{SUR}(x)=\frac{1}{M}\sum_u\big[\Phi(-|\mu_u|/"
+    r"\sigma_u)-\Phi(-|\mu_u|/\sigma_u^{+})\big]$, where $\mu_u,\sigma_u$ "
+    r"are the GP latent posterior mean/std at $u$ and the look-ahead "
+    r"std after observing $x$ is $(\sigma_u^{+})^2=\sigma_u^2-k(u,x)^2/"
+    r"(\sigma_x^2+\tau^2)$. This panel recomputes the chosen candidate's "
+    r"score over $K$ independent size-$M$ Sobol designs and plots its "
+    r"coefficient of variation $\mathrm{CV}=\mathrm{std}/|\mathrm{mean}|$ "
+    r"(%) against $M$ (log axis); the dashed line is the operating $M$."
+    "\n\n"
+    r"**Intuition.** CV is the Monte-Carlo noise of the SUR estimate. "
+    r"High CV means the score swings with the random reference design "
+    r"($M$ too small); low CV means it has converged. Curves should fall "
+    r"toward 0 as $M$ grows. Ideally every curve is already flat and near "
+    r"0 at the operating $M$; one still high there means that step is "
+    r"under-resolved — raise `bess_sur_ref_size`."
+)
+
+SUR_REFSIZE_NOISE = (
+    r"**Describe.** At the operating reference size $M$ (the value the "
+    r"run actually used), each BO step's chosen-candidate SUR score is "
+    r"recomputed over $K$ independent size-$M$ Sobol reference designs; "
+    r"the plot is the across-design coefficient of variation "
+    r"$\mathrm{CV}=\mathrm{std}/|\mathrm{mean}|$ (%) per step."
+    "\n\n"
+    r"**Intuition.** This is the Monte-Carlo noise the run actually lived "
+    r"with at each decision. Low and flat means the operating $M$ pinned "
+    r"every pick; spikes mark steps where the SUR score — and so which "
+    r"structure was selected — was genuinely uncertain at that $M$. "
+    r"Ideally a low, flat line."
+)
+
+SUR_REFSIZE_EFFPOINTS = (
+    r"**Describe.** The SUR sum is a weighted average over the $M$ "
+    r"reference points with non-negative weights $w_u=\Phi(-|\mu_u|/"
+    r"\sigma_u)-\Phi(-|\mu_u|/\sigma_u^{+})$ (each point's boundary-error "
+    r"reduction). The participation ratio $(\sum_u w_u)^2/\sum_u w_u^2$ "
+    r"is the effective number of points carrying the estimate — it equals "
+    r"$M$ if all contribute equally and tends to $1$ if one dominates — "
+    r"shown here as a fraction of $M$."
+    "\n\n"
+    r"**Intuition.** 1.0 means every reference point pulls its weight; "
+    r"near 0 means a handful next to the contour dominate and the rest "
+    r"sit where the integrand $\approx 0$ (wasted). A persistently small "
+    r"fraction means the lever is placement — put points near the "
+    r"$\mathrm{RSE}=\rho$ contour — not a larger $M$. Ideally a healthy "
+    r"fraction that does not collapse toward 0."
+)
+
+SUR_GSUR_FIDELITY = (
+    r"**Describe.** gSUR (greedy SUR) is SUR evaluated only at the "
+    r"candidate itself ($u=x$, no reference integral), so it is far "
+    r"cheaper. On each step's surrogate a shared pool of candidate "
+    r"structures is scored by both SUR and gSUR; the plot is the "
+    r"Spearman rank correlation $\rho$ of the two score vectors and "
+    r"the Jaccard overlap of their top-10 picks. The title gives the "
+    r"fraction of steps where they agree on the top-1 pick."
+    "\n\n"
+    r"**Intuition.** Near 1.0 means gSUR ranks candidates just like "
+    r"SUR, so you can drop SUR's $M$-point reference design for a large "
+    r"speed-up; dips mean the integral genuinely matters at those "
+    r"steps. Ideally both lines hug 1.0."
+)
+
+# ---------------------------------------------------------------------------
+# Surrogate diagnostics — FTBOSS freeze-thaw curve prediction
+# ---------------------------------------------------------------------------
+
+FT_CURVE_FORECAST = (
+    "Forecast at the final GP — prediction, ±2σ band, actual curve; thin "
+    "verticals = strided points fed to the kernel; ◆ = t→∞ asymptote; ρ = "
+    "feasibility threshold."
+)
+
+FT_CURVE_EVOLUTION = (
+    "Prediction vs epochs observed — light→dark as more of the curve is seen "
+    "(in-sample: thaw levels; OOS: refits). Black = actual; band = latest."
+)
+
+FT_OOS_CURVES_UNAVAILABLE = (
+    "OOS curves unavailable (cache predates trajectory storage — rebuild the "
+    "OOS set to enable the held-out curve view)."
 )

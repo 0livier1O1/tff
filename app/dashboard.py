@@ -9,12 +9,12 @@ import json
 
 import streamlit as st
 
-from app.sidebar import render_sidebar
-from app.algo_widgets import render_saved_library_section
-from app.runner import launch_run
-from app.jobs import render_job_status_panel
-from app.views.extend import render_extend_preview
-from app.views.analyze import render_analyze_main
+from app.inputs.sidebar import render_sidebar
+from app.inputs.algo_widgets import render_saved_library_section
+from app.orchestration.runner import launch_run
+from app.orchestration.jobs import render_job_status_panel
+from app.analysis.extend import render_extend_preview
+from app.analysis.analyze import render_analyze_main
 from app.utils import _artifact_fully_done
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,25 @@ st.markdown(
     div[data-baseweb="tooltip"] > div {
         background-color: transparent !important;
     }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Sidebar tinted a touch off the default background so the algorithm/parameter
+# expander cards stand out against it. Colours flip with the active theme so
+# dark mode stays legible instead of forcing a light sidebar.
+_dark = getattr(getattr(st.context, "theme", None), "type", None) == "dark"
+_sidebar_bg, _card_bg = ("#13151c", "#262730") if _dark else ("#dde3ec", "#ffffff")
+st.markdown(
+    f"""
+    <style>
+    section[data-testid="stSidebar"] {{
+        background-color: {_sidebar_bg} !important;
+    }}
+    section[data-testid="stSidebar"] [data-testid="stExpander"] details {{
+        background-color: {_card_bg} !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True,

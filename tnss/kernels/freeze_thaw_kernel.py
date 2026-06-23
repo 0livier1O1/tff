@@ -22,14 +22,21 @@ class FreezeThawKernel(Kernel):
     feature vectors :math:`x`.
 
     The temporal component is the exponential-mixture kernel from freeze-thaw
-    Bayesian optimization,
+    Bayesian optimization, plus the per-curve observation-noise term from the
+    paper's Appendix C,
 
     .. math::
         k_\tau(\tau, \tau')
         = \int_0^\infty e^{-\lambda \tau} e^{-\lambda \tau'} \psi(d\lambda)
-        = \frac{\beta^\alpha}{(\tau + \tau' + \beta)^\alpha},
+          + \delta(\tau, \tau')\,\sigma^2
+        = \frac{\beta^\alpha}{(\tau + \tau' + \beta)^\alpha}
+          + \delta(\tau, \tau')\,\sigma^2,
 
-    with :math:`\alpha > 0` and :math:`\beta > 0`.
+    with :math:`\alpha > 0`, :math:`\beta > 0` and noise variance
+    :math:`\sigma^2 > 0`. Because the temporal term is only added within a curve,
+    :math:`\sigma^2` acts as per-curve noise on each curve's own observations
+    (it lands on the diagonal of every same-curve block), independent of any
+    noise the GP likelihood may add.
 
     The intended input layout is a dense tensor whose last dimension contains
     the state-action-history features together with one special coordinate:
@@ -78,9 +85,15 @@ class FreezeThawKernel(Kernel):
     same_curve_atol:
         Absolute tolerance used to infer whether two feature vectors are identical
         (same curve). This is applied via ``torch.isclose`` coordinate-wise.
-    alpha_prior, beta_prior:
-        Optional GPyTorch priors for the freeze-thaw temporal kernel hyperparameters.
-    alpha_constraint, beta_constraint:
+    same_time_atol:
+        Absolute tolerance used to infer whether two effort values coincide, i.e.
+        the Kronecker delta :math:`\delta(\tau, \tau')` in the noise term. Applied
+        via ``torch.isclose``.
+    alpha_prior, beta_prior, noise_prior:
+        Optional GPyTorch priors for the freeze-thaw temporal kernel hyperparameters
+        :math:`\alpha`, :math:`\beta` and the noise variance :math:`\sigma^2`.
+        The paper places a horseshoe prior on :math:`\sigma^2`.
+    alpha_constraint, beta_constraint, noise_constraint:
         Optional positivity constraints for the temporal kernel hyperparameters.
 
     Notes
@@ -97,10 +110,13 @@ class FreezeThawKernel(Kernel):
         base_kernel: Kernel,
         time_dim: int,
         same_curve_atol: float = 1e-12,
+        same_time_atol: float = 1e-12,
         alpha_prior=None,
         beta_prior=None,
+        noise_prior=None,
         alpha_constraint: Optional[Positive] = None,
         beta_constraint: Optional[Positive] = None,
+        noise_constraint: Optional[Positive] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -108,6 +124,7 @@ class FreezeThawKernel(Kernel):
         self.base_kernel = base_kernel
         self.time_dim = time_dim
         self.same_curve_atol = same_curve_atol
+        self.same_time_atol = same_time_atol
 
         self.register_parameter(
             name="raw_alpha",
@@ -115,6 +132,10 @@ class FreezeThawKernel(Kernel):
         )
         self.register_parameter(
             name="raw_beta",
+            parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, 1)),
+        )
+        self.register_parameter(
+            name="raw_noise",
             parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, 1)),
         )
 
@@ -126,16 +147,24 @@ class FreezeThawKernel(Kernel):
             "raw_beta",
             beta_constraint if beta_constraint is not None else Positive(),
         )
+        self.register_constraint(
+            "raw_noise",
+            noise_constraint if noise_constraint is not None else Positive(),
+        )
 
         if alpha_prior is not None:
             self.register_prior("alpha_prior", alpha_prior, lambda m: m.alpha, lambda m, v: m._set_alpha(v))
         if beta_prior is not None:
             self.register_prior("beta_prior", beta_prior, lambda m: m.beta, lambda m, v: m._set_beta(v))
+        if noise_prior is not None:
+            self.register_prior("noise_prior", noise_prior, lambda m: m.noise, lambda m, v: m._set_noise(v))
 
         # Initialize with alpha = beta = 1, which matches the simple default
-        # used in the original freeze-thaw construction.
+        # used in the original freeze-thaw construction, and a small per-curve
+        # noise variance.
         self._set_alpha(torch.ones(*self.batch_shape, 1))
         self._set_beta(torch.ones(*self.batch_shape, 1))
+        self._set_noise(torch.full((*self.batch_shape, 1), 1e-2))
 
     @property
     def alpha(self) -> torch.Tensor:
@@ -153,6 +182,14 @@ class FreezeThawKernel(Kernel):
     def beta(self, value: torch.Tensor) -> None:
         self._set_beta(value)
 
+    @property
+    def noise(self) -> torch.Tensor:
+        return self.raw_noise_constraint.transform(self.raw_noise)
+
+    @noise.setter
+    def noise(self, value: torch.Tensor) -> None:
+        self._set_noise(value)
+
     def _set_alpha(self, value: torch.Tensor) -> None:
         value = torch.as_tensor(value, dtype=self.raw_alpha.dtype, device=self.raw_alpha.device)
         self.initialize(raw_alpha=self.raw_alpha_constraint.inverse_transform(value))
@@ -160,6 +197,10 @@ class FreezeThawKernel(Kernel):
     def _set_beta(self, value: torch.Tensor) -> None:
         value = torch.as_tensor(value, dtype=self.raw_beta.dtype, device=self.raw_beta.device)
         self.initialize(raw_beta=self.raw_beta_constraint.inverse_transform(value))
+
+    def _set_noise(self, value: torch.Tensor) -> None:
+        value = torch.as_tensor(value, dtype=self.raw_noise.dtype, device=self.raw_noise.device)
+        self.initialize(raw_noise=self.raw_noise_constraint.inverse_transform(value))
 
     def _normalize_dim(self, dim: int, ndim: int) -> int:
         return dim if dim >= 0 else ndim + dim
@@ -211,22 +252,37 @@ class FreezeThawKernel(Kernel):
         )
 
     def _temporal_covar(self, t1: torch.Tensor, t2: torch.Tensor) -> torch.Tensor:
-        r"""Evaluate the freeze-thaw temporal kernel.
+        r"""Evaluate the freeze-thaw temporal kernel, including per-curve noise.
 
         For effort values :math:`\tau` and :math:`\tau'`, this computes
 
         .. math::
             k_\tau(\tau, \tau')
-            = \frac{\beta^\alpha}{(\tau + \tau' + \beta)^\alpha}.
+            = \frac{\beta^\alpha}{(\tau + \tau' + \beta)^\alpha}
+              + \delta(\tau, \tau')\,\sigma^2,
+
+        where :math:`\delta(\tau, \tau')` is one for coincident efforts (within
+        ``same_time_atol``) and zero otherwise. The caller gates this by the
+        same-curve mask, so the noise only ever lands within a curve.
         """
         # The freeze-thaw kernel is defined on nonnegative effort values.
-        t1 = t1.clamp_min(0.0)
-        t2 = t2.clamp_min(0.0)
+        t1c = t1.clamp_min(0.0)
+        t2c = t2.clamp_min(0.0)
 
-        t_sum = t1.unsqueeze(-1) + t2.unsqueeze(-2)
+        t_sum = t1c.unsqueeze(-1) + t2c.unsqueeze(-2)
         alpha = self.alpha.unsqueeze(-1)
         beta = self.beta.unsqueeze(-1)
-        return (beta.pow(alpha) / (t_sum + beta).pow(alpha)).to(dtype=t1.dtype)
+        smooth = beta.pow(alpha) / (t_sum + beta).pow(alpha)
+
+        # Per-curve observation noise: delta(tau, tau') * sigma^2 on coincident
+        # efforts. Compared on the raw efforts so it tracks the actual grid.
+        delta = torch.isclose(
+            t1.unsqueeze(-1), t2.unsqueeze(-2),
+            atol=self.same_time_atol, rtol=0.0,
+        ).to(dtype=t1.dtype)
+        noise = self.noise.unsqueeze(-1) * delta
+
+        return (smooth + noise).to(dtype=t1.dtype)
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor, diag: bool = False, **params) -> torch.Tensor:
         r"""Compute the full freeze-thaw covariance.
@@ -245,7 +301,7 @@ class FreezeThawKernel(Kernel):
         feat1, t1 = self._split_inputs(x1)
         feat2, t2 = self._split_inputs(x2)
 
-        asymptotic = self.base_kernel(feat1, feat2, diag=diag, **params)
+        asymptotic = self.base_kernel.forward(feat1, feat2, diag=diag, **params)
         same_curve = self._same_curve_mask(feat1, feat2, diag=diag)
         temporal = self._temporal_covar(t1, t2)
 

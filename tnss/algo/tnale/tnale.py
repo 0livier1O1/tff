@@ -9,10 +9,11 @@ from random import choice
 import cupy as cp
 import numpy as np
 import torch
-from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize
 
-from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
+from tensors.networks.cutensor_network import contraction_scalar_row
+from tnss.algo.boss.base import _eval_tn
+from tnss.algo.init_designs import sample_init_points, INIT_DESIGNS
 from tnss.algo.tnale.structure import Structure
 from tnss.algo.tnale.neighborhood import (
     make_grid,
@@ -24,6 +25,7 @@ from tnss.algo.tnale.neighborhood import (
     full_bonds,
 )
 from tnss.algo.tnale.interpolation import interpolate_rse
+from tnss.utils import atomic_write_json
 
 
 
@@ -103,7 +105,9 @@ class TnALE:
         lr_patience: int = 250,
         phase_change_reset: bool = True,
         init_method: str = "sparse",
-        n_sobol_init: int = 10,
+        n_init: int = 10,
+        cr_warp_lambda: float = 0.0,
+        cr_pool_bias: float = 1.0,
         seed: int | None = None,
         verbose: bool = True,
     ) -> None:
@@ -150,10 +154,13 @@ class TnALE:
         self.loss_patience = loss_patience
         self.lr_patience = lr_patience
         self.phase_change_reset = phase_change_reset
-        if init_method not in ("sparse", "sobol"):
-            raise ValueError(f"init_method must be 'sparse' or 'sobol', got {init_method!r}")
+        if init_method not in ("sparse",) + INIT_DESIGNS:
+            raise ValueError(
+                f"init_method must be 'sparse' or one of {INIT_DESIGNS}, got {init_method!r}")
         self.init_method = init_method
-        self.n_sobol_init = n_sobol_init
+        self.n_init = n_init
+        self.cr_warp_lambda = cr_warp_lambda
+        self.cr_pool_bias = cr_pool_bias
         self.seed = seed
         self.verbose = verbose
 
@@ -171,8 +178,10 @@ class TnALE:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, progress_file: Path | None = None) -> tuple[dict, list[dict]]:
-        """Run TnALE for `budget` ALE steps. Returns (summary, rows)."""
+    def run(self, progress_file: Path | None = None) -> list[dict]:
+        """Run TnALE for `budget` ALE steps. Returns the per-evaluation rows.
+
+        'Best' is derived at presentation time from the rows, not summarized here."""
         self._initialize(progress_file)
 
         for step in range(self.budget):
@@ -190,12 +199,13 @@ class TnALE:
                     f"evals={self.eval_count}  "
                     f"phase={'interpolation' if self._in_init_phase else 'main'}"
                 )
-            self._atomic_write(progress_file, {
+            atomic_write_json(progress_file, {
                 "phase": "interpolation" if self._in_init_phase else "main",
                 "step": step + 1, "budget": self.budget,
+                "oom": self._oom_count(),
             })
 
-        return self._summarize(), self.rows
+        return self.rows
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -208,9 +218,10 @@ class TnALE:
         # Permutation + position sweep ordering
         if self._use_perm:
             # Ring: permutation searched at position D (= N), between fwd/bwd rank sweeps.
-            # Sobol init uses identity permutation to match BOSS; sparse init randomises.
+            # Pooled inits (sobol/lhs/cr_stratified) use identity permutation to match
+            # BOSS; sparse init randomises.
             self._fixed_permute = (
-                np.arange(N) if self.init_method == "sobol"
+                np.arange(N) if self.init_method in INIT_DESIGNS
                 else np.random.permutation(N)
             )
             self._PERM_IDX = D
@@ -226,16 +237,16 @@ class TnALE:
 
         # Phase / sweep state needed both for Sobol evaluations (if any) and main loop
         self._interp_on = self.interp_on
-        self._in_init_phase = True  # reset to interp_on below; True here spans _run_sobol_init
-        self._in_sobol_init = False  # True only inside _run_sobol_init — tags rows 'init'
+        self._in_init_phase = True  # reset to interp_on below; True here spans _run_pooled_init
+        self._in_pooled_init = False  # True only inside _run_pooled_init — tags rows 'init'
         self._local_step = self.local_step_init if self._interp_on else self.local_step_main
         self._times_of_local_sampling = 1
         self._update_idx = -1  # placeholder for any pre-ALE evaluations
         self._last_row_time = time.time()
 
         # Choose initial ranks
-        if self.init_method == "sobol":
-            raw = self._run_sobol_init(progress_file)
+        if self.init_method in INIT_DESIGNS:
+            raw = self._run_pooled_init(progress_file)
         else:
             raw = np.array(
                 [
@@ -449,42 +460,23 @@ class TnALE:
     def _eval_one(
         self, s: Structure, update_idx: int | None
     ) -> tuple[float, float, float]:
-        """Run cuTensorNetwork decomposition on one structure. Returns (rse, cr, time_s)."""
-        t0 = time.time()
-        A = cp.asarray(s.to_network_adj())
-        net = cuTensorNetwork(A, backend=self.backend, dtype=self.dtype)
-        cr = float(net.network_size()) / float(net.target_size())
-
-        best_rse = float("inf")
-        best_losses: list[float] = []
-        for _ in range(self.n_runs):
-            losses = net.decompose(
-                self._target_cp,
-                max_epochs=self.maxiter_tn,
-                method=self.decomp_method,
-                init_lr=self.init_lr,
-                momentum=self.momentum,
-                loss_patience=self.loss_patience,
-                lr_patience=self.lr_patience,
-                verbose=False
-            )
-            rse = float(losses[-1]) if losses else float("inf")
-            if rse < best_rse:
-                best_rse = rse
-                best_losses = [float(x) for x in losses]
-            if best_rse < self.min_rse:
-                break
-
-        elapsed = time.time() - t0
-        contraction_stats = net.contraction_stats
+        """Decompose one structure via the shared :func:`_eval_tn` path (same
+        target normalization, restart loop and OOM handling as BOSS). Returns
+        (rse, cr, time_s)."""
+        cr, best_rse, elapsed, _recon, best_losses, contraction_stats, eval_status, _cores = _eval_tn(
+            self._target_cp, s.to_network_adj(),
+            self.maxiter_tn, n_runs=self.n_runs, min_rse=self.min_rse,
+            method=self.decomp_method, backend=self.backend, dtype=self.dtype,
+            init_lr=self.init_lr, momentum=self.momentum,
+            loss_patience=self.loss_patience, lr_patience=self.lr_patience,
+        )
 
         if best_rse < self.best_rse:
             self.best_rse = best_rse
             self.best_cr = cr
 
-        self._record(s, best_rse, cr, elapsed, best_losses, contraction_stats)
+        self._record(s, best_rse, cr, elapsed, best_losses, contraction_stats, eval_status)
 
-        del net, A
         gc.collect()
         if cp.get_default_memory_pool() is not None:
             cp.get_default_memory_pool().free_all_blocks()
@@ -598,30 +590,44 @@ class TnALE:
         self._eval_position(0)
 
     # ------------------------------------------------------------------
-    # Sobol initialisation phase
+    # Pooled initialisation phase (sobol / lhs / cr_stratified)
     # ------------------------------------------------------------------
 
-    def _run_sobol_init(self, progress_file: Path | None = None) -> np.ndarray:
-        """
-        Draw n_sobol_init Sobol candidates, evaluate each, return ranks of the best.
-
-        Bit-identical samples to BOSS when topology='full', same seed, same
-        n_sobol_init, and same max_rank (both bounds are inclusive). Caller
-        must have already set self._fixed_permute and _last_row_time; these
-        evaluations are tagged phase='init' in the trace.
-        """
+    def _to_int_ranks(self, X_std: torch.Tensor) -> np.ndarray:
+        """Normalized [0,1]^D points -> integer ranks in [1, max_rank] (numpy)."""
         R = self.max_rank
         bounds = torch.stack([
             torch.ones(self.D, dtype=torch.double),
             torch.full((self.D,), float(R), dtype=torch.double),
         ])
-        std = torch.zeros_like(bounds); std[1] = 1.0
-        sobol = draw_sobol_samples(bounds=std, n=self.n_sobol_init, q=1, seed=self.seed).squeeze(1)
-        samples = unnormalize(sobol, bounds).round().clamp(1, R).to(torch.int).numpy()
+        return unnormalize(X_std, bounds).round().clamp(1, R).to(torch.int).numpy()
+
+    def _cr_of_normalized(self, X_std: torch.Tensor) -> torch.Tensor:
+        """Deterministic CR for each normalized rank vector (rows of X_std), via the
+        analytic ``Structure.sparsity()`` over this run's bonds/phys_dims — the
+        cr_stratified scorer. CR is permutation-invariant, so the fixed permute is fine."""
+        ranks = self._to_int_ranks(X_std)
+        crs = [Structure(r, self.phys_dims, self._fixed_permute, self._bonds).sparsity()
+               for r in ranks]
+        return torch.tensor(crs, dtype=torch.double)
+
+    def _run_pooled_init(self, progress_file: Path | None = None) -> np.ndarray:
+        """Draw n_init candidates via the shared init design (sobol/lhs/
+        cr_stratified), evaluate each, and return the ranks of the best.
+
+        Bit-identical samples to BOSS for design='sobol' when topology='full', same
+        seed, n, and max_rank. Caller must have already set self._fixed_permute and
+        _last_row_time; these evaluations are tagged phase='init' in the trace.
+        """
+        pts = sample_init_points(
+            self.init_method, n=self.n_init, D=self.D, seed=self.seed,
+            cr_fn=self._cr_of_normalized,
+            cr_warp_lambda=self.cr_warp_lambda, cr_pool_bias=self.cr_pool_bias)
+        samples = self._to_int_ranks(pts)
 
         best_obj = float("inf")
         best_ranks = samples[0].copy()
-        self._in_sobol_init = True
+        self._in_pooled_init = True
         for i, ranks in enumerate(samples):
             s = Structure(ranks.copy(), self.phys_dims, self._fixed_permute, self._bonds)
             rse, cr, _ = self._eval_one(s, update_idx=None)
@@ -629,18 +635,25 @@ class TnALE:
             if obj < best_obj:
                 best_obj = obj
                 best_ranks = ranks.copy()
-            self._atomic_write(progress_file, {
-                "phase": "init", "step": i + 1, "budget": self.n_sobol_init,
+            atomic_write_json(progress_file, {
+                "phase": "init", "step": i + 1, "budget": self.n_init,
+                "oom": self._oom_count(),
             })
-        self._in_sobol_init = False
+        self._in_pooled_init = False
 
         if self.verbose:
-            print(f"[TnALE Sobol init] best obj = {best_obj:.5f}  ranks = {best_ranks.tolist()}")
+            print(f"[TnALE {self.init_method} init] best obj = {best_obj:.5f}  "
+                  f"ranks = {best_ranks.tolist()}")
         return best_ranks
 
     # ------------------------------------------------------------------
     # Row recording and output
     # ------------------------------------------------------------------
+
+    def _oom_count(self) -> int:
+        """Structures skipped as too large to contract — surfaced live in the
+        dashboard Active Runs table via progress.json."""
+        return sum(1 for r in self.rows if r.get("eval_status") == "oom")
 
     def _record(
         self,
@@ -650,13 +663,14 @@ class TnALE:
         elapsed: float,
         losses: list[float] | None = None,
         contraction_stats: dict | None = None,
+        eval_status: str = "ok",
     ) -> None:
         self.eval_count += 1
         now = time.time()
         step_time = now - self._last_row_time
         self._last_row_time = now
         phase = (
-            "init" if self._in_sobol_init
+            "init" if self._in_pooled_init
             else "interpolation" if self._in_init_phase
             else "main"
         )
@@ -674,6 +688,7 @@ class TnALE:
                 "best_cr": self.best_cr,
                 "sparsity": cr,
                 "objective": cr + self.lambda_fitness * rse,
+                "eval_status": eval_status,
                 "decomp_time": elapsed,
                 "step_time_s": step_time,
                 **contraction_scalar_row(contraction_stats),
@@ -686,35 +701,6 @@ class TnALE:
             {"step": self.eval_count, "phase": phase, **(contraction_stats or {})}
         )
 
-    def _summarize(self) -> dict:
-        if not self.rows:
-            return {}
-        best_idx = int(np.argmin([r["rse"] for r in self.rows]))
-        return {
-            "budget": self.budget,
-            "total_evals": self.eval_count,
-            "lambda_fitness": self.lambda_fitness,
-            "best_eval_idx": best_idx,
-            "best_rse": self.best_rse,
-            "best_cr": self.best_cr,
-            "best_adj": self._center.to_adj_matrix(),
-        }
-
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _atomic_write(path: Path | None, data: dict) -> None:
-        if path is None:
-            return
-        try:
-            prev = json.loads(path.read_text())
-            if "started_at" in prev and "started_at" not in data:
-                data["started_at"] = prev["started_at"]
-        except Exception:
-            pass
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(path)
 
 
 if __name__ == "__main__":
@@ -766,17 +752,17 @@ if __name__ == "__main__":
         verbose=True,
     )
 
-    summary, rows = algo.run()
+    rows = algo.run()
     center = algo._center
 
     print("\n--- Summary ---")
-    print(f"  total evals     : {summary['total_evals']}")
-    print(f"  best RSE        : {summary['best_rse']:.6f}")
-    print(f"  best CR         : {summary['best_cr']:.4f}")
+    print(f"  total evals     : {algo.eval_count}")
+    print(f"  best RSE        : {algo.best_rse:.6f}")
+    print(f"  best CR         : {algo.best_cr:.4f}")
     print(f"  found ranks     : {center.ranks.tolist()}")
     print(f"  found perm      : {center.permute.tolist()}")
     print(f"  true  ranks     : {true_ranks.tolist()}")
     print(f"  true  perm      : {true_perm.tolist()}")
     print(f"  ranks match     : {np.array_equal(center.ranks, true_ranks)}")
     print(f"  perm  match     : {np.array_equal(center.permute, true_perm)}")
-    print(f"  best adj (vis):\n{summary['best_adj']}")
+    print(f"  best adj (vis):\n{center.to_adj_matrix()}")

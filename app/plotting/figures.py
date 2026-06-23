@@ -18,11 +18,21 @@ from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
 from app.plotting.colors import colors_for, rgba
+from app.plotting.traces import TIMING_COMPONENTS
 
 _HEIGHT = 380
 # Compact vertical legend just past the right edge of the plotting area.
 _LEGEND = dict(orientation="v", x=1.01, xanchor="left", y=1.0, yanchor="top",
                font=dict(size=10))
+
+# Fixed colors for the per-step timing breakdown — here the phase (not the
+# family) sets the hue, so every algo's segments line up by colour.
+_PHASE_COLORS = {
+    "Decomposition": "#4c78a8",
+    "GP fit": "#f58518",
+    "Acquisition": "#54a24b",
+    "Other": "#bab0ac",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -145,14 +155,16 @@ def incumbent_cr_rse(
     df: pd.DataFrame,
     *,
     use_efficiency: bool = False,
+    weight_rse: bool = True,
 ) -> go.Figure:
-    """2×2 — the incumbent's compression ratio (top row) and λ·RSE (bottom row),
+    """2×2 — the incumbent's compression ratio (top row) and RSE (bottom row),
     each vs number of function evaluations (left) and cumulative runtime (right).
     The incumbent is the structure achieving the running-best objective so far;
-    one line per config. The RSE row is weighted by the config's objective λ so
-    it reads on the same scale as its CR + λ·RSE contribution. Axes are shared
-    (x down columns, y across rows) so the four panels stay compact and read
-    together. `use_efficiency` swaps the top row from raw CR to efficiency.
+    one line per config. When `weight_rse` the RSE row is multiplied by the
+    config's objective λ so it reads on the same scale as its CR + λ·RSE
+    contribution; otherwise the raw RSE is shown. Axes are shared (x down columns,
+    y across rows) so the four panels stay compact and read together.
+    `use_efficiency` swaps the top row from raw CR to efficiency.
     """
     fig = make_subplots(
         rows=2, cols=2, shared_xaxes=True, shared_yaxes=True,
@@ -168,7 +180,7 @@ def incumbent_cr_rse(
 
     for (run, config_id, label, _family), color in zip(configs, palette):
         sel = df[(df["run"] == run) & (df["config_id"] == config_id)]
-        lam = float(sel["lambda_fitness"].iloc[0])
+        lam = float(sel["lambda_fitness"].iloc[0]) if weight_rse else 1.0
         g = sel.groupby("n_evals")
         cr, rse = g[inc_col].mean(), g["inc_rse"].mean() * lam
         x_e, x_t = cr.index.values, g["cum_time_s"].mean().values
@@ -181,7 +193,7 @@ def incumbent_cr_rse(
     fig.update_xaxes(title_text="Function evaluations", row=2, col=1)
     fig.update_xaxes(title_text="Cumulative runtime (s)", row=2, col=2)
     fig.update_yaxes(title_text=cr_label, row=1, col=1)
-    fig.update_yaxes(title_text="λ·RSE", row=2, col=1)
+    fig.update_yaxes(title_text="λ·RSE" if weight_rse else "RSE", row=2, col=1)
     fig.update_yaxes(rangemode="nonnegative")
     fig.update_yaxes(showgrid=False)
     fig.update_layout(
@@ -354,7 +366,7 @@ def seed_convergence(df: pd.DataFrame) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
-# BOSS GP-surrogate diagnostics — fed by app.diagnostics cached frames
+# BOSS GP-surrogate diagnostics — fed by app.analysis.diagnostics cached frames
 # ---------------------------------------------------------------------------
 
 def gp_calibration(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
@@ -428,6 +440,94 @@ def gp_acquisition(d: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def candidate_cr_rank(d: pd.DataFrame, label: str) -> go.Figure:
+    """Per-evaluation candidate — its compression ratio and rank L1 norm (sum of
+    integer bond ranks) against evaluation step, for one config at one seed.
+    Markers are coloured by feasibility (RSE below the feasibility threshold), so
+    the search's feasible/infeasible structure reads at a glance. One row, two
+    panels."""
+    fig = make_subplots(rows=1, cols=2,
+                        subplot_titles=("Candidate CR", "Rank L1 (∑ ranks)"))
+    feas = d["feasible"].astype(bool)
+    groups = ((feas, "feasible", "#2ca02c"), (~feas, "infeasible", "#d62728"))
+    for col, ycol in ((1, "cr"), (2, "rank_sum")):
+        for mask, name, color in groups:
+            sub = d[mask]
+            fig.add_trace(go.Scatter(
+                x=sub["step"], y=sub[ycol], mode="markers", name=name,
+                legendgroup=name, showlegend=(col == 1),
+                marker=dict(color=color, size=6, line=dict(width=0.4, color="white")),
+            ), row=1, col=col)
+    fig.update_xaxes(title_text="evaluation step", rangemode="tozero")
+    fig.update_yaxes(rangemode="nonnegative", showgrid=False)
+    fig.update_layout(template="plotly_white", height=300, title=label,
+                      margin=dict(l=0, r=0, t=46, b=0), legend=_LEGEND)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Per-step computational-time breakdown
+# ---------------------------------------------------------------------------
+
+def phase_time_breakdown(df: pd.DataFrame, *, normalize: bool = False) -> go.Figure:
+    """Mean per-step time split into decomposition / GP fit / acquisition / other,
+    one stacked bar per config. `normalize=True` renders 100%-stacked bars (each
+    algo's share of its step time); otherwise the stack is mean seconds per step,
+    so totals are comparable across algos. `df` is the per-step frame from
+    `load_step_timings`."""
+    fig = go.Figure()
+    if df.empty:
+        return fig
+    # Mean over this config's (phase-filtered) steps → mean per-step contribution.
+    means = (df.groupby(["run", "config_id"], as_index=False)
+               [[c for c, _ in TIMING_COMPONENTS]].mean()
+               .set_index(["run", "config_id"]))
+    configs = _config_order(df)            # consistent family-grouped order
+    x = [label for _run, _cid, label, _fam in configs]
+    for col, name in TIMING_COMPONENTS:
+        y = [float(means.loc[(run, cid), col]) for run, cid, _l, _f in configs]
+        if max(y) < 1e-4:                  # drop a negligible component (no-GP random, ~0 residual)
+            continue
+        fig.add_trace(go.Bar(
+            x=x, y=y, name=name, marker_color=_PHASE_COLORS[name],
+            hovertemplate=f"%{{x}}<br>{name}: %{{y:.2f}}s<extra></extra>",
+        ))
+    layout = dict(template="plotly_white", height=_HEIGHT, barmode="stack",
+                  margin=dict(l=0, r=0, t=20, b=0), legend=_LEGEND)
+    if normalize:
+        layout["barnorm"] = "percent"
+    fig.update_layout(**layout)
+    fig.update_yaxes(title_text="Share of step time (%)" if normalize
+                     else "Mean time / step (s)", rangemode="tozero")
+    return fig
+
+
+def phase_time_area(df: pd.DataFrame) -> go.Figure:
+    """Stacked-area of one config's per-step time by phase across the search —
+    decomposition / GP fit / acquisition / other stack to the step's total
+    wall-clock. `df` is one config's step-ordered rows from `load_step_timings`."""
+    fig = go.Figure()
+    if df.empty:
+        return fig
+    x = list(range(1, len(df) + 1))        # 1-based evaluation index (within filter)
+    for col, name in TIMING_COMPONENTS:
+        y = df[col].to_numpy()
+        if y.max() < 1e-4:
+            continue
+        color = _PHASE_COLORS[name]
+        fig.add_trace(go.Scatter(
+            x=x, y=y, mode="lines", name=name, stackgroup="one",
+            line=dict(width=0.5, color=color), fillcolor=rgba(color, 0.6),
+            hovertemplate=f"step %{{x}}<br>{name}: %{{y:.2f}}s<extra></extra>",
+        ))
+    fig.update_layout(template="plotly_white", height=_HEIGHT,
+                      margin=dict(l=0, r=0, t=20, b=0), legend=_LEGEND,
+                      hovermode="x unified")
+    fig.update_xaxes(title_text="Evaluation step", rangemode="tozero")
+    fig.update_yaxes(title_text="Time / step (s)", rangemode="tozero")
+    return fig
+
+
 def gp_parity(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
     """One-step-ahead parity — GP-predicted vs actual target, one point per BO
     step, with the y = x line. Spearman ρ quantifies how well the GP ranks."""
@@ -444,6 +544,29 @@ def gp_parity(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
     fig.update_layout(template="plotly_white", height=420,
                       margin=dict(l=0, r=0, t=40, b=0),
                       title=f"predicted vs actual  ·  Spearman ρ = {rho:.3f}")
+    return fig
+
+
+def gp_parity_multi(series, lab: str = "objective") -> go.Figure:
+    """One-step-ahead parity overlay — GP-predicted vs actual, one colour per algo,
+    with the y = x line and each algo's Spearman ρ in the legend. `series` is a list
+    of ``(label, y_actual, mu)``."""
+    palette = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9"]
+    allv = np.concatenate([np.concatenate([np.asarray(y), np.asarray(mu)])
+                           for _, y, mu in series])
+    lo, hi = float(allv.min()), float(allv.max())
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", showlegend=False,
+                             hoverinfo="skip", line=dict(color="#999", dash="dash")))
+    for (label, y, mu), color in zip(series, palette):
+        rho = spearmanr(y, mu)[0]
+        fig.add_trace(go.Scatter(x=np.asarray(y), y=np.asarray(mu), mode="markers",
+                                 marker=dict(color=color, size=5),
+                                 name=f"{label} (ρ={rho:.3f})"))
+    fig.update_xaxes(title_text=f"actual {lab}")
+    fig.update_yaxes(title_text=f"predicted {lab}", showgrid=False)
+    fig.update_layout(template="plotly_white", height=_HEIGHT,
+                      margin=dict(l=0, r=0, t=30, b=0), legend=_LEGEND)
     return fig
 
 
@@ -479,22 +602,31 @@ def rse_distributions(rse, cr, threshold=None) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 def fit_report(do: pd.DataFrame, dr: pd.DataFrame) -> go.Figure:
-    """Secondary report on how the one-step-ahead GP refits behaved: which
-    optimizer each step landed on (L-BFGS first try, L-BFGS after a flaky
-    retry, or the Adam fallback) and the fitted per-point marginal
-    log-likelihood over the run. A higher, flatter MLL curve means the fit
-    converged consistently. Not a model-quality plot — fitting health only.
+    """Secondary 'fitting health' report. Per-step procedure on the left, fitted
+    per-point marginal log-likelihood on the right.
+
+    The two scans differ: the **objective** GP is *reconstructed* from the run's
+    saved surrogate (not re-fit), so its left-panel categories are whether each step
+    *re-optimised* hypers ('hyper-refresh') or *reused* the last fit's hypers frozen
+    ('conditioned') — the run's actual ``freq_update`` schedule. The **log-RSE** GP is
+    a re-fit probe, so its categories are which optimiser each fit landed on (L-BFGS,
+    L-BFGS after a flaky retry, or the Adam fallback). A higher, flatter MLL curve
+    means a consistently good fit.
     """
     fig = make_subplots(
-        rows=1, cols=2, column_widths=[0.4, 0.6],
-        subplot_titles=("Optimizer per step", "Fit marginal log-likelihood"),
+        rows=1, cols=2, column_widths=[0.45, 0.55],
+        subplot_titles=("Per-step procedure", "Fit marginal log-likelihood"),
     )
-    cats = ["L-BFGS", "L-BFGS (retried)", "Adam fallback"]
+    cats = ["L-BFGS", "L-BFGS (retried)", "Adam fallback", "hyper-refresh", "conditioned"]
     for df, name, color in ((do, "objective", "#1f77b4"), (dr, "log RSE", "#ff7f0e")):
-        opt, att = df["optimizer"], df["fit_attempts"]
-        counts = [int(((opt == "lbfgs") & (att == 1)).sum()),
-                  int(((opt == "lbfgs") & (att > 1)).sum()),
-                  int((opt == "adam").sum())]
+        if "phase" in df.columns:   # reconstructed scan (objective): refresh vs conditioned
+            ph = df["phase"]
+            counts = [0, 0, 0, int((ph == "refresh").sum()), int((ph == "conditioned").sum())]
+        else:                        # re-fit probe (log-RSE): optimiser landed on
+            opt, att = df["optimizer"], df["fit_attempts"]
+            counts = [int(((opt == "lbfgs") & (att == 1)).sum()),
+                      int(((opt == "lbfgs") & (att > 1)).sum()),
+                      int((opt == "adam").sum()), 0, 0]
         fig.add_trace(go.Bar(x=cats, y=counts, name=name, legendgroup=name,
                              marker_color=color, text=counts, textposition="auto"),
                       row=1, col=1)
@@ -550,4 +682,101 @@ def decomp_loss_curves(traces: list[dict],
         fig.update_yaxes(title_text="Decomposition loss", rangemode="tozero")
     fig.update_layout(template="plotly_white", height=_HEIGHT,
                       margin=dict(l=0, r=0, t=20, b=0), showlegend=False)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# BESS SUR reference-size sensitivity (app/analysis/sur_refsize.py)
+# ---------------------------------------------------------------------------
+
+def sur_refsize_convergence(d) -> go.Figure:
+    """View A — Monte-Carlo noise of the SUR score vs the reference-design size M. For a
+    few representative BO steps, the chosen candidate's SUR score is recomputed over K
+    independent scrambled-Sobol designs at each M; the curve is the across-draw
+    coefficient of variation (std / |mean|, in %) — i.e. how reproducible the score is at
+    that M. Every curve heads to 0 as M grows (QMC convergence). Read the noise at the
+    dashed operating-M line: if all curves are already near 0 there, M is large enough;
+    a curve still high at the line means that step's score is under-resolved. x is log."""
+    M, steps, mean, std = d["a_M"], d["a_steps"], d["a_mean"], d["a_std"]
+    op_M = int(d["op_M"])
+    cv = std / np.clip(np.abs(mean), 1e-12, None) * 100.0     # (n_steps, n_M)
+    fig = go.Figure()
+    n = len(steps)
+    palette = sample_colorscale("Viridis", [i / max(n - 1, 1) for i in range(n)])
+    for i, (s, c) in enumerate(zip(steps, palette)):
+        fig.add_trace(go.Scatter(x=M, y=cv[i], mode="lines+markers", name=f"step {int(s)}",
+                                 line=dict(color=c, width=2), marker=dict(size=5)))
+    fig.add_vline(x=op_M, line_color="#d62728", line_dash="dash", line_width=1.5,
+                  annotation_text=f"operating M = {op_M}", annotation_position="top left")
+    fig.update_xaxes(title_text="Reference points M (log scale)", type="log",
+                     tickmode="array", tickvals=list(M), ticktext=[str(int(m)) for m in M])
+    fig.update_yaxes(title_text="score noise — CV (%)", rangemode="tozero", showgrid=False)
+    fig.update_layout(template="plotly_white", height=330,
+                      margin=dict(l=0, r=0, t=20, b=0), hovermode="x unified", legend=_LEGEND)
+    return fig
+
+
+def sur_refsize_noise(d) -> go.Figure:
+    """View B — per-step Monte-Carlo noise at the operating reference size. For every BO
+    step, the chosen candidate's SUR score is recomputed over K independent reference
+    designs of the operating size; the line is the across-draw coefficient of variation
+    (std / |mean|, %). It is the ‘decision noise’ at the size you actually run: spikes mark
+    steps where the operating M left the SUR score (and so the pick) genuinely uncertain."""
+    steps, cv = d["tl_steps"], d["tl_cv"] * 100.0
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=steps, y=cv, mode="lines+markers",
+                             line=dict(color="#f58518", width=2), marker=dict(size=4),
+                             showlegend=False))
+    fig.update_xaxes(title_text="BO step", rangemode="tozero")
+    fig.update_yaxes(title_text="score noise — CV (%)", rangemode="tozero", showgrid=False)
+    fig.update_layout(template="plotly_white", height=330,
+                      margin=dict(l=0, r=0, t=20, b=0), hovermode="x unified")
+    return fig
+
+
+def sur_refsize_effpoints(d) -> go.Figure:
+    """View D — what fraction of the reference points actually do any work. The SUR sum is
+    a weighted average over the M reference points; most weight sits near the contour and
+    the rest contribute ≈0. The participation ratio (Σw)²/Σw² is the *effective* number of
+    contributing points; here it is shown as a fraction of the operating M (1.0 = every
+    point pulls its weight, → 0 = a handful dominate). A persistently small fraction means
+    the lever is *placement* — concentrate points near the contour — not a larger M."""
+    steps, frac = d["tl_steps"], d["tl_peff"] / max(int(d["op_M"]), 1)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=steps, y=frac, mode="lines+markers",
+                             line=dict(color="#4c78a8", width=2), marker=dict(size=4),
+                             showlegend=False,
+                             customdata=d["tl_peff"],
+                             hovertemplate="step %{x}<br>%{y:.1%} of M<br>"
+                                           "(%{customdata:.0f} effective points)<extra></extra>"))
+    fig.update_xaxes(title_text="BO step", rangemode="tozero")
+    fig.update_yaxes(title_text="effective fraction of M", rangemode="tozero",
+                     tickformat=".0%", showgrid=False)
+    fig.update_layout(template="plotly_white", height=330,
+                      margin=dict(l=0, r=0, t=20, b=0), hovermode="x unified")
+    return fig
+
+
+def sur_gsur_fidelity(d) -> go.Figure:
+    """gSUR↔SUR fidelity — does the cheap pointwise gSUR rank candidates like the expensive
+    integrated SUR? On each step's surrogate, a shared pool of candidate structures is
+    scored by both; the lines are the Spearman rank correlation of the two score vectors
+    and the overlap of their top-10 picks, per BO step. Near 1.0 → gSUR is a faithful,
+    cheap proxy (you can skip SUR's reference-design cost); dipping low → the integral
+    genuinely matters at those steps. (Independent of any reference-size choice.)"""
+    steps, rho, top10 = d["fid_steps"], d["fid_spearman"], d["fid_top10"]
+    top1 = float(np.mean(d["fid_top1"])) if len(d["fid_top1"]) else float("nan")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=steps, y=rho, mode="lines+markers", name="Spearman ρ",
+                             line=dict(color="#54a24b", width=2), marker=dict(size=4)))
+    fig.add_trace(go.Scatter(x=steps, y=top10, mode="lines+markers", name="top-10 overlap",
+                             line=dict(color="#b279a2", width=2, dash="dot"), marker=dict(size=4)))
+    fig.add_hline(y=1.0, line_color="#bbb", line_width=1, line_dash="dot")
+    fig.update_xaxes(title_text="BO step", rangemode="tozero")
+    fig.update_yaxes(title_text="gSUR vs SUR agreement", range=[min(0.0, float(np.nanmin(rho)) - 0.05), 1.03],
+                     showgrid=False)
+    fig.update_layout(template="plotly_white", height=330,
+                      margin=dict(l=0, r=0, t=24, b=0), hovermode="x unified", legend=_LEGEND,
+                      title=dict(text=f"argmax agree: {top1:.0%} of steps", x=0.5,
+                                 xanchor="center", font=dict(size=11), y=0.98))
     return fig

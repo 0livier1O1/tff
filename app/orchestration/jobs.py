@@ -16,18 +16,66 @@ import pandas as pd
 import streamlit as st
 
 from app.config.algo_config import algo_config_from_dict
-from app.utils import _script_alive, _job_status, _job_gpu
+from app.utils import _script_alive, _job_status, _job_gpu, all_gpus, interrupt_run
+from app.phases import pretty_phase
 
 
 _STALE = ("Failed", "Interrupted", "Cancelled")
+_CONSOLE_HEIGHT = 300  # px — fixed height of each per-GPU live-output box
 
-# Pretty labels for the progress.json "phase" field (written by the algos).
-# init/sobol_init → the design phase (step counts to n_init/n_sobol_init);
-# bo → BO search; TnALE adds interpolation → main. Unknown/absent → blank.
-_PHASE_LABELS = {
-    "init": "Init", "sobol_init": "Init", "bo": "BO",
-    "interpolation": "Interpolation", "main": "Main", "random": "Random",
-}
+
+def _read_log_tail(path: Path, max_bytes: int = 16000, max_lines: int = 300) -> str:
+    """Tail of a job's run.log — reads only the trailing bytes so a large log
+    doesn't get slurped whole on every 2s refresh."""
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+            data = f.read()
+    except OSError:
+        return ""
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if size > max_bytes and lines:
+        lines = lines[1:]  # drop the partial first line from the mid-file seek
+    return "\n".join(lines[-max_lines:])
+
+
+def _running_by_gpu(active_runs: list[dict]) -> dict[str, dict]:
+    """Map GPU index (str) -> the job dict currently Running on it. A GPU holds
+    at most one of our jobs at a time, so the last writer wins harmlessly."""
+    out: dict[str, dict] = {}
+    for rec in active_runs:
+        alive = _script_alive(Path(rec["pid_file"]))
+        for job in rec["jobs"]:
+            status, _ = _job_status(job, alive)
+            if status == "Running":
+                gpu = _job_gpu(job)
+                if gpu:
+                    out[gpu] = job
+    return out
+
+
+def _render_gpu_consoles(active_runs: list[dict]) -> None:
+    """Live `run.log` tail for the job on each GPU — a fixed-height, scrollable
+    console per GPU, side by side. Refreshes with the parent fragment."""
+    gpus = all_gpus()
+    if not gpus:
+        return
+    running = _running_by_gpu(active_runs)
+    st.markdown("##### Live output")
+    for col, gpu in zip(st.columns(len(gpus)), gpus):
+        job = running.get(str(gpu))
+        with col:
+            if job is None:
+                st.caption(f"GPU {gpu} · idle")
+                with st.container(height=_CONSOLE_HEIGHT, border=True):
+                    st.code("(no active job)", language="text")
+                continue
+            st.caption(f"GPU {gpu} · {job.get('label', job['algo'])} · seed {job['seed']}")
+            tail = _read_log_tail(Path(job["algo_dir"]) / "run.log")
+            with st.container(height=_CONSOLE_HEIGHT, border=True):
+                st.code(tail or "(waiting for output…)", language="text")
 
 
 def _prefill_rerun_stale(ROOT: Path, rname: str,
@@ -77,7 +125,7 @@ def render_job_status_panel(ROOT: Path) -> None:
     _auto_refresh_panel(ROOT)
 
 
-@st.fragment(run_every=2)
+@st.fragment(run_every=1)
 def _auto_refresh_panel(ROOT: Path) -> None:
     active_runs = st.session_state.get("active_runs", [])
     if not active_runs:
@@ -115,13 +163,13 @@ def _auto_refresh_panel(ROOT: Path) -> None:
             pf = algo_dir / "progress.json"
             done_f = algo_dir / ".done"
 
-            phase, started_at = "", None
+            phase, started_at, oom = "", None, 0
             if pf.exists():
                 try:
                     pg = json.loads(pf.read_text())
                     started_at = pg.get("started_at")
-                    raw = pg.get("phase", "")
-                    phase = _PHASE_LABELS.get(raw, raw.capitalize() if raw else "")
+                    phase = pretty_phase(pg.get("phase", ""))
+                    oom = int(pg.get("oom", 0))
                 except Exception:
                     pass
             completed_at = done_f.stat().st_mtime if done_f.exists() else None
@@ -134,6 +182,7 @@ def _auto_refresh_panel(ROOT: Path) -> None:
                 "Status":    status,
                 "Phase":     phase,
                 "Step":      step,
+                "OOM":       oom,
                 "Submitted": _fmt_ts(submitted_at),
                 "Started":   _fmt_ts(started_at),
                 "Duration":  _fmt_dur(started_at, completed_at),
@@ -141,6 +190,19 @@ def _auto_refresh_panel(ROOT: Path) -> None:
             })
 
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+        # Interrupt — only while the run is alive. Signals the dispatcher + its
+        # running jobs (SIGINT) so they stop and record as interrupted/cancelled.
+        if alive:
+            _, _int = st.columns([5, 1])
+            if _int.button(
+                "⏹ Interrupt", key=f"interrupt_{rname}", width="stretch",
+                help="Stop this run — signals the dispatcher and its running "
+                     "jobs to halt. Interrupted jobs can be rerun afterwards.",
+            ):
+                interrupt_run(Path(rec["pid_file"]))
+                st.toast(f"Interrupting `{rname}`…", icon="⏹️")
+                st.rerun()
 
         # Rerun-stale shortcut — surfaces only for completed runs that still
         # have failed/interrupted/cancelled jobs. Sets up Extend mode in the
@@ -167,6 +229,8 @@ def _auto_refresh_panel(ROOT: Path) -> None:
             st.toast(f"`{rname}` complete.", icon="✅")
         else:
             still_active.append(rec)
+
+    _render_gpu_consoles(active_runs)
 
     st.session_state["active_runs"] = still_active
     # Nothing left running → full rerun so the parent gate stops this fragment's

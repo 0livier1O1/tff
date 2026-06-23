@@ -11,8 +11,10 @@ from torch import Tensor
 
 import cupy as cp
 
-from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
-from tnss.utils import triu_to_adj_matrix
+from tensors.networks.cutensor_network import contraction_scalar_row
+from tnss.algo.boss.base import _eval_tn
+from tnss.algo.init_designs import sample_init_points, INIT_DESIGNS
+from tnss.utils import triu_to_adj_matrix, cr_of_normalized, to_int_ranks, atomic_write_json
 
 
 def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
@@ -20,48 +22,6 @@ def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
     return triu_to_adj_matrix(x_int.double().unsqueeze(0), diag=t_shape).squeeze()
 
 
-def _eval_tn(target, adj, maxiter, n_runs, min_rse, *, method="pam",
-             backend="cupy", dtype="float32",
-             init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
-    """Evaluate one candidate with cuTensorNetwork decomposition.
-
-    Returns ``(cr, best_rse, elapsed, best_losses, contraction_stats)`` where
-    ``best_losses`` is the loss trajectory of the restart that achieved the
-    best RSE and ``contraction_stats`` is the cuTensorNet path/autotune cost
-    dict (identical across restarts — topology is fixed).
-    """
-    t0 = time.time()
-    tgt_np = target.numpy() if hasattr(target, "numpy") else target
-    target_cp = cp.asarray(tgt_np)
-    adj_cp = cp.asarray(adj.numpy() if hasattr(adj, "numpy") else adj)
-    net = cuTensorNetwork(adj_cp, backend=backend, dtype=dtype)
-    cr = float(net.network_size()) / float(net.target_size())
-
-    best_rse = float("inf")
-    best_losses: list[float] = []
-    for _ in range(n_runs):
-        losses = net.decompose(
-            target_cp,
-            max_epochs=maxiter,
-            method=method,
-            init_lr=init_lr,
-            momentum=momentum,
-            loss_patience=loss_patience,
-            lr_patience=lr_patience,
-        )
-        rse = float(losses[-1]) if losses else float("inf")
-        if rse < best_rse:
-            best_rse = rse
-            best_losses = [float(x) for x in losses]
-        if best_rse < min_rse:
-            break
-
-    elapsed = time.time() - t0
-    contraction_stats = net.contraction_stats
-    del net, adj_cp, target_cp
-    if cp.get_default_memory_pool() is not None:
-        cp.get_default_memory_pool().free_all_blocks()
-    return cr, best_rse, elapsed, best_losses, contraction_stats
 
 
 class RandomSearch:
@@ -88,7 +48,9 @@ class RandomSearch:
         loss_patience: int = 2500,
         lr_patience: int = 250,
         init_method: str = "random",
-        n_sobol_init: int = 10,
+        n_init: int = 10,
+        cr_warp_lambda: float = 0.0,
+        cr_pool_bias: float = 1.0,
         seed: int | None = None,
         verbose: bool = True,
     ) -> None:
@@ -108,10 +70,13 @@ class RandomSearch:
         self.momentum = momentum
         self.loss_patience = loss_patience
         self.lr_patience = lr_patience
-        if init_method not in ("random", "sobol"):
-            raise ValueError(f"init_method must be 'random' or 'sobol', got {init_method!r}")
+        if init_method not in ("random",) + INIT_DESIGNS:
+            raise ValueError(
+                f"init_method must be 'random' or one of {INIT_DESIGNS}, got {init_method!r}")
         self.init_method = init_method
-        self.n_sobol_init = n_sobol_init
+        self.n_init = n_init
+        self.cr_warp_lambda = cr_warp_lambda
+        self.cr_pool_bias = cr_pool_bias
         self.seed = seed
         self.verbose = verbose
 
@@ -127,16 +92,22 @@ class RandomSearch:
         self.train_Y_cr: list[float] = []
         self.train_t: list[float] = []
 
-    def run(self, progress_file: Path | None = None) -> tuple[dict, list[dict]]:
-        if self.init_method == "sobol":
-            self._sobol_init(progress_file)
+    def _oom_count(self) -> int:
+        """Structures skipped as too large to contract — surfaced live in the
+        dashboard Active Runs table via progress.json."""
+        return sum(1 for r in self.rows if r.get("eval_status") == "oom")
+
+    def run(self, progress_file: Path | None = None) -> list[dict]:
+        if self.init_method in INIT_DESIGNS:
+            self._pooled_init(progress_file)
 
         step_offset = len(self.rows)
         for step in range(self.budget):
             row = self._observe(step=step_offset + step, phase="random")
-            self._atomic_write(
+            atomic_write_json(
                 progress_file,
-                {"phase": "random", "step": step + 1, "budget": self.budget},
+                {"phase": "random", "step": step + 1, "budget": self.budget,
+                 "oom": self._oom_count()},
             )
 
             if self.verbose:
@@ -151,7 +122,7 @@ class RandomSearch:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        return self._summarize(), self.rows
+        return self.rows
 
     def get_results(self) -> dict:
         y_rse = torch.tensor(self.train_Y_rse, dtype=torch.double).unsqueeze(1)
@@ -171,31 +142,28 @@ class RandomSearch:
         vals = self.rng.integers(1, self.max_rank + 1, size=self.D, dtype=np.int64)
         return torch.tensor(vals, dtype=torch.int)
 
-    def _sobol_init(self, progress_file: Path | None) -> None:
-        from botorch.utils.sampling import draw_sobol_samples
-        from botorch.utils.transforms import unnormalize
-
-        bounds = torch.stack([
-            torch.ones(self.D, dtype=torch.double),
-            torch.full((self.D,), float(self.max_rank), dtype=torch.double),
-        ])
-        std_bounds = torch.zeros_like(bounds)
-        std_bounds[1] = 1.0
-        sobol = draw_sobol_samples(
-            bounds=std_bounds, n=self.n_sobol_init, q=1, seed=self.seed,
-        ).squeeze(1)
-        samples = unnormalize(sobol, bounds).round().clamp(1, self.max_rank).to(torch.int)
+    def _pooled_init(self, progress_file: Path | None) -> None:
+        """Shared pooled init (sobol/lhs/cr_stratified): draw n_init candidates via
+        :func:`sample_init_points`, evaluate each as an 'init'-phase row. Lets the
+        baseline draw the *same* initial design as BOSS/cBOSS/TnALE so every method
+        starts from the common anchor."""
+        pts = sample_init_points(
+            self.init_method, n=self.n_init, D=self.D, seed=self.seed,
+            cr_fn=lambda X: cr_of_normalized(X, self.max_rank, self.t_shape),
+            cr_warp_lambda=self.cr_warp_lambda, cr_pool_bias=self.cr_pool_bias)
+        samples = to_int_ranks(pts, self.max_rank)
 
         for i, x_int_flat in enumerate(samples):
-            row = self._observe(step=i, phase="sobol_init", x_int_flat=x_int_flat)
+            row = self._observe(step=i, phase="init", x_int_flat=x_int_flat)
             if self.verbose:
                 print(
-                    f"[Random Sobol init {i + 1}/{self.n_sobol_init}] "
+                    f"[Random {self.init_method} init {i + 1}/{self.n_init}] "
                     f"obj={row['objective']:.5f}  RSE={row['rse']:.5f}  CR={row['cr']:.5f}"
                 )
-            self._atomic_write(
+            atomic_write_json(
                 progress_file,
-                {"phase": "sobol_init", "step": i + 1, "budget": self.n_sobol_init},
+                {"phase": "init", "step": i + 1, "budget": self.n_init,
+                 "oom": self._oom_count()},
             )
 
     def _observe(self, *, step: int, phase: str, x_int_flat: Tensor | None = None) -> dict:
@@ -205,12 +173,12 @@ class RandomSearch:
         sample_time = time.time() - t0
         adj = _triu_to_full(x_int_flat, self.t_shape).int()
 
-        cr, rse, eval_time, losses, ctn_stats = _eval_tn(
+        cr, rse, eval_time, _recon, losses, ctn_stats, eval_status, _cores = _eval_tn(
             self.target,
             adj,
             self.maxiter_tn,
-            self.n_runs,
-            self.min_rse,
+            n_runs=self.n_runs,
+            min_rse=self.min_rse,
             method=self.decomp_method,
             dtype=self.dtype,
             init_lr=self.init_lr,
@@ -218,6 +186,8 @@ class RandomSearch:
             loss_patience=self.loss_patience,
             lr_patience=self.lr_patience,
         )
+        if cp.get_default_memory_pool() is not None:
+            cp.get_default_memory_pool().free_all_blocks()
         objective = float(cr + self.lamda * rse)
 
         row = {
@@ -229,6 +199,7 @@ class RandomSearch:
             "current_cr": cr,
             "objective": objective,
             "objective_lambda": self.lamda,
+            "eval_status": eval_status,
             "eval_time_s": eval_time,
             "decomp_time_s": eval_time,
             "sample_time_s": sample_time,
@@ -246,35 +217,3 @@ class RandomSearch:
         self.train_Y_cr.append(cr)
         self.train_t.append(eval_time)
         return row
-
-    def _summarize(self) -> dict:
-        if not self.rows:
-            return {}
-        objectives = [r["objective"] for r in self.rows]
-        best_idx = int(np.argmin(objectives))
-        best_x_int = self.train_X_int[best_idx]
-        return {
-            "budget": self.budget,
-            "objective_lambda": self.lamda,
-            "best_idx": best_idx,
-            "best_x_int": best_x_int,
-            "best_adj": _triu_to_full(best_x_int, self.t_shape).int(),
-            "best_objective": float(objectives[best_idx]),
-            "best_rse": float(self.rows[best_idx]["rse"]),
-            "best_cr": float(self.rows[best_idx]["cr"]),
-            "total_evals": len(self.rows),
-        }
-
-    @staticmethod
-    def _atomic_write(path: Path | None, data: dict) -> None:
-        if path is None:
-            return
-        try:
-            prev = json.loads(path.read_text())
-            if "started_at" in prev and "started_at" not in data:
-                data["started_at"] = prev["started_at"]
-        except Exception:
-            pass
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(path)

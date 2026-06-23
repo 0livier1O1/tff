@@ -14,7 +14,7 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]  # app/inputs/sidebar.py -> repo root
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -22,10 +22,10 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import algo_config_from_dict
-from app.config.constants import SEEDS, TMUX_SESSION, RUN_NAME
-from app.problem import render_problem_section, _render_problem_summary
-from app.algo_widgets import render_algo_configs
-from app.views.analyze import render_analyze_sidebar
+from app.config.constants import SEEDS, TMUX_SESSION, RUN_NAME, PARALLEL_GPUS
+from app.inputs.problem import render_problem_section, _render_problem_summary
+from app.inputs.algo_widgets import render_algo_configs
+from app.analysis.analyze import render_analyze_sidebar
 from app.utils import _list_tmux_sessions, all_gpus, free_gpus
 
 APP_MODES = ["Deployment", "Analysis"]
@@ -39,9 +39,13 @@ def render_sidebar() -> SidebarConfig:
     """Render all sidebar widgets and return a fully populated SidebarConfig."""
     cfg = SidebarConfig()
 
+    # Initialize once in session_state rather than passing a default, so code
+    # (e.g. the rerun-stale prefill) can set the value via the Session State API
+    # without the "default value + Session State" conflict warning.
+    if "app_mode" not in st.session_state:
+        st.session_state["app_mode"] = "Deployment"
     cfg.app_mode = st.sidebar.segmented_control(
-        "Mode", APP_MODES, default="Deployment",
-        key="app_mode", label_visibility="collapsed",
+        "Mode", APP_MODES, key="app_mode", label_visibility="collapsed",
     ) or "Deployment"
 
     st.sidebar.markdown("---")
@@ -55,8 +59,12 @@ def render_sidebar() -> SidebarConfig:
 
 
 def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
+    # Initialized in session_state (no `value=`) so the rerun-stale prefill can
+    # flip it on via the Session State API without a default-conflict warning.
+    if "extend_mode_toggle" not in st.session_state:
+        st.session_state["extend_mode_toggle"] = False
     cfg.extend_mode = st.sidebar.toggle(
-        "Extend existing run", value=False, key="extend_mode_toggle",
+        "Extend existing run", key="extend_mode_toggle",
         help="Add new algorithm configs (and optionally new seeds) to an existing run. "
              "The run's problem is locked.",
     )
@@ -73,13 +81,21 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
         render_problem_section(cfg, ROOT)
 
     st.sidebar.markdown("### General Settings")
-    cfg.seeds_str = st.sidebar.text_input("Random Seeds (csv)", "1", key="seeds_str_input", help=SEEDS)
+    if "seeds_str_input" not in st.session_state:
+        st.session_state["seeds_str_input"] = "1"
+    cfg.seeds_str = st.sidebar.text_input("Random Seeds (csv)", key="seeds_str_input", help=SEEDS)
     _all, _free = all_gpus(), free_gpus()
     _busy = [g for g in _all if g not in _free]
+    cfg.parallel_gpus = st.sidebar.toggle(
+        "Parallelize across GPUs", value=True, help=PARALLEL_GPUS,
+    )
+    _mode = ("jobs run one per free GPU; busy ones are skipped until they clear."
+             if cfg.parallel_gpus else
+             "confined to a single free GPU; jobs run sequentially.")
     st.sidebar.caption(
         f"GPUs **{', '.join(map(str, _all))}**"
         + (f" · busy now: {', '.join(map(str, _busy))}" if _busy else " · all free")
-        + " — jobs run one per free GPU; busy ones are skipped until they clear."
+        + f" — {_mode}"
     )
     if cfg.extend_mode:
         cfg.overwrite = st.sidebar.toggle(
@@ -97,8 +113,10 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
             help=RUN_NAME,
         )
 
-    _algo_hdr, _algo_clear = st.sidebar.columns([2, 1], vertical_alignment="bottom")
+    _algo_hdr, _algo_import, _algo_clear = st.sidebar.columns(
+        [2, 1, 1], vertical_alignment="bottom")
     _algo_hdr.markdown("### Algorithms")
+    _render_import_algos(_algo_import)
     if _algo_clear.button(
         "Clear all", key="clear_all_algos", width="stretch", type="primary",
         help="Remove all algorithm configs at once",
@@ -106,6 +124,35 @@ def _render_deployment_sidebar(cfg: SidebarConfig) -> None:
         st.session_state["algo_configs"] = []
         st.rerun()
     render_algo_configs(cfg)
+
+
+def _render_import_algos(col) -> None:
+    """Small popover (next to 'Clear all') to import all algorithm configs from
+    another run's config.json into the current draft. Imported configs are
+    appended, skipping any config_id already present so a double-import can't
+    collide on the seed_<k>/<config_id>_<policy>/ output dir."""
+    with col.popover("Import", width="stretch",
+                     help="Import all algorithm configs from another run"):
+        runs_dir = ROOT / "artifacts" / "runs"
+        runs = sorted(
+            [d.name for d in runs_dir.iterdir()
+             if d.is_dir() and (d / "config.json").exists()],
+            reverse=True,
+        ) if runs_dir.exists() else []
+        if not runs:
+            st.caption("No runs with a config.json to import from.")
+            return
+        sel = st.selectbox("Import algos from run", runs, key="import_algos_run")
+        with open(runs_dir / sel / "config.json") as f:
+            imported = [algo_config_from_dict(d)
+                        for d in json.load(f).get("algo_configs", [])]
+        st.caption(f"{len(imported)} algo config(s) in this run.")
+        if st.button(f"Import {len(imported)} algos", key="import_algos_do",
+                     width="stretch", disabled=not imported):
+            existing = st.session_state.setdefault("algo_configs", [])
+            have = {a.config_id for a in existing}
+            existing.extend(a for a in imported if a.config_id not in have)
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,10 @@ import pandas as pd
 import streamlit as st
 
 from app.plotting import figures
-from app.plotting.traces import derive_trace_metrics, load_traces
+from app.plotting.traces import (
+    derive_trace_metrics, load_candidate_evals, load_step_timings, load_traces,
+)
+from app.phases import INIT_PHASES, PHASE_ORDER
 
 
 @dataclass
@@ -23,20 +26,20 @@ class SummaryControls:
     use_efficiency: bool = False
     loss_threshold: float = float("inf")
     threshold_mode: str = "fade"
+    # What "best"/incumbent means: "objective" (CR + λ·RSE) or "feasible_cr"
+    # (lowest CR among evals with RSE < loss_threshold).
+    best_by: str = "objective"
+    # Bottom row of the incumbent CR/RSE plot: show λ·RSE (objective contribution)
+    # or the raw RSE.
+    weight_rse: bool = True
 
 
 def _phase_options(phases: pd.Series) -> list[str]:
-    preferred = ["sobol_init", "lhs_init", "init", "interpolation", "bo", "main", "random"]
+    # PHASE_ORDER puts the unified "init" phase first; anything else trails sorted.
     present = set(phases.dropna().astype(str))
-    ordered = [p for p in preferred if p in present]
+    ordered = [p for p in PHASE_ORDER if p in present]
     ordered.extend(sorted(present - set(ordered)))
     return ordered
-
-
-# Pre-search initialization is hidden by default: the Sobol/LHS design for
-# BOSS/CBOSS, and TnALE's "init" draw (renamed from "sobol_init"). TnALE's
-# "interpolation" and "main" phases are the actual search and stay visible.
-_INIT_PHASES = ("sobol_init", "lhs_init", "init")
 
 
 def _render_phase_filter(df: pd.DataFrame) -> list[str]:
@@ -45,7 +48,7 @@ def _render_phase_filter(df: pd.DataFrame) -> list[str]:
     # structures that blow up the y-axis. This is a *display* filter only:
     # best-so-far and incumbent metrics are derived over the full run before
     # this filter is applied, so hiding init never changes the curves' values.
-    default = [p for p in options if p not in _INIT_PHASES] or options
+    default = [p for p in options if p not in INIT_PHASES] or options
     st.sidebar.markdown("### Trace phases")
     selected = st.sidebar.multiselect(
         "Include phases",
@@ -56,6 +59,9 @@ def _render_phase_filter(df: pd.DataFrame) -> list[str]:
              "Sobol init is hidden, its final eval is still drawn as the "
              "shared best-of-init anchor point.",
     )
+    # Persist so the per-seed Performance view (Diagnostics tab, rendered after
+    # this) applies the same phase selection rather than its own default.
+    st.session_state["selected_trace_phases"] = selected
     return selected
 
 
@@ -67,7 +73,7 @@ def _apply_phase_filter(df: pd.DataFrame, selected: list[str]) -> pd.DataFrame:
     curve visibly starts from the common point before the methods diverge.
     """
     keep = df["phase"].isin(selected)
-    hidden_init = [p for p in _INIT_PHASES if p not in selected]
+    hidden_init = [p for p in INIT_PHASES if p not in selected]
     if hidden_init:
         init_rows = df[df["phase"].isin(hidden_init)]
         if not init_rows.empty:
@@ -85,9 +91,22 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
     synthetic — efficiency needs the generating structure's CR. Plot axes
     autorange to the visible traces, so there are no axis-limit controls."""
     rse_max = float(df["inc_rse"].max())
+    # Default the feasibility cutoff to the run's configured feasible_rse (the
+    # same RSE the algorithms judged feasibility against), not the worst observed
+    # incumbent RSE. If several configs disagree, take the most permissive.
+    feas = df["feasible_rse"].dropna()
+    feas_default = float(feas.max()) if not feas.empty else rse_max
+    thr_max = max(rse_max, feas_default)
     can_efficiency = bool(df["efficiency"].notna().all())
 
     st.sidebar.markdown("### Graph settings")
+    best_by = "feasible_cr" if st.sidebar.radio(
+        "Best by", ["Objective", "Feasible CR"], horizontal=True, key="best_by",
+        index=1,
+        help="What the incumbent / reported best tracks. 'Objective' = running-best "
+             "CR + λ·RSE. 'Feasible CR' = lowest CR among evals with RSE below the "
+             "loss threshold below (the feasibility cutoff).",
+    ) == "Feasible CR" else "objective"
     use_efficiency = False
     if can_efficiency:
         metric = st.sidebar.selectbox(
@@ -97,19 +116,24 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
         )
         use_efficiency = metric == "Efficiency"
     loss_threshold = st.sidebar.number_input(
-        "Loss threshold (RSE)", min_value=0.0, max_value=rse_max, value=rse_max,
-        step=max(rse_max / 50, 1e-4), format="%.4f", key="loss_threshold",
-        help="On the runtime scatter, points whose incumbent RSE exceeds this; "
-             "also marked on the RSE-distribution diagnostic.",
+        "Loss threshold (RSE)", min_value=0.0, max_value=thr_max, value=feas_default,
+        step=max(thr_max / 50, 1e-4), format="%.4f", key="loss_threshold",
+        help="Fades points above this RSE on the runtime scatter; also the "
+             "feasibility cutoff for 'Best by → Feasible CR' (feasible iff RSE < this).",
     )
     threshold_mode = st.sidebar.radio(
         "Above threshold", ["Fade", "Hide"], horizontal=True,
         label_visibility="collapsed",
         help="Fade — show those points faintly. Hide — drop them entirely.",
     ).lower()
+    weight_rse = st.sidebar.radio(
+        "RSE term", ["λ·RSE", "RSE"], horizontal=True, key="rse_term",
+        help="Bottom row of the incumbent CR/RSE plot: show the raw RSE or its "
+             "λ-weighted contribution to the objective (CR + λ·RSE).",
+    ) == "λ·RSE"
     return SummaryControls(
         use_efficiency=use_efficiency, loss_threshold=float(loss_threshold),
-        threshold_mode=threshold_mode,
+        threshold_mode=threshold_mode, best_by=best_by, weight_rse=weight_rse,
     )
 
 
@@ -139,6 +163,14 @@ def render_results_summary(repo_root: Path) -> None:
         return
 
     controls = _render_controls(df)
+    # The incumbent under "Feasible CR" depends on the loss-threshold cutoff, set
+    # in the controls — re-derive over the full run, then re-apply the phase filter.
+    if controls.best_by == "feasible_cr":
+        df = _apply_phase_filter(
+            derive_trace_metrics(raw_df, best_by="feasible_cr",
+                                 feasible_threshold=controls.loss_threshold),
+            selected_phases,
+        )
     render_summary_plots(df, controls, key_prefix="summary")
 
 
@@ -154,6 +186,8 @@ def render_summary_plots(
     """Draw the results-summary charts for `df` (already derived + phase-filtered).
     `key_prefix` keeps chart element-ids unique when rendered in several tabs."""
     cr_word = "efficiency" if controls.use_efficiency else "compression ratio"
+    inc_word = "best feasible-CR" if controls.best_by == "feasible_cr" else "best-objective"
+    rse_word = "λ·RSE" if controls.weight_rse else "RSE"
 
     # MABSS and global/local search baselines optimise different objectives — RSE vs. CR + λ·RSE —
     # so each family group gets its own chart.
@@ -182,10 +216,11 @@ def render_summary_plots(
         )
 
     if not search_df.empty:
-        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & λ·RSE of the best-objective structure so far.")
+        st.caption(f"**BOSS / TnALE / Random** — {cr_word} & {rse_word} of the {inc_word} structure so far.")
         st.plotly_chart(
             figures.incumbent_cr_rse(
                 search_df, use_efficiency=controls.use_efficiency,
+                weight_rse=controls.weight_rse,
             ),
             width="stretch", key=f"{key_prefix}_inc_cr_rse",
         )
@@ -221,27 +256,95 @@ def render_summary_plots(
 
 def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
     """Per-seed Performance view: the results-summary charts for one seed only
-    (no averaging). Reuses the global Graph-settings (loss threshold) where set;
-    phase filtering uses the default (Sobol init hidden)."""
+    (no averaging). Reuses the global Graph-settings (loss threshold, Best by,
+    RSE term) and the same Trace-phases selection as the Results Summary tab."""
     raw_df = load_traces(repo_root, keys, derive=False)
     raw_df = raw_df[raw_df["seed"] == seed]
     if raw_df.empty:
         st.info("No trace data for this seed.")
         return
 
-    df_full = derive_trace_metrics(raw_df)
+    # Honor the global Graph-settings 'Best by' + loss-threshold where set.
+    best_by = "feasible_cr" if st.session_state.get("best_by") == "Feasible CR" else "objective"
+    threshold = float(st.session_state.get("loss_threshold", float("inf")))
+    df_full = derive_trace_metrics(raw_df, best_by=best_by, feasible_threshold=threshold)
     if df_full.empty:
         st.info("No trace data for this seed.")
         return
 
     options = _phase_options(df_full["phase"])
-    selected = [p for p in options if p not in _INIT_PHASES] or options
+    stored = st.session_state.get("selected_trace_phases")
+    if stored is None:  # Results Summary tab not rendered yet → default (init hidden)
+        selected = [p for p in options if p not in INIT_PHASES] or options
+    else:  # honor the sidebar selection, restricted to this seed's phases
+        selected = [p for p in options if p in stored]
     df = _apply_phase_filter(df_full, selected)
     if df.empty:
-        st.info("No trace rows for this seed after the default phase filter.")
+        st.info("No trace rows for this seed match the selected phases.")
         return
 
+    weight_rse = st.session_state.get("rse_term", "λ·RSE") == "λ·RSE"
     controls = SummaryControls(
-        loss_threshold=float(st.session_state.get("loss_threshold", float("inf"))),
+        loss_threshold=threshold, best_by=best_by, weight_rse=weight_rse,
     )
     render_summary_plots(df, controls, key_prefix=f"perf_{seed}")
+    _render_step_timings(repo_root, keys, seed, selected)
+    _render_candidate_evals(repo_root, keys, seed, selected)
+
+
+def _render_step_timings(
+    repo_root: Path, keys: list, seed: int, selected: list[str],
+) -> None:
+    """Per-step computational-time breakdown for this seed: where each algo spends
+    its time (decomposition / GP fit / acquisition / other). A stacked bar compares
+    the split across algos; a stacked area (one algo at a time) shows it across the
+    search steps. Honors the same Trace-phases selection as the rest of the view."""
+    tm = load_step_timings(repo_root, [(r, s, c) for (r, s, c) in keys if s == seed])
+    tm = tm[tm["phase"].isin(selected)]
+    if tm.empty:
+        return
+    st.markdown("##### Computational time")
+
+    col_bar, col_area = st.columns(2)
+    with col_bar:
+        as_share = st.radio(
+            "Units", ["Seconds / step", "% share"], horizontal=True,
+            key=f"timing_units_{seed}",
+        ) == "% share"
+        st.caption("Mean time per search step split into decomposition (candidate "
+                   "eval), GP fit and acquisition — one bar per algo. 'Other' is "
+                   "wall-clock outside those three (e.g. TnALE has no GP/acquisition).")
+        st.plotly_chart(figures.phase_time_breakdown(tm, normalize=as_share),
+                        width="stretch", key=f"timing_bar_{seed}")
+    with col_area:
+        opts = {f"{r.label}  ·  {r.policy}": (r.run, r.config_id)
+                for r in tm[["run", "config_id", "label", "policy"]]
+                .drop_duplicates().itertuples(index=False)}
+        pick = st.selectbox("Algorithm", list(opts), key=f"timing_algo_{seed}")
+        run, cid = opts[pick]
+        sub = tm[(tm["run"] == run) & (tm["config_id"] == cid)].sort_values("step")
+        st.caption("Time per step split by phase across the search — areas stack "
+                   "to the step's total wall-clock.")
+        st.plotly_chart(figures.phase_time_area(sub),
+                        width="stretch", key=f"timing_area_{seed}")
+
+
+def _render_candidate_evals(
+    repo_root: Path, keys: list, seed: int, selected: list[str],
+) -> None:
+    """Per-evaluation candidate CR and rank L1 (∑ bond ranks) for this seed's BO
+    families (boss/cboss), one config per row, markers coloured by feasibility.
+    Honors the same Trace-phases selection as the rest of the view."""
+    cand = load_candidate_evals(repo_root, [(r, s, c) for (r, s, c) in keys if s == seed])
+    cand = cand[cand["phase"].isin(selected)]
+    if cand.empty:
+        return
+    st.markdown("##### Per-step candidates")
+    st.caption("Each evaluated structure's CR and rank L1 (sum of bond ranks) vs "
+               "evaluation step — markers coloured by feasibility (RSE below the "
+               "feasibility threshold). BO families only (rank needs the saved design).")
+    for (_run, cid), sub in cand.groupby(["run", "config_id"], sort=False):
+        st.plotly_chart(
+            figures.candidate_cr_rank(sub, sub["label"].iloc[0]),
+            width="stretch", key=f"cand_{seed}_{cid}",
+        )

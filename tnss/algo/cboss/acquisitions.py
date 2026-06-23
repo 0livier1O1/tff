@@ -84,8 +84,8 @@ class FeasibilityInterpolatedCR(AcquisitionFunction):
         self.feas_gp = feas_gp
         self.neg_cr = neg_cr
         lo, hi = cr_bounds
-        self.register_buffer("w_ucb", torch.tensor(1.0 - c * t, dtype=torch.double))
-        self.register_buffer("w_pf", torch.tensor(c * t, dtype=torch.double))
+        self.register_buffer("w_ucb", torch.tensor(1.0 - c ** t, dtype=torch.double))
+        self.register_buffer("w_pf", torch.tensor(c ** t, dtype=torch.double))
         self.register_buffer("cr_lo", torch.tensor(float(lo), dtype=torch.double))
         self.register_buffer("cr_span", torch.tensor(max(float(hi - lo), 1e-12),
                                                      dtype=torch.double))

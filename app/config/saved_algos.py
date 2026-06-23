@@ -86,3 +86,39 @@ def instantiate_saved(name: str) -> AlgoConfig:
 def delete_saved_algo(name: str) -> None:
     path = saved_algos_dir() / f"{_slug(name)}.json"
     path.unlink(missing_ok=True)
+
+
+def rename_saved_label(config_id: str, new_label: str) -> list[str]:
+    """Rename the saved-library entry whose config carries this `config_id`: its
+    `name` (the label applied when the config is dropped into a run), the embedded
+    `config.label`, and the slug filename all become `new_label`.
+
+    Best-effort and matched by `config_id` — a run config created from scratch has
+    no library entry, so usually 0 or 1 file is touched. Returns one description
+    per renamed entry.
+    """
+    new_label = new_label.strip()
+    if not new_label:
+        raise ValueError("New label cannot be empty.")
+    changes: list[str] = []
+    if not _SAVED_DIR.exists():
+        return changes
+    for f in list(_SAVED_DIR.glob("*.json")):
+        try:
+            rec = json.loads(f.read_text())
+        except json.JSONDecodeError:
+            continue
+        cfg = rec.get("config", {})
+        if cfg.get("config_id") != config_id:
+            continue
+        old_name = rec.get("name", f.stem)
+        if old_name == new_label and cfg.get("label") == new_label:
+            continue
+        rec["name"] = new_label
+        cfg["label"] = new_label
+        new_path = _SAVED_DIR / f"{_slug(new_label)}.json"
+        new_path.write_text(json.dumps(rec, indent=2))
+        if new_path != f:
+            f.unlink()
+        changes.append(f"saved library: {old_name!r} → {new_label!r}")
+    return changes

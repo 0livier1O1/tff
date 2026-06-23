@@ -1,9 +1,24 @@
-import gc
+"""
+boss.py — BOSS: unconstrained Bayesian Optimization for TN structure search.
+
+Searches the upper-triangular bond-rank vector x in {1,…,max_rank}^D minimizing
+the scalarized objective CR + lambda * RSE with an exact `SingleTaskGP` surrogate
+(Matérn-2.5 ARD, or the weighted-shortest-path kernel) and EI/UCB acquisition.
+
+The shared search-space encoding, TN evaluation, init sampling, feasibility
+tagging, and BO-loop skeleton live in :class:`~tnss.algo.boss.base.BOSSBase`;
+this module only supplies the surrogate, the acquisition, and the summary.
+
+Surrogate refresh: a full hyperparameter fit runs at init; thereafter the GP is
+rebuilt on *all* observed data every step (cheap exact conditioning) while the
+kernel hyperparameters are re-optimized only every `freq_update` steps. A GP
+state snapshot is saved at init and at each hyperparameter refit.
+"""
+from __future__ import annotations
+
 import time
 import warnings
-from pathlib import Path
 
-import cupy as cp
 import torch
 from torch import Tensor
 
@@ -13,104 +28,53 @@ from botorch.models import SingleTaskGP
 from botorch.models.transforms import Standardize
 from botorch.acquisition.analytic import LogExpectedImprovement, UpperConfidenceBound
 from botorch.optim import optimize_acqf, optimize_acqf_discrete_local_search
-from botorch.utils.sampling import draw_sobol_samples
-from botorch.utils.transforms import unnormalize
 from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
-from tensors.networks.cutensor_network import cuTensorNetwork, contraction_scalar_row
+from tnss.algo.boss.base import BOSSBase, _eval_tn, _triu_to_full  # noqa: F401 (re-exported)
+from tnss.algo.boss.means import make_mean, MEANS
+from tnss.kernels.input_warp_kernel import maybe_warp
+from tnss.kernels.round_kernel import maybe_round
 from tnss.kernels.weighted_shortest_path import WeightedShortestPathKernel
-from tnss.utils import triu_to_adj_matrix
 
 
-def _triu_to_full(x_int: Tensor, t_shape: Tensor) -> Tensor:
-    """Upper-triangular rank vector -> full NxN symmetric adjacency matrix."""
-    return triu_to_adj_matrix(x_int.double().unsqueeze(0), diag=t_shape).squeeze()
-
-
-def _eval_tn(target, A_int, maxiter, n_runs, min_rse, method="pam",
-             backend="cupy", dtype="float32",
-             init_lr=None, momentum=0.5, loss_patience=2500, lr_patience=250):
-    """Eval using cuTensorNetwork decompose (supports sgd, pam, als).
-
-    Returns ``(cr, best_rse, eval_time, recon, best_losses, contraction_stats)``
-    where ``best_losses`` is the loss trajectory of the best restart and
-    ``contraction_stats`` is the cuTensorNet path/autotune cost dict.
-    """
-    t0 = time.time()
-    tgt_np = target.numpy() if hasattr(target, 'numpy') else target
-    tgt_cp = cp.asarray(tgt_np)
-    # Normalize the target to unit norm before decomposition. RSE is
-    # scale-invariant (||recon - target|| / ||target||), so the loss
-    # trajectory and final best_rse are identical to the unnormalized case,
-    # but the optimization landscape is much friendlier — SGD/Adam start
-    # from O(1) loss instead of ||target||/||cores_init|| (often 1e3-1e4),
-    # which avoids early LR-decay thrash and divergence. Reconstruction
-    # is rescaled back to the original magnitude before returning.
-    tgt_norm = float(cp.linalg.norm(tgt_cp))
-    tgt_cp = tgt_cp / tgt_norm
-    A_cp = cp.asarray(A_int.numpy() if hasattr(A_int, 'numpy') else A_int)
-    ntwrk = cuTensorNetwork(A_cp, backend=backend, dtype=dtype)
-    cr = float(ntwrk.network_size()) / float(ntwrk.target_size())
-
-    best_rse = float("inf")
-    best_losses: list[float] = []
-    for _ in range(n_runs):
-        losses = ntwrk.decompose(
-            tgt_cp, max_epochs=maxiter, method=method,
-            init_lr=init_lr, momentum=momentum,
-            loss_patience=loss_patience, lr_patience=lr_patience,
-        )
-        val = float(losses[-1]) if losses else float("inf")
-        if val < best_rse:
-            best_rse = val
-            best_losses = [float(x) for x in losses]
-        if best_rse < min_rse:
-            break
-    eval_time = time.time() - t0
-    return cr, best_rse, eval_time, ntwrk.contract() * tgt_norm, best_losses, ntwrk.contraction_stats
-
-
-class BOSS:
+class BOSS(BOSSBase):
     r"""
-    Bayesian Optimization for TN Structure Search.
+    Bayesian Optimization for TN Structure Search (unconstrained).
 
-    Searches over the upper-triangular bond rank vector
-    $x \in \{1, \ldots, \text{max\_rank}\}^D$, $D = N(N-1)/2$,
-    minimizing CR + lambda * RSE while tracking reconstruction loss and CR.
+    Minimizes CR + lambda * RSE over the bond-rank vector while tracking RSE, CR,
+    and feasibility (RSE < ``feasible_rse``). The reported best is the lowest-
+    objective *feasible* structure (the lowest-objective overall if none feasible).
 
-    Parameters
-    ----------
-    target      : float Tensor
-    budget      : BO iterations after n_init
-    n_init      : Sobol initial evaluations
-    max_rank    : upper bound on each bond rank
-    min_rse     : early-stopping threshold per TN eval
-    maxiter_tn  : FCTN-PAM iterations per evaluation
-    n_runs      : restarts per candidate (best is kept)
-    raw_samples : random restarts/initial samples for acqf optimizer
-    num_restarts: multistart count for acqf optimizer
-    kernel      : 'matern' (plain ARD over rank vector) or
-                  'weighted_shortest_path' (shortest-path kernel)
-    wsp_mode    : shortest-path kernel variant, 'matern', 'bogrape',
-                  'soft', or 'ewsp' (only used when kernel is
-                  weighted_shortest_path)
-    acqf_optimizer: 'mip' (discrete local search over the integer rank
-                  lattice; default; works with non-differentiable kernels)
-                  or 'gradient' (continuous L-BFGS-B via optimize_acqf)
-    verbose     : print per-iteration summary
+    Parameters beyond the shared base set
+    -------------------------------------
+    acqf          : 'ei' (LogExpectedImprovement) or 'ucb' (UpperConfidenceBound)
+    ucb_beta      : exploration weight for UCB
+    kernel        : 'matern' (ARD) or 'weighted_shortest_path'
+    mean          : GP mean — 'constant' or a learned 'linear' trend in the ranks
+    wsp_mode      : shortest-path kernel variant ('matern'/'bogrape'/'soft'/'ewsp')
+    input_warp    : wrap the kernel in a learned per-dim input warp (Kumaraswamy CDF)
+    round_inputs  : snap kernel inputs to the integer rank lattice (Garrido-Merchán
+                    & Hernández-Lobato 2020 integer transform) so the GP models the
+                    objective as piecewise-constant over each rank cell
+    acqf_optimizer: 'mip' (discrete local search; default) or 'gradient' (L-BFGS-B)
     """
 
     def __init__(
         self,
         target: Tensor,
-        budget: int = 30,
+        *,
+        budget: int = 200,
         n_init: int = 10,
+        init_design: str = "sobol",
+        cr_warp_lambda: float = 0.0,
+        cr_pool_bias: float = 1.0,
         max_rank: int = 10,
-        min_rse: float = 0.01,
+        feasible_rse: float = 0.01,
+        min_rse: float | None = None,
         maxiter_tn: int = 1000,
-        lamda: float = 1.0,
         n_runs: int = 1,
+        lamda: float = 1.0,
         acqf: str = "ei",
         ucb_beta: float = 2.0,
         decomp_method: str = "adam",
@@ -118,236 +82,119 @@ class BOSS:
         momentum: float = 0.5,
         loss_patience: int = 2500,
         lr_patience: int = 250,
+        freq_update: int = 5,
         raw_samples: int = 256,
         num_restarts: int = 10,
         kernel: str = "matern",
+        mean: str = "constant",
         wsp_mode: str = "matern",
+        input_warp: bool = False,
+        round_inputs: bool = False,
         acqf_optimizer: str = "mip",
         seed: int | None = None,
         verbose: bool = True,
     ):
-        self.target = target
-        self.t_shape = torch.tensor(target.shape, dtype=torch.double)
-        N = target.dim()
-        self.D = N * (N - 1) // 2
-        self.max_rank = max_rank
-        self.min_rse = min_rse
-        self.maxiter_tn = maxiter_tn
-        self.n_runs = n_runs
+        super().__init__(
+            target, budget=budget, n_init=n_init, init_design=init_design,
+            cr_warp_lambda=cr_warp_lambda, cr_pool_bias=cr_pool_bias,
+            max_rank=max_rank, feasible_rse=feasible_rse, min_rse=min_rse,
+            maxiter_tn=maxiter_tn, n_runs=n_runs, lamda=lamda,
+            decomp_method=decomp_method, init_lr=init_lr, momentum=momentum,
+            loss_patience=loss_patience, lr_patience=lr_patience,
+            freq_update=freq_update, raw_samples=raw_samples,
+            num_restarts=num_restarts, seed=seed, verbose=verbose,
+        )
+
         assert acqf in ("ei", "ucb"), f"acqf must be 'ei' or 'ucb', got {acqf!r}"
+        assert mean in MEANS, f"mean must be one of {MEANS}, got {mean!r}"
+        assert kernel in ("matern", "weighted_shortest_path", "weighted_sp"), (
+            f"kernel must be 'matern' or 'weighted_shortest_path', got {kernel!r}")
+        assert wsp_mode in ("matern", "bogrape", "soft", "ewsp"), (
+            f"wsp_mode must be 'matern', 'bogrape', 'soft', or 'ewsp', got {wsp_mode!r}")
+        assert acqf_optimizer in ("mip", "gradient"), (
+            f"acqf_optimizer must be 'mip' or 'gradient', got {acqf_optimizer!r}")
         self.acqf = acqf
         self.ucb_beta = ucb_beta
-        self.lamda = lamda
-
-        self.decomp_method = decomp_method
-        self.init_lr = init_lr
-        self.momentum = momentum
-        self.loss_patience = loss_patience
-        self.lr_patience = lr_patience
-        self.n_init = n_init
-        self.budget = budget
-        self.raw_samples = raw_samples
-        self.num_restarts = num_restarts
-        assert kernel in ("matern", "weighted_shortest_path", "weighted_sp"), (
-            "kernel must be 'matern' or 'weighted_shortest_path', "
-            f"got {kernel!r}"
-        )
-        assert wsp_mode in ("matern", "bogrape", "soft", "ewsp"), (
-            "wsp_mode must be 'matern', 'bogrape', 'soft', or 'ewsp', "
-            f"got {wsp_mode!r}"
-        )
-        assert acqf_optimizer in ("mip", "gradient"), (
-            f"acqf_optimizer must be 'mip' or 'gradient', got {acqf_optimizer!r}"
-        )
         self.kernel = kernel
+        self.mean = mean
         self.wsp_mode = wsp_mode
+        self.input_warp = input_warp
+        self.round_inputs = round_inputs
         self.acqf_optimizer = acqf_optimizer
-        self.seed = seed
-        self.verbose = verbose
-        
-        # Search space: [1, max_rank]^D normalized to [0, 1]^D
-        self.bounds_int = torch.stack([
-            torch.ones(self.D, dtype=torch.double),
-            torch.full((self.D,), max_rank, dtype=torch.double)
-        ])  # (2, D)
-        self.std_bounds = torch.zeros_like(self.bounds_int)
-        self.std_bounds[1] = 1.0
 
-        # Integer rank lattice in normalized space: rank r in {1..max_rank} maps
-        # to (r-1)/(max_rank-1) via `_to_int`'s inverse, so the feasible choices
-        # per dimension are linspace(0, 1, max_rank). Used by the discrete
-        # ("mip") acqf optimizer, which only evaluates (never differentiates)
-        # the acquisition and so is compatible with non-differentiable kernels.
-        choices = torch.linspace(0.0, 1.0, max_rank, dtype=torch.double)
-        self._discrete_choices = [choices] * self.D
+        # Mean factory over the normalized rank vector (fresh module per GP build).
+        self._mean = lambda: make_mean(
+            self.mean, self.D, N=self.N, max_rank=self.max_rank, t_shape=self.t_shape)
 
-        # Kernel over the normalized upper-triangular rank vector.
+        # Kernel factory over the normalized upper-triangular rank vector; optionally
+        # wrapped in a learned per-dim input warp (Kumaraswamy CDF).
         if kernel == "matern":
-            self._kernel = lambda: ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=self.D))
+            base = lambda: MaternKernel(nu=2.5, ard_num_dims=self.D)
         else:
-            self._kernel = lambda: ScaleKernel(
-                WeightedShortestPathKernel(
-                    num_nodes=N,
-                    weight_bounds=(1.0, float(self.max_rank)),
-                    mode=self.wsp_mode,
-                )
-            )
-
-        # Results
-        self.rows: list[dict] = []
-        # Per-step decomposition loss trajectories and cuTensorNet contraction
-        # cost, written alongside traces.csv as decomp_traces.json /
-        # contraction_traces.json.
-        self.decomp_traces: list[dict] = []
-        self.contraction_traces: list[dict] = []
+            base = lambda: WeightedShortestPathKernel(
+                num_nodes=self.N, weight_bounds=(1.0, float(self.max_rank)), mode=self.wsp_mode)
+        self._kernel = lambda: ScaleKernel(maybe_round(
+            maybe_warp(base(), self.D, self.input_warp), self.max_rank, self.round_inputs))
         self._gp_state = None
 
     # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def run(self, progress_file: Path | None = None) -> tuple[dict, list[dict]]:
-        """Run BOSS. Returns (summary_dict, rows)."""
-        X, Y_rse, Y_cr, T = self._sobol_init(progress_file)
-
-        for b in range(self.budget):
-            t0 = time.time()
-            Y_ = self._get_objective(Y_rse, Y_cr)
-            model = self._fit_gp(X, Y_)
-            gp_fit_time = time.time() - t0
-
-            t0 = time.time()
-            cand_std = self._suggest(model, best_f=Y_.min())
-            suggest_time = time.time() - t0
-
-            row = self._observe(
-                cand_std,
-                step=self.n_init + b,
-                phase="bo",
-                gp_fit_time=gp_fit_time,
-                suggest_time=suggest_time,
-            )
-
-            X = torch.cat([X, cand_std])
-            Y_rse = torch.cat([Y_rse, torch.tensor([[row["rse"]]], dtype=torch.double)])
-            Y_cr = torch.cat([Y_cr, torch.tensor([[row["cr"]]], dtype=torch.double)])
-            T = torch.cat([T, torch.tensor([row["eval_time_s"]], dtype=torch.double)])
-
-            if self.verbose:
-                print(f"[BO {b+1}/{self.budget}] obj={row['objective']:.5f}  "
-                      f"RSE={row['rse']:.5f}  CR={row['cr']:.5f}  "
-                      f"best_obj={min(float(Y_.min()), row['objective']):.5f}  "
-                      f"GP={gp_fit_time:.1f}s  acqf={suggest_time:.1f}s  eval={row['eval_time_s']:.1f}s")
-
-            self._atomic_write(progress_file, {"phase": "bo", "step": b + 1,
-                                                "budget": self.budget})
-
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        # Store final tensors for inspection
-        self.train_X_std = X
-        self.train_Y_rse = Y_rse
-        self.train_Y_cr = Y_cr
-        self.train_t = T
-
-        return self._summarize(), self.rows
-
-    def get_results(self) -> dict:
-        """Raw training data. `X_std` is the GP's normalized input ([0,1]^D) —
-        what the surrogate was actually fit on; map it through `_to_int` for the
-        integer rank vectors (lossy, since `_to_int` rounds)."""
-        return {
-            "X_std": self.train_X_std,
-            "Y_rse": self.train_Y_rse,
-            "Y_cr": self.train_Y_cr,
-            "Y_objective": self._get_objective(self.train_Y_rse, self.train_Y_cr),
-            "t": self.train_t,
-        }
-
-    # ------------------------------------------------------------------
-    # Internal helpers
+    # Objective
     # ------------------------------------------------------------------
 
     def _get_objective(self, Y_rse: Tensor, Y_cr: Tensor) -> Tensor:
-        """Combine RSE and CR into a single scalar objective for GP modeling."""
+        """Scalar objective the GP models: CR + lambda * RSE."""
         return Y_cr + self.lamda * Y_rse
 
-    def _observe(
-        self,
-        x_std: Tensor,
-        *,
-        step: int,
-        phase: str,
-        gp_fit_time: float = 0.0,
-        suggest_time: float = 0.0,
-    ) -> dict:
-        x_int_flat = self._to_int(x_std).squeeze(0)
-        A_int = _triu_to_full(x_int_flat, self.t_shape).int()
-        cr, rse, eval_time, _, losses, ctn_stats = self._evaluate(A_int)
-        objective = float(cr + self.lamda * rse)
+    # ------------------------------------------------------------------
+    # Surrogate hooks
+    # ------------------------------------------------------------------
 
-        row = {
-            "step": step,
-            "phase": phase,
-            "cr": cr,
-            "rse": rse,
-            "step_loss": rse,
-            "current_cr": cr,
-            "objective": objective,
-            "objective_lambda": self.lamda,
-            "eval_time_s": eval_time,
-            "gp_fit_time_s": gp_fit_time,
-            "suggest_time_s": suggest_time,
-            "step_time_s": gp_fit_time + suggest_time + eval_time,
-            **contraction_scalar_row(ctn_stats),
-        }
-        self.rows.append(row)
-        self.decomp_traces.append({"step": step, "phase": phase, "losses": losses})
-        self.contraction_traces.append(
-            {"step": step, "phase": phase, **(ctn_stats or {})}
-        )
-        return row
+    def _build_surrogate(self, X, Y_rse, Y_cr, Y_feas):
+        Y_ = self._get_objective(Y_rse, Y_cr)
+        t0 = time.time()
+        model = self._fit_gp(X, Y_)
+        self._carried_gp_fit_time = time.time() - t0
+        self._record_surrogate(model, step=self.n_init - 1, phase="init")
+        return model
 
-    def _evaluate(self, A_int: Tensor):
-        """Evaluate one candidate structure with cuTensorNetwork."""
-        return _eval_tn(
-            self.target, A_int,
-            self.maxiter_tn, self.n_runs, self.min_rse,
-            method=self.decomp_method,
-            init_lr=self.init_lr,
-            momentum=self.momentum,
-            loss_patience=self.loss_patience,
-            lr_patience=self.lr_patience,
-        )
+    def _pre_suggest(self, surrogate, X, Y_rse, Y_cr, Y_feas, b):
+        """Rebuild the GP on all data each step; re-optimize hypers every
+        ``freq_update`` steps, otherwise condition with the frozen hypers."""
+        Y_ = self._get_objective(Y_rse, Y_cr)
+        t0 = time.time()
+        if (b + 1) % self.freq_update == 0:
+            model = self._fit_gp(X, Y_)
+            self._record_surrogate(model, step=self.n_init + b, phase="refresh")
+        else:
+            model = self._conditioned_gp(X, Y_)
+        return model, time.time() - t0
 
-    def _sobol_init(self, progress_file):
-        raw = draw_sobol_samples(
-            bounds=self.std_bounds, n=self.n_init, q=1, seed=self.seed,
-        ).squeeze(1)
-        X = raw.to(torch.double)
+    def _suggest(self, surrogate, X, Y_rse, Y_cr, Y_feas, b):
+        Y_ = self._get_objective(Y_rse, Y_cr)
+        t0 = time.time()
+        cand = self._optimize_acqf(surrogate, best_f=Y_.min())
+        return cand, {}, time.time() - t0
 
-        rse_list, cr_list, t_list = [], [], []
-        for i, x in enumerate(X):
-            row = self._observe(x.unsqueeze(0), step=i, phase="sobol_init")
-            rse_list.append(row["rse"])
-            cr_list.append(row["cr"])
-            t_list.append(row["eval_time_s"])
-            if self.verbose:
-                print(f"[Init {i+1}/{self.n_init}] obj={row['objective']:.5f}  "
-                      f"RSE={row['rse']:.5f}  CR={row['cr']:.5f}")
+    def _post_observe(self, surrogate, X, Y_rse, Y_cr, Y_feas, b):
+        return surrogate  # BOSS refreshes in _pre_suggest
 
-            self._atomic_write(progress_file, {"phase": "init", "step": i + 1,
-                                                "budget": self.n_init})
+    def _log_step(self, b, row, X, Y_rse, Y_cr, Y_feas):
+        if not self.verbose:
+            return
+        best_obj = float(self._get_objective(Y_rse, Y_cr).min())
+        oom = "  [OOM: too large to contract]" if row["eval_status"] == "oom" else ""
+        print(f"[BO {b+1}/{self.budget}] obj={row['objective']:.5f}  "
+              f"RSE={row['rse']:.5f}  CR={row['cr']:.5f}  feas={row['feasible']}  "
+              f"best_obj={best_obj:.5f}  GP={row['gp_fit_time_s']:.1f}s  "
+              f"acqf={row['suggest_time_s']:.1f}s  eval={row['eval_time_s']:.1f}s{oom}")
 
-        Y_rse = torch.tensor(rse_list, dtype=torch.double).unsqueeze(1)
-        Y_cr  = torch.tensor(cr_list,  dtype=torch.double).unsqueeze(1)
-        T     = torch.tensor(t_list,   dtype=torch.double)
-        return X, Y_rse, Y_cr, T
+    # ------------------------------------------------------------------
+    # GP fitting / conditioning
+    # ------------------------------------------------------------------
 
     def _fit_gp(self, X: Tensor, Y: Tensor) -> SingleTaskGP:
-        # Deduplicate (true unique rows)
+        """Full hyperparameter fit on (deduplicated) data; checkpoints hypers in
+        ``self._gp_state`` and falls back to them if a fit fails."""
         _, first_occ = torch.unique(X, dim=0, return_inverse=True)
         mask = torch.zeros(X.shape[0], dtype=torch.bool)
         seen = set()
@@ -359,6 +206,7 @@ class BOSS:
         gp = SingleTaskGP(
             X[mask], Y[mask],
             outcome_transform=Standardize(m=1),
+            mean_module=self._mean(),
             covar_module=self._kernel(),
         )
         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
@@ -376,7 +224,32 @@ class BOSS:
                 gp.eval()
         return gp
 
-    def _suggest(self, model: SingleTaskGP, best_f: Tensor) -> Tensor:
+    def _conditioned_gp(self, X: Tensor, Y: Tensor) -> SingleTaskGP:
+        """Exact GP on all of (X, Y) with the kernel/likelihood hyperparameters
+        frozen at their last fit — no mll optimization. The outcome Standardize
+        is recomputed from the current Y (it's a data normalization, not a hyper)."""
+        gp = SingleTaskGP(
+            X, Y, outcome_transform=Standardize(m=1),
+            mean_module=self._mean(), covar_module=self._kernel(),
+        )
+        if self._gp_state is not None:
+            dst = gp.state_dict()
+            keep = {k: v for k, v in self._gp_state.items()
+                    if not k.startswith("outcome_transform")
+                    and k in dst and dst[k].shape == v.shape}
+            gp.load_state_dict({**dst, **keep}, strict=False)
+        gp.eval()
+        return gp
+
+    def _record_surrogate(self, model: SingleTaskGP, *, step: int, phase: str):
+        """Snapshot the GP state_dict (CPU) so the surrogate is reconstructable offline."""
+        self.gp_states.append({
+            "step": step,
+            "phase": phase,
+            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+        })
+
+    def _optimize_acqf(self, model: SingleTaskGP, best_f: Tensor) -> Tensor:
         if self.acqf == "ucb":
             acqf = UpperConfidenceBound(model=model, beta=self.ucb_beta, maximize=False)
         else:
@@ -392,9 +265,8 @@ class BOSS:
                     raw_samples=self.raw_samples,
                 )
             else:
-                # Discrete local search over the integer rank lattice. Only
-                # evaluates the acquisition, so it works with the
-                # (non-differentiable) shortest-path kernels.
+                # Discrete local search over the integer rank lattice — only
+                # evaluates the acquisition, so it works with non-differentiable kernels.
                 cand, _ = optimize_acqf_discrete_local_search(
                     acq_function=acqf,
                     discrete_choices=self._discrete_choices,
@@ -404,40 +276,18 @@ class BOSS:
                 )
         return cand.detach()
 
-    def _to_int(self, x_std: Tensor) -> Tensor:
-        """Map [0,1]^D → {1,...,max_rank}^D (integer ranks)."""
-        x_unnorm = unnormalize(x_std, self.bounds_int)
-        return x_unnorm.round().clamp(1, self.max_rank).to(torch.int)
+    # ------------------------------------------------------------------
+    # Results
+    # ------------------------------------------------------------------
 
-    def _summarize(self) -> dict:
-        if not self.rows:
-            return {}
-        objective = self._get_objective(self.train_Y_rse, self.train_Y_cr).squeeze(-1)
-        best_idx = int(torch.argmin(objective).item())
-        best_x_int = self._to_int(self.train_X_std)[best_idx]
+    def get_results(self) -> dict:
+        """Raw training data. `X_std` is the GP's normalized input ([0,1]^D);
+        map it through `_to_int` for integer rank vectors (lossy — rounds)."""
         return {
-            "n_init": self.n_init,
-            "budget": self.budget,
-            "objective_lambda": self.lamda,
-            "best_idx": best_idx,
-            "best_x_int": best_x_int,
-            "best_adj": _triu_to_full(best_x_int, self.t_shape).int(),
-            "best_objective": float(objective[best_idx].item()),
+            "X_std": self.train_X_std,
+            "Y_rse": self.train_Y_rse,
+            "Y_cr": self.train_Y_cr,
+            "Y_feasible": self.train_Y_feas,
+            "Y_objective": self._get_objective(self.train_Y_rse, self.train_Y_cr),
+            "t": self.train_t,
         }
-
-    @staticmethod
-    def _atomic_write(path: Path | None, data: dict):
-        if path is None:
-            return
-        import json
-        # Preserve started_at written before boss.run() was called
-        try:
-            prev = json.loads(path.read_text())
-            if "started_at" in prev and "started_at" not in data:
-                data["started_at"] = prev["started_at"]
-        except Exception:
-            pass
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        tmp.replace(path)

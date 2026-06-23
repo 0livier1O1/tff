@@ -19,9 +19,7 @@ from pathlib import Path
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
-from app.config.algo_config import (
-    AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, TnALEConfig, RandomSearchConfig,
-)
+from app.config.algo_config import AlgoConfig, MABSSConfig
 from app.config.problem_config import ProblemConfig, mint_problem_id, now_iso
 from app.problem_io import load_problem, save_problem, runs_root, target_path_for, adj_path_for
 from app.utils import _script_alive
@@ -32,17 +30,20 @@ from app.utils import _script_alive
 # ---------------------------------------------------------------------------
 
 def parse_seeds(seeds_str: str) -> list[int]:
-    """Parse a CSV seed string with optional range notation ("1, ..., 5")."""
-    parts = [s.strip() for s in seeds_str.split(",")]
+    """Parse a comma-separated seed string with inclusive range notation:
+    "1, 3-5, 7" -> [1, 3, 4, 5, 7]. Order preserved, duplicates dropped;
+    malformed parts are ignored."""
     raw: list[int] = []
-    for i, p in enumerate(parts):
-        if p.isdigit():
-            raw.append(int(p))
-        elif p == "..." and 0 < i < len(parts) - 1:
-            if parts[i - 1].isdigit() and parts[i + 1].isdigit():
-                prev, nxt = int(parts[i - 1]), int(parts[i + 1])
-                if prev < nxt:
-                    raw.extend(range(prev + 1, nxt))
+    for part in seeds_str.split(","):
+        part = part.strip()
+        if part.isdigit():
+            raw.append(int(part))
+        elif "-" in part:
+            lo_s, _, hi_s = part.partition("-")
+            lo_s, hi_s = lo_s.strip(), hi_s.strip()
+            if lo_s.isdigit() and hi_s.isdigit():
+                lo, hi = int(lo_s), int(hi_s)
+                raw.extend(range(lo, hi + 1) if lo <= hi else range(lo, hi - 1, -1))
     return list(dict.fromkeys(raw))
 
 
@@ -68,8 +69,8 @@ def mabss_cmd(acfg: MABSSConfig, problem: ProblemConfig, seed: int, algo_dir: Pa
     sub-policy are appended — no silent passthrough of unused params."""
     p = acfg.policy
     cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_mabss_experiment.py",
+        "conda", "run", "--no-capture-output", "-n", "tensors",
+        "python", "-u", "scripts/experiments/run_mabss_experiment.py",
         "--budget",             str(acfg.budget),
         "--warm-start-epochs",  str(acfg.decomp_epochs),
         "--n-cores",            str(problem.n_cores),
@@ -122,144 +123,29 @@ def mabss_cmd(acfg: MABSSConfig, problem: ProblemConfig, seed: int, algo_dir: Pa
     return cmd
 
 
-def boss_cmd(acfg: BOSSConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    acqf = acfg.policy.split("-")[1]  # boss-ei → ei
-    cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_boss_experiment.py",
-        "--n-cores",    str(problem.n_cores),
-        "--max-rank",   str(problem.max_rank),
-        "--seed",       str(seed),
-        "--budget",     str(acfg.budget),
-        "--n-init",     str(acfg.n_init),
-        "--max-bond",   str(acfg.max_rank),
-        "--n-runs",     str(acfg.n_runs),
-        "--min-rse",    str(acfg.feasible_rse),
-        "--maxiter-tn", str(acfg.decomp_epochs),
-        "--acqf",       acqf,
-        "--lamda",      str(acfg.lambda_fitness),
-        "--out-dir",    str(algo_dir),
+def unified_cmd(acfg: AlgoConfig, seed: int, algo_dir: Path) -> list[str]:
+    """Single entrypoint for the non-MABSS families (boss/cboss/tnale/random).
+
+    run_experiment.py reconstructs the AlgoConfig from the run's config.json and
+    builds the algorithm via app.algos.registry — so the per-family parameter
+    mapping lives in one place, not in a CLI builder per family."""
+    run_config = algo_dir.parents[1] / "config.json"  # runs/<run>/config.json
+    return [
+        "conda", "run", "--no-capture-output", "-n", "tensors",
+        "python", "-u", "scripts/experiments/run_experiment.py",
+        "--run-config",  str(run_config),
+        "--config-id",   acfg.config_id,
+        "--seed",        str(seed),
+        "--out-dir",     str(algo_dir),
     ]
-    cmd += _decomp_flags(acfg)
-
-    if acfg.policy == "boss-ucb":
-        cmd += ["--ucb-beta", str(acfg.ucb_beta)]
-
-    return cmd
-
-
-def cboss_cmd(acfg: CBOSSConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    acqf = acfg.policy.split("-")[1]  # cboss-cei → cei
-    cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_cboss_experiment.py",
-        "--n-cores",       str(problem.n_cores),
-        "--max-rank",      str(problem.max_rank),
-        "--seed",          str(seed),
-        "--budget",        str(acfg.budget),
-        "--n-init",        str(acfg.n_init),
-        "--init-design",   acfg.init_method,
-        "--max-bond",      str(acfg.max_rank),
-        "--n-runs",        str(acfg.n_runs),
-        "--feasible-rse",  str(acfg.feasible_rse),
-        "--min-rse",       str(acfg.feasible_rse),
-        "--maxiter-tn",    str(acfg.decomp_epochs),
-        "--acqf",          acqf,
-        "--lamda",         str(acfg.lambda_fitness),
-        "--kernel",        acfg.kernel,
-        "--var-strategy",  acfg.cboss_var_strategy,
-        "--wsp-mode",      acfg.cboss_wsp_mode,
-        "--gp-epochs",     str(acfg.cboss_gp_epochs),
-        "--freq-update",   str(acfg.cboss_freq_update),
-        "--gp-refine-epochs", str(acfg.cboss_gp_refine_epochs),
-        "--gp-tol",        str(acfg.cboss_gp_tol),
-        "--gp-patience",   str(acfg.cboss_gp_patience),
-        "--mc-samples",    str(acfg.cboss_mc_samples),
-        "--raw-samples",   str(acfg.cboss_raw_samples),
-        "--num-restarts",  str(acfg.cboss_num_restarts),
-        "--out-dir",       str(algo_dir),
-    ]
-    cmd += _decomp_flags(acfg)
-
-    if acfg.policy == "cboss-ficr":
-        cmd += ["--ficr-t", str(acfg.cboss_ficr_t)]
-    if not acfg.cboss_seek_feasible_first:
-        cmd.append("--no-seek-feasible-first")
-    return cmd
-
-
-def tnale_cmd(acfg: TnALEConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_tnale_experiment.py",
-        "--budget",          str(acfg.budget),
-        "--n-cores",         str(problem.n_cores),
-        "--max-rank",        str(problem.max_rank),
-        "--max-search-rank", str(acfg.max_rank),
-        "--maxiter-tn",      str(acfg.decomp_epochs),
-        "--n-runs",          str(acfg.n_runs),
-        "--min-rse",         str(acfg.feasible_rse),
-        "--topology",        acfg.tnale_topology,
-        "--local-step-init", str(acfg.tnale_local_step_init),
-        "--local-step-main", str(acfg.tnale_local_step_main),
-        "--interp-iters",    str(acfg.tnale_interp_iters),
-        "--local-opt-iter",  str(acfg.tnale_local_opt_iter),
-        "--init-sparsity",   str(acfg.tnale_init_sparsity),
-        "--lambda-fitness",  str(acfg.lambda_fitness),
-        "--init-method",     acfg.init_method,
-        "--n-sobol-init",    str(acfg.n_init),
-        "--seed",            str(seed),
-        "--out-dir",         str(algo_dir),
-    ]
-    cmd += _decomp_flags(acfg)
-
-    if acfg.tnale_topology == "ring":
-        cmd += [
-            "--n-perm-samples", str(acfg.tnale_n_perm_samples),
-            "--perm-radius",    str(acfg.tnale_perm_radius),
-        ]
-    if not acfg.tnale_interp_on:
-        cmd.append("--no-interp")
-    if not acfg.tnale_phase_change_reset:
-        cmd.append("--no-phase-change-reset")
-    return cmd
-
-
-def random_cmd(acfg: RandomSearchConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    cmd = [
-        "conda", "run", "-n", "tensors",
-        "python", "scripts/experiments/run_random_experiment.py",
-        "--n-cores",    str(problem.n_cores),
-        "--max-rank",   str(problem.max_rank),
-        "--seed",       str(seed),
-        "--budget",     str(acfg.budget),
-        "--max-bond",   str(acfg.max_rank),
-        "--n-runs",     str(acfg.n_runs),
-        "--min-rse",    str(acfg.feasible_rse),
-        "--maxiter-tn", str(acfg.decomp_epochs),
-        "--lamda",      str(acfg.lambda_fitness),
-        "--init-method", acfg.init_method,
-        "--n-sobol-init", str(acfg.n_init),
-        "--out-dir",    str(algo_dir),
-    ]
-    cmd += _decomp_flags(acfg)
-    return cmd
 
 
 def build_cmd(acfg: AlgoConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    """Dispatch on the concrete subclass. A wrong-family config raises here
-    instead of silently using defaults from another family."""
+    """MABSS keeps its bespoke CLI; every other family goes through the unified
+    config-driven entrypoint."""
     if isinstance(acfg, MABSSConfig):
         return mabss_cmd(acfg, problem, seed, algo_dir)
-    if isinstance(acfg, BOSSConfig):
-        return boss_cmd(acfg, problem, seed, algo_dir)
-    if isinstance(acfg, CBOSSConfig):
-        return cboss_cmd(acfg, problem, seed, algo_dir)
-    if isinstance(acfg, TnALEConfig):
-        return tnale_cmd(acfg, problem, seed, algo_dir)
-    if isinstance(acfg, RandomSearchConfig):
-        return random_cmd(acfg, problem, seed, algo_dir)
-    raise TypeError(f"Unknown AlgoConfig subclass: {type(acfg).__name__}")
+    return unified_cmd(acfg, seed, algo_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -294,9 +180,45 @@ def _resolve_problem(cfg: SidebarConfig, repo_root: Path) -> ProblemConfig:
 
 
 def _merge_algo_configs(existing: list[dict], new: list[dict]) -> list[dict]:
-    """Union by config_id — existing entries are preserved as-is, new ones appended."""
-    seen = {d["config_id"] for d in existing}
-    return existing + [d for d in new if d["config_id"] not in seen]
+    """Union by config_id. A resubmitted config (same config_id) *replaces* the
+    stored one, so re-running with edited parameters updates config.json (which
+    the job reads its params from). Existing configs absent from `new` are kept
+    in place (e.g. rerun-stale only loads the failed ones); brand-new configs
+    are appended in submission order."""
+    new_by_id = {d["config_id"]: d for d in new}
+    existing_ids = {d["config_id"] for d in existing}
+    merged = [new_by_id.get(d["config_id"], d) for d in existing]
+    merged += [d for d in new if d["config_id"] not in existing_ids]
+    return merged
+
+
+def _write_manifest(path: Path, pid_file: Path, root: Path, jobs: list[dict],
+                    max_gpus: int | None = None) -> None:
+    """(Over)write a fresh dispatch manifest atomically.
+
+    `max_gpus` caps the dispatcher's GPU pool (None = use every GPU); 1 confines
+    the whole run to a single GPU so jobs run sequentially."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(
+        {"pid_file": str(pid_file), "cwd": str(root),
+         "max_gpus": max_gpus, "jobs": jobs}, indent=2,
+    ))
+    tmp.replace(path)
+
+
+def _append_manifest_jobs(path: Path, new_jobs: list[dict]) -> None:
+    """Append jobs to a live dispatcher's manifest (atomic, dedup by algo_dir).
+
+    The running dispatcher re-reads the manifest each loop, so the appended jobs
+    are picked up without a restart."""
+    data = json.loads(path.read_text())
+    have = {j["algo_dir"] for j in data.get("jobs", [])}
+    data["jobs"] = data.get("jobs", []) + [
+        j for j in new_jobs if j["algo_dir"] not in have
+    ]
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(path)
 
 
 # ---------------------------------------------------------------------------
@@ -317,11 +239,6 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
     if len(labels) != len(set(labels)):
         st.sidebar.error("Algorithm config labels must be unique.")
         st.stop()
-
-    for _er in st.session_state.get("active_runs", []):
-        if _er["run_name"] == cfg.run_name and _script_alive(Path(_er["pid_file"])) is not False:
-            st.sidebar.error(f"`{cfg.run_name}` is already running. Refresh to check its status.")
-            st.stop()
 
     seeds = parse_seeds(cfg.seeds_str)
     if not seeds:
@@ -397,41 +314,70 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
         st.sidebar.warning("All requested seed/config combinations are already complete. Nothing to run.")
         st.stop()
 
-    # One dispatcher per run distributes these jobs across the free GPUs
-    # (one job per GPU) and writes run.pid itself. Replaces the old run.sh.
+    # One dispatcher per run distributes these jobs across the free GPUs (one job
+    # per GPU) and writes run.pid itself. If that dispatcher is still alive we
+    # just append the new jobs to its manifest — it re-reads it each loop and
+    # picks them up, no restart needed. Otherwise we (over)write the manifest and
+    # spawn a fresh dispatcher.
     pid_file = out_dir / "run.pid"
-    pid_file.unlink(missing_ok=True)
     manifest_path = out_dir / "dispatch.json"
-    manifest_path.write_text(json.dumps(
-        {"pid_file": str(pid_file), "cwd": str(ROOT), "jobs": manifest_jobs}, indent=2,
-    ))
+    dispatcher_alive = _script_alive(pid_file)
 
-    if cfg.use_tmux and cfg.tmux_session:
-        dispatch = (
-            f"cd {shlex.quote(str(ROOT))} && "
-            f"{shlex.quote(sys.executable)} -m app.gpu_dispatch {shlex.quote(str(manifest_path))}"
-        )
-        subprocess.run(
-            ["tmux", "send-keys", "-t", cfg.tmux_session, dispatch, "Enter"],
-            check=True,
-        )
-    else:
-        with open(out_dir / "run.log", "w") as log:
-            subprocess.Popen(
-                [sys.executable, "-m", "app.gpu_dispatch", str(manifest_path)],
-                cwd=str(ROOT),
-                stdout=log,
-                stderr=log,
+    appended = False
+    if dispatcher_alive and manifest_path.exists():
+        _append_manifest_jobs(manifest_path, manifest_jobs)
+        # If it exited between the check and the append, fall through and take
+        # over the manifest (which now holds these jobs; completed ones are
+        # skipped by the dispatcher's .done check).
+        appended = _script_alive(pid_file)
+
+    if not appended:
+        pid_file.unlink(missing_ok=True)
+        # Write a fresh manifest for a brand-new dispatcher. If we appended to a
+        # manifest whose dispatcher then died, keep it (old+new; .done skipped).
+        if not dispatcher_alive or not manifest_path.exists():
+            _write_manifest(manifest_path, pid_file, ROOT, manifest_jobs,
+                            max_gpus=None if cfg.parallel_gpus else 1)
+        if cfg.use_tmux and cfg.tmux_session:
+            dispatch = (
+                f"cd {shlex.quote(str(ROOT))} && "
+                f"{shlex.quote(sys.executable)} -m app.orchestration.gpu_dispatch {shlex.quote(str(manifest_path))}"
             )
+            subprocess.run(
+                ["tmux", "send-keys", "-t", cfg.tmux_session, dispatch, "Enter"],
+                check=True,
+            )
+        else:
+            with open(out_dir / "run.log", "w") as log:
+                subprocess.Popen(
+                    [sys.executable, "-m", "app.orchestration.gpu_dispatch", str(manifest_path)],
+                    cwd=str(ROOT),
+                    stdout=log,
+                    stderr=log,
+                )
 
+    # Merge into the Active Runs record (existing jobs + new, dedup by algo_dir)
+    # so an appended batch shows alongside the in-flight ones.
+    prev = next((r for r in st.session_state.get("active_runs", [])
+                 if r["run_name"] == cfg.run_name), None)
+    new_dirs = {j["algo_dir"] for j in jobs}
+    merged_jobs = ([j for j in prev["jobs"] if j["algo_dir"] not in new_dirs] + jobs
+                   if prev else jobs)
     run_record = {
         "run_name": cfg.run_name,
         "problem_id": problem.problem_id,
-        "jobs": jobs,
+        "jobs": merged_jobs,
         "pid_file": str(pid_file),
-        "submitted_at": time.time(),
+        "submitted_at": prev.get("submitted_at") if prev else time.time(),
     }
     with open(out_dir / "session_state.json", "w") as f:
         json.dump(run_record, f)
+    # Re-arm the completion email for this (re)launch — see notify_on_completion.
+    (out_dir / ".notified").unlink(missing_ok=True)
     _existing = [r for r in st.session_state.get("active_runs", []) if r["run_name"] != cfg.run_name]
     st.session_state["active_runs"] = _existing + [run_record]
+
+    if appended:
+        st.sidebar.success(
+            f"Added {len(manifest_jobs)} job(s) to the running `{cfg.run_name}`."
+        )

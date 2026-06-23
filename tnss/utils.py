@@ -1,6 +1,26 @@
+import json
+from pathlib import Path
+
 import torch
 from torch import Tensor
-from botorch.models.transforms import Round, Normalize, ChainedInputTransform
+
+
+def atomic_write_json(path: Path | None, data: dict) -> None:
+    """Atomically write `data` as JSON to `path` (tmp file + replace); no-op if
+    `path` is None. A previously-written `started_at` is preserved when `data`
+    doesn't carry one, so progress files keep the run's original start time."""
+    if path is None:
+        return
+    path = Path(path)
+    try:
+        prev = json.loads(path.read_text())
+        if "started_at" in prev and "started_at" not in data:
+            data["started_at"] = prev["started_at"]
+    except Exception:
+        pass
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(path)
 
 
 def triu_to_adj_matrix(triu: Tensor, diag: Tensor):
@@ -37,34 +57,24 @@ def triu_to_adj_matrix(triu: Tensor, diag: Tensor):
     q_idx_diag = torch.arange(q).tile(n).repeat_interleave(N)
     
     A[batch_idx2, q_idx_diag, rng, rng] = diag.unsqueeze(0).unsqueeze(0).expand(n, q, N).flatten().to(A)
-    
+
     return A
 
 
-def tf_unit_cube_int(D, bounds, init=False, from_integer=False):
-    if init:
-        # This increases probability of sampling cube edges (extreme values)
-        init_bounds = bounds.clone() 
-        init_bounds[0, :] -= 0.4999
-        init_bounds[1, :] += 0.4999
-    else:
-        init_bounds = bounds
+def to_int_ranks(X_std: Tensor, max_rank: int) -> Tensor:
+    """Map normalized points in [0,1]^D to integer ranks in [1, max_rank].
+    Shared by the full-upper-triangular families (BOSS/cBOSS/random)."""
+    ranks = 1.0 + X_std.double() * (float(max_rank) - 1.0)
+    return ranks.round().clamp(1, max_rank).to(torch.int)
 
-    tfs = {}
-    if not from_integer:
-        tfs["unnormalize_tf"] = Normalize(
-            d=init_bounds.shape[1],
-            bounds=init_bounds,
-            reverse=True
-        )       
-    tfs["round"] = Round(
-        integer_indices=[i for i in range(D)],
-        approximate=False
-    )
-    tfs["normalize_tf"] = Normalize(
-        d=init_bounds.shape[1],
-        bounds=init_bounds,
-    )
-    tf = ChainedInputTransform(**tfs)
-    tf.eval()
-    return tf
+
+def cr_of_normalized(X_std: Tensor, max_rank: int, t_shape: Tensor) -> Tensor:
+    """Deterministic compression ratio for normalized rank vectors (full
+    upper-triangular encoding): ``CR = (sum_i prod_j A_ij) / prod_i diag_i`` from the
+    rounded integer ranks — no decomposition. Returns one CR per row of ``X_std``
+    (flattened to ``(m, D)``). The single CR formula shared by BOSS's objective and
+    the cr_stratified init scorer (TnALE supplies its own topology-aware CR)."""
+    D = X_std.shape[-1]
+    ranks = to_int_ranks(X_std.reshape(-1, D), max_rank).double()
+    A = triu_to_adj_matrix(ranks, diag=t_shape).squeeze(1)   # (m, N, N)
+    return A.prod(dim=-1).sum(dim=-1) / t_shape.prod()

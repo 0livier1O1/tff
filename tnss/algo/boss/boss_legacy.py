@@ -14,7 +14,7 @@ from parallelbar import progress_starmap
 from tqdm import tqdm
 from torch import Tensor
 
-from botorch.models.transforms import Standardize
+from botorch.models.transforms import Standardize, Round, Normalize, ChainedInputTransform
 from botorch.models import ModelList
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize, normalize
@@ -40,11 +40,45 @@ from botorch.fit import fit_gpytorch_mll
 
 from tensors.networks.torch_tensor_network import TensorNetwork
 from tensors.decomp.fctn import decomp_pam
-from tnss.utils import triu_to_adj_matrix, tf_unit_cube_int
+from tnss.utils import triu_to_adj_matrix
 from tnss.kernels.models import SingleTaskGP, CompressionRatio, ManhattanDistanceKernel
 
 
 torch.set_printoptions(sci_mode=False)
+
+
+def tf_unit_cube_int(D, bounds, init=False, from_integer=False):
+    """Integer-BO input transform (legacy BOSS only): unnormalize [0,1]^D -> [lo,hi],
+    round to integer ranks, then normalize back to [0,1]^D, so a continuous-acqf
+    optimizer only ever sees integer-snapped structures. ``init=True`` pads the bounds
+    by ~0.5 so the extreme ranks (cube edges) get full-width rounding bins;
+    ``from_integer=True`` skips the initial unnormalize."""
+    if init:
+        # This increases probability of sampling cube edges (extreme values)
+        init_bounds = bounds.clone()
+        init_bounds[0, :] -= 0.4999
+        init_bounds[1, :] += 0.4999
+    else:
+        init_bounds = bounds
+
+    tfs = {}
+    if not from_integer:
+        tfs["unnormalize_tf"] = Normalize(
+            d=init_bounds.shape[1],
+            bounds=init_bounds,
+            reverse=True,
+        )
+    tfs["round"] = Round(
+        integer_indices=[i for i in range(D)],
+        approximate=False,
+    )
+    tfs["normalize_tf"] = Normalize(
+        d=init_bounds.shape[1],
+        bounds=init_bounds,
+    )
+    tf = ChainedInputTransform(**tfs)
+    tf.eval()
+    return tf
 
 
 class FeasibleTN:
