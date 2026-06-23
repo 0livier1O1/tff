@@ -231,11 +231,10 @@ def cr_runtime_scatter(
     finals = (df.sort_values("n_evals")
                 .groupby(["run", "config_id", "seed"], as_index=False).last())
 
-    # Runtime for the point: time to *find* the incumbent for BOSS/TnALE (they
-    # keep evaluating worse candidates afterwards); MABSS builds incrementally,
-    # so its total runtime is the time-to-result.
-    finals["runtime"] = finals["inc_cum_time_s"].where(
-        finals["family"] != "mabss", finals["cum_time_s"])
+    # Runtime for the point: time to *find* the incumbent (the search keeps
+    # evaluating worse candidates afterwards, so incumbent time — not total — is
+    # the fair comparison).
+    finals["runtime"] = finals["inc_cum_time_s"]
 
     if threshold_mode == "hide":
         finals = finals[finals["inc_rse"] <= loss_threshold]

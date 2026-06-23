@@ -19,7 +19,7 @@ from pathlib import Path
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
-from app.config.algo_config import AlgoConfig, MABSSConfig
+from app.config.algo_config import AlgoConfig
 from app.config.problem_config import ProblemConfig, mint_problem_id, now_iso
 from app.problem_io import load_problem, save_problem, runs_root, target_path_for, adj_path_for
 from app.utils import _script_alive
@@ -48,7 +48,7 @@ def parse_seeds(seeds_str: str) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# CLI command builders — each takes one AlgoConfig + the resolved problem
+# CLI command builder — maps one AlgoConfig to its run_experiment.py invocation
 # ---------------------------------------------------------------------------
 
 def _decomp_flags(acfg: AlgoConfig) -> list[str]:
@@ -64,67 +64,8 @@ def _decomp_flags(acfg: AlgoConfig) -> list[str]:
     return flags
 
 
-def mabss_cmd(acfg: MABSSConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    """Build CLI args for a MABSS run. Only the flags relevant to the chosen
-    sub-policy are appended — no silent passthrough of unused params."""
-    p = acfg.policy
-    cmd = [
-        "conda", "run", "--no-capture-output", "-n", "tensors",
-        "python", "-u", "scripts/experiments/run_mabss_experiment.py",
-        "--budget",             str(acfg.budget),
-        "--warm-start-epochs",  str(acfg.decomp_epochs),
-        "--n-cores",            str(problem.n_cores),
-        "--max-rank",           str(problem.max_rank),
-        "--max-edge-rank",      str(acfg.max_rank),
-        "--stopping-threshold", str(acfg.mabss_stopping_threshold),
-        "--deterministic-eval",
-        "--dtype",              acfg.dtype,
-        "--seed",               str(seed),
-        "--policies",           p.replace("mabss-", ""),
-        "--out-dir",            str(algo_dir),
-    ]
-    cmd += _decomp_flags(acfg)
-
-    # GP surrogate — used by mabss-ucb and the GP-expert inside mabss-exp4
-    if p in ("mabss-ucb", "mabss-exp4"):
-        cmd += [
-            "--beta",         str(acfg.ucb_beta),
-            "--kernel-name",  acfg.kernel,
-            "--fixed-noise",  str(acfg.fixed_noise),
-        ]
-        if acfg.learn_noise:
-            cmd.append("--learn-noise")
-
-    # EXP3 weights — used by both EXP3 (directly) and EXP4 (per-expert)
-    if p in ("mabss-exp3", "mabss-exp4"):
-        cmd += [
-            "--exp3-gamma",        str(acfg.exp3_gamma),
-            "--exp3-decay",        str(acfg.exp3_decay),
-            "--exp3-reward-scale", str(acfg.mabss_exp3_reward_scale),
-        ]
-
-    # Context discretization + EXP4 weights — EXP4 only
-    if p == "mabss-exp4":
-        cmd += [
-            "--exp3-loss-bins",  str(acfg.exp3_loss_bins),
-            "--exp3-cr-bins",    str(acfg.exp3_cr_bins),
-            "--exp3-loss-cap",   str(acfg.mabss_exp3_loss_cap),
-            "--exp3-log-cr-cap", str(acfg.mabss_exp3_log_cr_cap),
-            "--exp4-gamma",      str(acfg.exp4_gamma),
-            "--exp4-decay",      str(acfg.exp3_decay),  # EXP4 shares decay
-            "--exp4-eta",        str(acfg.exp4_eta),
-        ]
-
-    if acfg.mabss_warm_start_method and acfg.mabss_warm_start_epochs > 0:
-        cmd += [
-            "--warm-start-method",        acfg.mabss_warm_start_method,
-            "--warm-start-decomp-epochs", str(acfg.mabss_warm_start_epochs),
-        ]
-    return cmd
-
-
 def unified_cmd(acfg: AlgoConfig, seed: int, algo_dir: Path) -> list[str]:
-    """Single entrypoint for the non-MABSS families (boss/cboss/tnale/random).
+    """Single entrypoint for every search family (boss/cboss/bess/ftboss/tnale/random).
 
     run_experiment.py reconstructs the AlgoConfig from the run's config.json and
     builds the algorithm via app.algos.registry — so the per-family parameter
@@ -138,14 +79,6 @@ def unified_cmd(acfg: AlgoConfig, seed: int, algo_dir: Path) -> list[str]:
         "--seed",        str(seed),
         "--out-dir",     str(algo_dir),
     ]
-
-
-def build_cmd(acfg: AlgoConfig, problem: ProblemConfig, seed: int, algo_dir: Path) -> list[str]:
-    """MABSS keeps its bespoke CLI; every other family goes through the unified
-    config-driven entrypoint."""
-    if isinstance(acfg, MABSSConfig):
-        return mabss_cmd(acfg, problem, seed, algo_dir)
-    return unified_cmd(acfg, seed, algo_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +225,7 @@ def launch_run(cfg: SidebarConfig, ROOT: Path) -> None:
             (algo_dir / "progress.json").unlink(missing_ok=True)
             (algo_dir / "gpu").unlink(missing_ok=True)
 
-            cmd = build_cmd(acfg, problem, seed, algo_dir)
+            cmd = unified_cmd(acfg, seed, algo_dir)
             cmd.extend(["--target-path", target_path, "--adj-path", adj_path])
 
             jobs.append({

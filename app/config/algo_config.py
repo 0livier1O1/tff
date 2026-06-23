@@ -1,8 +1,8 @@
 """
 algo_config.py — One configured run of a search policy.
 
-Four subclasses cover the four policy families. A config's *type* matches
-its family — a MABSSConfig cannot be a boss-ei. Switching policy across
+Each subclass covers one policy family. A config's *type* matches
+its family — a CBOSSConfig cannot be a boss-ei. Switching policy across
 families therefore replaces the config object entirely (see sidebar.py);
 the runner only passes CLI flags that are defined on the active subclass,
 so no unused parameters are silently forwarded.
@@ -21,7 +21,6 @@ from typing import Any
 # Policy table — order: family → policies in that family
 # ---------------------------------------------------------------------------
 
-MABSS_POLICIES = ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4"]
 BOSS_POLICIES  = ["boss-ei", "boss-ucb"]
 CBOSS_POLICIES = ["cboss-cei", "cboss-pf", "cboss-ficr"]
 BESS_POLICIES  = ["bess-cucb", "bess-tmse", "bess-sur", "bess-gsur"]
@@ -31,14 +30,12 @@ TNALE_POLICIES = ["tnale"]
 RANDOM_POLICIES = ["random"]
 
 POLICY_OPTIONS: list[str] = (
-    MABSS_POLICIES + BOSS_POLICIES + CBOSS_POLICIES + BESS_POLICIES
+    BOSS_POLICIES + CBOSS_POLICIES + BESS_POLICIES
     + FTBOSS_POLICIES + TNALE_POLICIES + RANDOM_POLICIES
 )
 
 
 def policy_family(policy: str) -> str:
-    if policy in MABSS_POLICIES:
-        return "mabss"
     if policy in BOSS_POLICIES:
         return "boss"
     if policy in CBOSS_POLICIES:
@@ -63,7 +60,7 @@ class AlgoConfig:
     config_id: str
     label: str
     policy: str
-    family: str  # "mabss" | "boss" | "tnale" | "random" — discriminator for JSON
+    family: str  # "boss" | "cboss" | "bess" | "ftboss" | "tnale" | "random" — discriminator for JSON
 
     # Shared search parameters — the same concept across every family, so they
     # live on the base class (one name, not boss_budget/cboss_budget/…). A family
@@ -108,48 +105,6 @@ class AlgoConfig:
     def algo_subdir(self) -> str:
         """Disk-safe slug: <id>_<policy_underscored>."""
         return f"{self.config_id}_{self.policy.replace('-', '_')}"
-
-
-# ---------------------------------------------------------------------------
-# MABSS
-# ---------------------------------------------------------------------------
-
-@dataclass(kw_only=True)
-class MABSSConfig(AlgoConfig):
-    family: str = "mabss"
-
-    budget: int = 50          # shared field, MABSS default differs
-    ucb_beta: float = 5.0     # shared field (GP-UCB / EXP4 exploration β)
-
-    mabss_warm_start_method: str | None = None
-    mabss_warm_start_epochs: int = 0
-
-    # GP surrogate (used by mabss-ucb and the GP-expert of mabss-exp4)
-    learn_noise: bool = False
-    fixed_noise: float = 1e-6
-
-    # EXP3
-    exp3_gamma: float = 0.2
-    exp3_decay: float = 0.95
-    exp3_loss_bins: int = 4
-    exp3_cr_bins: int = 4
-
-    # EXP4
-    exp4_gamma: float = 0.1
-    exp4_eta: float = 0.5
-
-    # Runtime constants
-    mabss_stopping_threshold: float = 1e-5
-    mabss_exp3_reward_scale: float = 0.05
-    mabss_exp3_loss_cap: float = 1.5
-    mabss_exp3_log_cr_cap: float = 8.0
-    dtype: str = "float32"
-
-    # MABSS-specific decomp defaults
-    decomp_method: str = "agd"
-    decomp_momentum: float = 0.9
-    decomp_epochs: int = 250
-
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +189,7 @@ class BESSConfig(FeasibilityGPConfig, AlgoConfig):
     bess_tmse_eps: float = 0.05             # tmse boundary band half-width (latent)
     bess_sur_obs_noise: float = 1.0         # sur/gsur Gaussian look-ahead τ² (regression only; classifier derives it from the probit Hessian, Supp. Result 2)
     bess_sur_ref_size: int = 512            # sur look-ahead reference points
+    bess_sur_weight: str = "none"           # (g)sur cost weight w(u): 'none' | 'incumbent' | 'improvement'
     bess_n_ref: int = 2048                  # reference design for the boundary-error E
 
 
@@ -342,7 +298,6 @@ class RandomSearchConfig(AlgoConfig):
 # ---------------------------------------------------------------------------
 
 _CONFIG_CLS = {
-    "mabss": MABSSConfig,
     "boss":  BOSSConfig,
     "cboss": CBOSSConfig,
     "bess":  BESSConfig,

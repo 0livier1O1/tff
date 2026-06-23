@@ -14,10 +14,6 @@ from tnss.utils import triu_to_adj_matrix
 from botorch.utils.transforms import unnormalize
 
 POLICY_COLORS = {
-    "mabss-greedy": "#4E79A7",
-    "mabss-ucb": "#E15759",
-    "mabss-exp3": "#59A14F",
-    "mabss-exp4": "#F28E2B",
     "boss-ei": "#9467BD",
     "boss-ucb": "#8C564B",
 }

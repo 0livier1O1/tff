@@ -38,10 +38,10 @@ GROUP_LABELS: dict[str, str] = {
 # Which families a group applies to (matches where its expander renders). None =
 # every family. Membership — not field presence — is the gate, because a group's
 # fields live on the base config and so exist on families that don't use them
-# (e.g. mabss has `kernel`/`mean` but no GP surrogate).
+# (e.g. tnale/random carry `kernel`/`mean` on the base config but have no GP surrogate).
 _GROUP_FAMILIES: dict[str, set[str] | None] = {
     "decomp": None,                                   # all families run a decomposition
-    "init":   {"boss", "cboss", "bess", "ftboss", "tnale", "random"},   # mabss has no init design
+    "init":   {"boss", "cboss", "bess", "ftboss", "tnale", "random"},
     "search": None,                                   # budget/max_rank are universal
     "gp":     {"boss", "cboss", "bess"},              # only the GP-surrogate families
 }

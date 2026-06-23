@@ -164,22 +164,30 @@ class ContourSUR(AcquisitionFunction):
       (:func:`_cl_lookahead_precision`), evaluated at the candidate's latent moments.
     """
 
-    def __init__(self, feas_gp, ref_X: Tensor, obs_noise: float = 1.0, link: str = "gaussian"):
+    def __init__(self, feas_gp, ref_X: Tensor, obs_noise: float = 1.0, link: str = "gaussian",
+                 weight_fn=None):
         super().__init__(model=feas_gp)
         assert link in ("gaussian", "probit"), f"link must be 'gaussian' or 'probit', got {link!r}"
         self.feas_gp = feas_gp
         self.link = link
         self.register_buffer("ref_X", ref_X)
         self.register_buffer("obs_noise", torch.as_tensor(obs_noise, dtype=torch.double))
-        # Cache the current latent moments over the reference design (independent
-        # of the candidate) and the current integrated error E_n.
+        # Cache the current latent moments and per-point boundary error over the
+        # reference design (all independent of the candidate).
         with torch.no_grad():
             feas_gp.eval()
             mu_r, sigma_r = _latent_moments(feas_gp, ref_X)
+        normal = torch.distributions.Normal(0.0, 1.0)
         self.register_buffer("mu_ref_abs", mu_r.abs())
         self.register_buffer("var_ref", sigma_r.square())
-        normal = torch.distributions.Normal(0.0, 1.0)
-        self.register_buffer("E_now", normal.cdf(-(mu_r.abs() / sigma_r)).mean())
+        self.register_buffer("E_pt", normal.cdf(-(mu_r.abs() / sigma_r)))   # (M,) per-point error
+        # Cost weight w(u) over the reference design: None = uniform (plain SUR);
+        # otherwise a non-negative per-point weight that masks (indicator) or grades
+        # (CR gap) the integrated error by the objective. Precomputed once — the
+        # reference design is fixed, so this adds no per-evaluation cost.
+        w = torch.ones_like(self.E_pt) if weight_fn is None else \
+            weight_fn(ref_X).to(self.E_pt).clamp_min(0.0)
+        self.register_buffer("ref_w", w)
         self._normal = normal
 
     @t_batch_mode_transform(expected_q=1)
@@ -203,7 +211,10 @@ class ContourSUR(AcquisitionFunction):
         reduction = k_rx.square() / (var_x + tau2).unsqueeze(0)             # (M, b)
         var_new = (self.var_ref.unsqueeze(1) - reduction).clamp_min(1e-12)  # (M, b)
         future_err = self._normal.cdf(-(self.mu_ref_abs.unsqueeze(1) / var_new.sqrt()))
-        return self.E_now - future_err.mean(dim=0)          # (b,) expected error reduction
+        # w(u)-weighted mean of the per-point error drop E_n(u) - E_{n+1}(u; x).
+        # ref_w = 1 reproduces the plain integrated SUR score E_n - mean_u E_{n+1}.
+        drop = self.E_pt.unsqueeze(1) - future_err          # (M, b)
+        return (self.ref_w.unsqueeze(1) * drop).mean(dim=0)  # (b,) expected weighted error reduction
 
 
 class ContourGSUR(AcquisitionFunction):
@@ -240,17 +251,23 @@ class ContourGSUR(AcquisitionFunction):
     inverse expected next-step probit Hessian at the candidate's latent moments.
     """
 
-    def __init__(self, feas_gp, obs_noise: float = 1.0, link: str = "gaussian"):
+    def __init__(self, feas_gp, obs_noise: float = 1.0, link: str = "gaussian",
+                 weight_fn=None):
         super().__init__(model=feas_gp)
         assert link in ("gaussian", "probit"), f"link must be 'gaussian' or 'probit', got {link!r}"
         self.feas_gp = feas_gp
         self.link = link
         self.register_buffer("obs_noise", torch.as_tensor(obs_noise, dtype=torch.double))
+        # Optional per-candidate cost weight w(x): None = uniform (plain gSUR);
+        # otherwise the indicator mask or CR gap, applied to the candidate directly
+        # (no reference design, so no coverage issue — see BESS._sur_weight_fn).
+        self.weight_fn = weight_fn
         self._normal = torch.distributions.Normal(0.0, 1.0)
 
     @t_batch_mode_transform(expected_q=1)
     def forward(self, X: Tensor) -> Tensor:
-        mu, sigma = _latent_moments(self.feas_gp, X.squeeze(-2))
+        x = X.squeeze(-2)
+        mu, sigma = _latent_moments(self.feas_gp, x)
         var = sigma.square()
         if self.link == "probit":
             tau2 = 1.0 / _cl_lookahead_precision(mu, var).clamp_min(1e-6)
@@ -260,4 +277,7 @@ class ContourGSUR(AcquisitionFunction):
         mu_abs = mu.abs()
         now_err = self._normal.cdf(-(mu_abs / var.sqrt()))
         future_err = self._normal.cdf(-(mu_abs / var_new.sqrt()))
-        return now_err - future_err                         # (b,) local error reduction
+        red = now_err - future_err                          # (b,) local error reduction
+        if self.weight_fn is not None:
+            red = self.weight_fn(x).to(red).clamp_min(0.0) * red   # w(x)-masked / -graded
+        return red

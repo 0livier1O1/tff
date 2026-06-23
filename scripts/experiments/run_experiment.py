@@ -6,8 +6,7 @@ reconstructs the `AlgoConfig` from the run's config.json, builds the algorithm
 through `app.algos.registry`, runs it, and writes the dashboard artifacts
 (traces.csv, decomp/contraction traces, family-specific npz/gp_states, .done).
 
-MABSS is not covered here — it's an env+policy loop with no single object and
-keeps run_mabss_experiment.py.
+(MABSS is retired from the dashboard; its algorithm code remains in tnss/algo/mabs/.)
 
 Usage
 -----

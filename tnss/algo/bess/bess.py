@@ -36,6 +36,7 @@ from tnss.algo.boss.means import make_mean
 from tnss.algo.boss.regression_gp import RegressionGP
 from tnss.algo.cboss.feasibility import FeasibilityGP, MAX_CONSEC_FIT_ERRORS, make_kernel
 from tnss.algo.bess.acquisitions import ContourUCB, TargetedMSE, ContourSUR, ContourGSUR, _latent_moments
+from tnss.algo.init_designs import sample_init_points
 
 _SQRT2 = 2.0 ** 0.5
 
@@ -107,6 +108,7 @@ class BESS(BOSSBase):
         tmse_eps: float = 0.05,
         sur_obs_noise: float = 1.0,
         sur_ref_size: int = 512,
+        sur_weight: str = "none",
         n_ref: int = 2048,
         decomp_method: str = "adam",
         init_lr: float | None = None,
@@ -146,6 +148,8 @@ class BESS(BOSSBase):
             f"rse_transform must be 'log' or 'identity', got {rse_transform!r}")
         assert acqf in ("cucb", "tmse", "sur", "gsur"), (
             f"acqf must be 'cucb', 'tmse', 'sur', or 'gsur', got {acqf!r}")
+        assert sur_weight in ("none", "incumbent", "improvement"), (
+            f"sur_weight must be 'none', 'incumbent', or 'improvement', got {sur_weight!r}")
         assert cucb_gamma_mode in ("constant", "adaptive"), (
             f"cucb_gamma_mode must be 'constant' or 'adaptive', got {cucb_gamma_mode!r}")
         self.surrogate_type = surrogate
@@ -156,6 +160,7 @@ class BESS(BOSSBase):
         self.tmse_eps = tmse_eps
         self.sur_obs_noise = sur_obs_noise
         self.sur_ref_size = sur_ref_size
+        self.sur_weight = sur_weight
         self.kernel = kernel
         self.mean = mean
         self.var_strategy = var_strategy
@@ -175,6 +180,16 @@ class BESS(BOSSBase):
         # search never evaluates these points.
         eng = SobolEngine(self.D, scramble=True, seed=seed)
         self._ref_X = eng.draw(n_ref).to(torch.double)
+
+        # SUR look-ahead reference subset. Default: a prefix of the Sobol cover. When
+        # the SUR weight masks/grades by CR, that uniform cover under-samples the
+        # low-CR region the weight cares about, so draw a CR-stratified subset instead.
+        if self.sur_weight == "none":
+            self._sur_ref_X = self._ref_X[:sur_ref_size]
+        else:
+            self._sur_ref_X = sample_init_points(
+                "cr_stratified", n=sur_ref_size, D=self.D, seed=seed, cr_fn=self._cr,
+                cr_warp_lambda=cr_warp_lambda, cr_pool_bias=cr_pool_bias).to(torch.double)
 
         # Regression surrogate: a stateful exact-GP builder over the same kernel/
         # mean config as the classifier. Built lazily-once here (factories are
@@ -229,10 +244,12 @@ class BESS(BOSSBase):
         if self.acqf == "tmse":
             acqf = TargetedMSE(feas, eps=self.tmse_eps)
         elif self.acqf == "sur":
-            acqf = ContourSUR(feas, ref_X=self._ref_X[:self.sur_ref_size],
-                              obs_noise=self._sur_obs_noise(feas), link=self._sur_link())
+            acqf = ContourSUR(feas, ref_X=self._sur_ref_X,
+                              obs_noise=self._sur_obs_noise(feas), link=self._sur_link(),
+                              weight_fn=self._sur_weight_fn(Y_cr, Y_feas))
         elif self.acqf == "gsur":
-            acqf = ContourGSUR(feas, obs_noise=self._sur_obs_noise(feas), link=self._sur_link())
+            acqf = ContourGSUR(feas, obs_noise=self._sur_obs_noise(feas), link=self._sur_link(),
+                               weight_fn=self._sur_weight_fn(Y_cr, Y_feas))
         else:  # cucb
             gamma = self._cucb_gamma(feas)
             acqf = ContourUCB(feas, gamma=gamma)
@@ -296,6 +313,28 @@ class BESS(BOSSBase):
         noise = float(feas.likelihood.noise.mean())
         stdv = float(feas.outcome_transform.stdvs.reshape(-1)[0])
         return noise * stdv ** 2
+
+    @torch.no_grad()
+    def _sur_weight_fn(self, Y_cr, Y_feas):
+        """Cost weight ``w(u)`` for the (g)SUR misclassification-volume look-ahead.
+
+        'none' -> uniform (plain SUR). 'incumbent' -> indicator on the cheaper-than-
+        incumbent region ``{psi(u) < psi_star}``. 'improvement' -> the CR gap
+        ``(psi_star - psi(u))^+`` (expected opportunity cost). ``psi`` is the
+        deterministic compression ratio :meth:`_cr`; ``psi_star`` the smallest CR
+        among feasible structures seen so far. Returns a callable mapping normalized
+        rank vectors to weights, or ``None`` (uniform) when the mode is 'none' or no
+        feasible incumbent exists yet (psi_star = +inf) — so the criterion reduces to
+        plain SUR until an incumbent appears."""
+        if self.sur_weight == "none":
+            return None
+        feas_mask = Y_feas.reshape(-1) == 1
+        if not bool(feas_mask.any()):
+            return None
+        psi_star = Y_cr.reshape(-1)[feas_mask].min()
+        if self.sur_weight == "incumbent":
+            return lambda Xn: (self._cr(Xn) < psi_star).to(psi_star.dtype)
+        return lambda Xn: (psi_star - self._cr(Xn)).clamp_min(0.0)
 
     def _post_observe(self, feas, X, Y_rse, Y_cr, Y_feas, b):
         if self.surrogate_type == "regression":

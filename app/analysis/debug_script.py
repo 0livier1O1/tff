@@ -6,8 +6,7 @@ target, builds the instance through `app.algos.registry.build_algo`, and calls
 `.run()` — no argparse, no artifact writing. Open it in VSCode and step into
 `tnss/algo/...` under the debugger.
 
-Supported for the single-`.run()` families (boss / cboss / random / tnale). MABSS
-is an env+policy loop with no single object and is not supported.
+Supported for the single-`.run()` families (boss / cboss / bess / ftboss / tnale / random).
 """
 from __future__ import annotations
 

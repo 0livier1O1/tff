@@ -693,7 +693,7 @@ def _render_debug_instance(repo_root: Path) -> None:
     cfg = runs[run]
     configs = [a for a in cfg["algo_configs"] if a.get("family") in SUPPORTED_FAMILIES]
     if not configs:
-        st.info("No debuggable algorithms in this run yet (MABSS is not supported).")
+        st.info("No debuggable algorithm configs in this run.")
         return
     labels = [f"{a['label']}  ·  {a['policy']}" for a in configs]
     idx = c_algo.selectbox("Algorithm", range(len(configs)),

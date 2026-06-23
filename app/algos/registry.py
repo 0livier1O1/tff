@@ -7,8 +7,7 @@ It now lives here once: `build_algo` constructs the algorithm from a config, and
 `save_results` writes the family-specific output artifacts. The runner, the
 unified `run_experiment.py`, and the debug-script generator all go through this.
 
-Covers the four single-`.run()` families (boss / cboss / tnale / random). MABSS
-is an env+policy loop with no single object and keeps its own runner/script.
+Covers the single-`.run()` families (boss / cboss / bess / ftboss / tnale / random).
 """
 from __future__ import annotations
 
@@ -100,7 +99,8 @@ def _build_bess(acfg, adj_np, target_np, seed):
         surrogate=acfg.bess_surrogate, rse_transform=acfg.bess_rse_transform,
         cucb_gamma_mode=acfg.bess_cucb_gamma_mode, cucb_gamma=acfg.bess_cucb_gamma,
         tmse_eps=acfg.bess_tmse_eps, sur_obs_noise=acfg.bess_sur_obs_noise,
-        sur_ref_size=acfg.bess_sur_ref_size, n_ref=acfg.bess_n_ref,
+        sur_ref_size=acfg.bess_sur_ref_size, sur_weight=acfg.bess_sur_weight,
+        n_ref=acfg.bess_n_ref,
         kernel=acfg.kernel, mean=acfg.mean, var_strategy=acfg.var_strategy,
         wsp_mode=acfg.wsp_mode, input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,
         gp_epochs=acfg.gp_epochs, freq_update=acfg.freq_update,
