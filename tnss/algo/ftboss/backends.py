@@ -115,6 +115,85 @@ def fit_ft_backend(backend, *, epochs: int, lr: float, max_grad_norm: float = 10
     return time.time() - t0
 
 
+def _adam_fit(params, loss_fn, *, epochs: int, lr: float, max_grad_norm: float = 10.0):
+    """One Adam loop over ``params`` minimizing ``-loss_fn()`` with the same robustness
+    guards as :func:`fit_ft_backend` (grad clip + rollback to the last finite-loss values
+    on divergence). Used for each stage of the Picheny two-stage fit."""
+    if not params:
+        return
+    opt = torch.optim.Adam(params, lr=lr)
+    last_good = None
+    for _ in range(epochs):
+        opt.zero_grad()
+        loss = -loss_fn()
+        if not torch.isfinite(loss):
+            if last_good is not None:
+                with torch.no_grad():
+                    for p, g in zip(params, last_good):
+                        p.copy_(g)
+            break
+        last_good = [p.detach().clone() for p in params]
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+        opt.step()
+
+
+def fit_picheny_backend(backend, *, D: int, epochs: int, lr: float) -> float:
+    """Two-stage fit of the Picheny space-time kernel (paper §5), **re-run every refit**
+    (the time params are re-estimated, not frozen for the whole search):
+
+      Stage 1 — estimate the time-only params (α, scale_G, η, ζ) from the *converged*
+        error trajectories ``g(t)=y(t)-y(t_last)`` (the init seeds run to full fidelity),
+        via the block-diagonal error-process likelihood ``kernel.temporal_logml``.
+      Stage 2 — freeze the time params and fit the rest (structure lengthscales θ_F,
+        process variance σ_F², the shared-anisotropy factor ρ, mean, likelihood noise) on
+        the full ``k_Y`` marginal likelihood.
+
+    Falls back to a single joint fit when no converged multi-point curve is available
+    (degenerate first refit). Leaves the backend frozen; returns elapsed seconds."""
+    t0 = time.time()
+    k = backend.kernel
+    backend.model.train(); backend.likelihood.train()
+    train_x = backend.model.train_inputs[0]
+    train_y = backend.model.train_targets
+
+    # Group rows into curves by rank vector; a curve is "converged" if it reaches the
+    # global max budget (the fully-decomposed init seeds), so its error trajectory is
+    # exact. Drop the trivially-zero endpoint (g(t_last)=0) from each.
+    ranks = train_x[:, :D]
+    _, inv = torch.unique(ranks, dim=0, return_inverse=True)
+    t_all = train_x[:, D]
+    t_max = t_all.max()
+    err_curves = []
+    for n in range(int(inv.max()) + 1 if inv.numel() else 0):
+        g_idx = torch.nonzero(inv == n, as_tuple=False).flatten()
+        if t_all[g_idx].max() < t_max - 1e-6:
+            continue
+        order = g_idx[torch.argsort(t_all[g_idx])]
+        t, y = t_all[order], train_y[order]
+        if t.numel() < 2:
+            continue
+        err_curves.append((t[:-1], (y - y[-1])[:-1]))
+
+    time_params = [k.raw_alpha, k.raw_scale_G, k.raw_eta, k.raw_zeta]
+    time_ids = {id(p) for p in time_params}
+    other_params = [p for p in backend.model.parameters() if id(p) not in time_ids]
+
+    if err_curves:
+        _adam_fit(time_params, lambda: k.temporal_logml(err_curves), epochs=epochs, lr=lr)
+        for p in time_params:
+            p.requires_grad_(False)
+        _adam_fit(other_params, backend.log_marginal_likelihood, epochs=epochs, lr=lr)
+        for p in time_params:
+            p.requires_grad_(True)
+    else:
+        _adam_fit(list(backend.model.parameters()),
+                  backend.log_marginal_likelihood, epochs=epochs, lr=lr)
+
+    backend.freeze()
+    return time.time() - t0
+
+
 def _curve_fn_from_train_x(train_x, D: int, curve_len: int):
     """Rebuild the deep kernel's query curve-provider from the saved training rows
     (``[ranks, budget, curve, t_obs]``): map each structure -> its curve columns, keyed

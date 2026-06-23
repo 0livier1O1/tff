@@ -76,7 +76,11 @@ def render_problem_section(cfg: SidebarConfig, repo_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _render_existing(cfg: SidebarConfig, problems: list[ProblemConfig]) -> None:
-    labels = {f"{p.problem_id}  —  {p.name}  ({p.kind})": p for p in problems}
+    # problem_id is the slugified name + a 4-hex hash, so showing both the id and the
+    # name repeats the name. Show the readable name + kind + just the hash suffix (to
+    # disambiguate same-named problems).
+    labels = {f"{p.name}  ({p.kind})  ·  {p.problem_id.rsplit('_', 1)[-1]}": p
+              for p in problems}
     selected_label = st.sidebar.selectbox("Saved problem", list(labels))
     p = labels[selected_label]
     cfg.problem_id = p.problem_id

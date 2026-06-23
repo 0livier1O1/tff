@@ -18,11 +18,21 @@ from plotly.subplots import make_subplots
 from scipy.stats import spearmanr
 
 from app.plotting.colors import colors_for, rgba
+from app.plotting.traces import TIMING_COMPONENTS
 
 _HEIGHT = 380
 # Compact vertical legend just past the right edge of the plotting area.
 _LEGEND = dict(orientation="v", x=1.01, xanchor="left", y=1.0, yanchor="top",
                font=dict(size=10))
+
+# Fixed colors for the per-step timing breakdown — here the phase (not the
+# family) sets the hue, so every algo's segments line up by colour.
+_PHASE_COLORS = {
+    "Decomposition": "#4c78a8",
+    "GP fit": "#f58518",
+    "Acquisition": "#54a24b",
+    "Other": "#bab0ac",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +462,69 @@ def candidate_cr_rank(d: pd.DataFrame, label: str) -> go.Figure:
     fig.update_yaxes(rangemode="nonnegative", showgrid=False)
     fig.update_layout(template="plotly_white", height=300, title=label,
                       margin=dict(l=0, r=0, t=46, b=0), legend=_LEGEND)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Per-step computational-time breakdown
+# ---------------------------------------------------------------------------
+
+def phase_time_breakdown(df: pd.DataFrame, *, normalize: bool = False) -> go.Figure:
+    """Mean per-step time split into decomposition / GP fit / acquisition / other,
+    one stacked bar per config. `normalize=True` renders 100%-stacked bars (each
+    algo's share of its step time); otherwise the stack is mean seconds per step,
+    so totals are comparable across algos. `df` is the per-step frame from
+    `load_step_timings`."""
+    fig = go.Figure()
+    if df.empty:
+        return fig
+    # Mean over this config's (phase-filtered) steps → mean per-step contribution.
+    means = (df.groupby(["run", "config_id"], as_index=False)
+               [[c for c, _ in TIMING_COMPONENTS]].mean()
+               .set_index(["run", "config_id"]))
+    configs = _config_order(df)            # consistent family-grouped order
+    x = [label for _run, _cid, label, _fam in configs]
+    for col, name in TIMING_COMPONENTS:
+        y = [float(means.loc[(run, cid), col]) for run, cid, _l, _f in configs]
+        if max(y) < 1e-4:                  # drop a negligible component (no-GP random, ~0 residual)
+            continue
+        fig.add_trace(go.Bar(
+            x=x, y=y, name=name, marker_color=_PHASE_COLORS[name],
+            hovertemplate=f"%{{x}}<br>{name}: %{{y:.2f}}s<extra></extra>",
+        ))
+    layout = dict(template="plotly_white", height=_HEIGHT, barmode="stack",
+                  margin=dict(l=0, r=0, t=20, b=0), legend=_LEGEND)
+    if normalize:
+        layout["barnorm"] = "percent"
+    fig.update_layout(**layout)
+    fig.update_yaxes(title_text="Share of step time (%)" if normalize
+                     else "Mean time / step (s)", rangemode="tozero")
+    return fig
+
+
+def phase_time_area(df: pd.DataFrame) -> go.Figure:
+    """Stacked-area of one config's per-step time by phase across the search —
+    decomposition / GP fit / acquisition / other stack to the step's total
+    wall-clock. `df` is one config's step-ordered rows from `load_step_timings`."""
+    fig = go.Figure()
+    if df.empty:
+        return fig
+    x = list(range(1, len(df) + 1))        # 1-based evaluation index (within filter)
+    for col, name in TIMING_COMPONENTS:
+        y = df[col].to_numpy()
+        if y.max() < 1e-4:
+            continue
+        color = _PHASE_COLORS[name]
+        fig.add_trace(go.Scatter(
+            x=x, y=y, mode="lines", name=name, stackgroup="one",
+            line=dict(width=0.5, color=color), fillcolor=rgba(color, 0.6),
+            hovertemplate=f"step %{{x}}<br>{name}: %{{y:.2f}}s<extra></extra>",
+        ))
+    fig.update_layout(template="plotly_white", height=_HEIGHT,
+                      margin=dict(l=0, r=0, t=20, b=0), legend=_LEGEND,
+                      hovermode="x unified")
+    fig.update_xaxes(title_text="Evaluation step", rangemode="tozero")
+    fig.update_yaxes(title_text="Time / step (s)", rangemode="tozero")
     return fig
 
 

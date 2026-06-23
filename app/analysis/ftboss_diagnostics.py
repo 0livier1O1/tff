@@ -37,6 +37,7 @@ if str(ROOT) not in sys.path:
 from app.analysis.cboss_diagnostics import _algo_config, _auc, _bacc, _diag_dir
 from app.analysis.cboss_oos import load_or_build_oos
 from app.analysis.cboss_replay import to_std, train_overlap_mask
+from app.phases import INIT_PHASES
 
 N_OOS = 1000
 
@@ -78,6 +79,37 @@ def _ft_lengthscales(surrogate, D: int) -> np.ndarray | None:
             ls = m.lengthscale.detach().reshape(-1).cpu().numpy()
             if ls.size == D:                 # the structure kernel (not a feature kernel)
                 return ls
+    return None
+
+
+def _ft_hypers(surrogate) -> dict[str, float] | None:
+    """Scalar hyperparameters of the analytic freeze-thaw surrogate for one refit: the
+    temporal kernel's ``alpha``/``beta`` (its decay shape ``k_tau=beta^a/(tau+tau'+beta)^a``)
+    and per-curve ``noise``, the structure kernel's ``outputscale``, and the likelihood
+    ``noise``. ``None`` for the deep kernel (no FreezeThawKernel)."""
+    from tnss.kernels.freeze_thaw_kernel import FreezeThawKernel
+    k = surrogate.backend.kernel
+    if not isinstance(k, FreezeThawKernel):
+        return None
+    g = lambda t: float(t.detach().reshape(-1)[0])
+    out = {"alpha": g(k.alpha), "beta": g(k.beta), "curve_noise": g(k.noise),
+           "lik_noise": g(surrogate.backend.likelihood.noise)}
+    if hasattr(k.base_kernel, "outputscale"):        # ScaleKernel wrapping the structure kernel
+        out["outputscale"] = g(k.base_kernel.outputscale)
+    return out
+
+
+def _ft_warp(surrogate, D: int):
+    """Per-edge learned input-warp parameters ``(a, b)`` (Kumaraswamy CDF
+    ``w(x)=1-(1-x^a)^b``; a=b=1 is the identity), or ``None`` when input warping is off
+    / not a per-edge warp."""
+    from tnss.kernels.input_warp_kernel import InputWarpKernel
+    for m in surrogate.backend.kernel.modules():
+        if isinstance(m, InputWarpKernel):
+            a = m.a.detach().reshape(-1).cpu().numpy()
+            b = m.b.detach().reshape(-1).cpu().numpy()
+            if a.size == D:
+                return a, b
     return None
 
 
@@ -156,6 +188,14 @@ def generate_ftboss_diagnostics(config_dir: Path, oos_method: str = "adam") -> P
     else:
         ls_evol, ls = np.empty((0, 0)), np.array([])
 
+    # Scalar kernel hyperparameters per refit (alpha/beta/noises/outputscale) + the
+    # learned input warp (final), for the per-algo surrogate-detail plots.
+    hp = [_ft_hypers(rec["surrogate"]) for rec in recs]
+    hp = hp if all(h is not None for h in hp) else None
+    hp_get = lambda key: (np.array([h.get(key, np.nan) for h in hp]) if hp else np.array([]))
+    warp = _ft_warp(final["surrogate"], D)
+    warp_a, warp_b = warp if warp is not None else (np.array([]), np.array([]))
+
     out = _diag_dir(config_dir, oos_method)          # cboss_diagnostics._diag_dir -> analysis/ftboss/<m>
     out.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(metrics).to_csv(out / "oos_metrics.csv", index=False)
@@ -165,12 +205,17 @@ def generate_ftboss_diagnostics(config_dir: Path, oos_method: str = "adam") -> P
              p_post=proba[0][keep], p_final=proba[-1][keep], sigma_final=sigma_final[keep],
              mu_final=mu_final[keep],                # asymptote extrapolation (log-RSE)
              ls=ls, ls_evol=ls_evol, ls_steps=steps, proba_gen=proba_gen,
+             hp_steps=steps, hp_alpha=hp_get("alpha"), hp_beta=hp_get("beta"),
+             hp_curve_noise=hp_get("curve_noise"), hp_lik_noise=hp_get("lik_noise"),
+             hp_outputscale=hp_get("outputscale"), warp_a=warp_a, warp_b=warp_b,
              gp_step=steps, gp_phase=np.array(["ft"] * len(steps)),
              gp_fit_error=np.zeros(len(steps), bool))
 
-    # Acquisition trace — from the run's own per-step diagnostics (the "ft" rows).
+    # Acquisition trace — the run's per-step diagnostics for the *search* rows. New runs
+    # tag these "bo" (and the init design "init"); older runs tagged everything "ft", so
+    # exclude the init phases rather than match a single label.
     tr = pd.read_csv(config_dir / "traces.csv")
-    tr = tr[tr["phase"] == "ft"].reset_index(drop=True)
+    tr = tr[~tr["phase"].astype(str).isin(INIT_PHASES)].reset_index(drop=True)
     np.savez(out / "acqf_trace.npz",
              steps=tr["step"].to_numpy(float),
              acqf_value=tr.get("sur_value", pd.Series(np.full(len(tr), np.nan))).to_numpy(float),

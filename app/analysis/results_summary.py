@@ -14,7 +14,9 @@ import pandas as pd
 import streamlit as st
 
 from app.plotting import figures
-from app.plotting.traces import derive_trace_metrics, load_candidate_evals, load_traces
+from app.plotting.traces import (
+    derive_trace_metrics, load_candidate_evals, load_step_timings, load_traces,
+)
 from app.phases import INIT_PHASES, PHASE_ORDER
 
 
@@ -89,11 +91,18 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
     synthetic — efficiency needs the generating structure's CR. Plot axes
     autorange to the visible traces, so there are no axis-limit controls."""
     rse_max = float(df["inc_rse"].max())
+    # Default the feasibility cutoff to the run's configured feasible_rse (the
+    # same RSE the algorithms judged feasibility against), not the worst observed
+    # incumbent RSE. If several configs disagree, take the most permissive.
+    feas = df["feasible_rse"].dropna()
+    feas_default = float(feas.max()) if not feas.empty else rse_max
+    thr_max = max(rse_max, feas_default)
     can_efficiency = bool(df["efficiency"].notna().all())
 
     st.sidebar.markdown("### Graph settings")
     best_by = "feasible_cr" if st.sidebar.radio(
         "Best by", ["Objective", "Feasible CR"], horizontal=True, key="best_by",
+        index=1,
         help="What the incumbent / reported best tracks. 'Objective' = running-best "
              "CR + λ·RSE. 'Feasible CR' = lowest CR among evals with RSE below the "
              "loss threshold below (the feasibility cutoff).",
@@ -107,8 +116,8 @@ def _render_controls(df: pd.DataFrame) -> SummaryControls:
         )
         use_efficiency = metric == "Efficiency"
     loss_threshold = st.sidebar.number_input(
-        "Loss threshold (RSE)", min_value=0.0, max_value=rse_max, value=rse_max,
-        step=max(rse_max / 50, 1e-4), format="%.4f", key="loss_threshold",
+        "Loss threshold (RSE)", min_value=0.0, max_value=thr_max, value=feas_default,
+        step=max(thr_max / 50, 1e-4), format="%.4f", key="loss_threshold",
         help="Fades points above this RSE on the runtime scatter; also the "
              "feasibility cutoff for 'Best by → Feasible CR' (feasible iff RSE < this).",
     )
@@ -279,7 +288,45 @@ def render_seed_performance(repo_root: Path, keys: list, seed: int) -> None:
         loss_threshold=threshold, best_by=best_by, weight_rse=weight_rse,
     )
     render_summary_plots(df, controls, key_prefix=f"perf_{seed}")
+    _render_step_timings(repo_root, keys, seed, selected)
     _render_candidate_evals(repo_root, keys, seed, selected)
+
+
+def _render_step_timings(
+    repo_root: Path, keys: list, seed: int, selected: list[str],
+) -> None:
+    """Per-step computational-time breakdown for this seed: where each algo spends
+    its time (decomposition / GP fit / acquisition / other). A stacked bar compares
+    the split across algos; a stacked area (one algo at a time) shows it across the
+    search steps. Honors the same Trace-phases selection as the rest of the view."""
+    tm = load_step_timings(repo_root, [(r, s, c) for (r, s, c) in keys if s == seed])
+    tm = tm[tm["phase"].isin(selected)]
+    if tm.empty:
+        return
+    st.markdown("##### Computational time")
+
+    col_bar, col_area = st.columns(2)
+    with col_bar:
+        as_share = st.radio(
+            "Units", ["Seconds / step", "% share"], horizontal=True,
+            key=f"timing_units_{seed}",
+        ) == "% share"
+        st.caption("Mean time per search step split into decomposition (candidate "
+                   "eval), GP fit and acquisition — one bar per algo. 'Other' is "
+                   "wall-clock outside those three (e.g. TnALE has no GP/acquisition).")
+        st.plotly_chart(figures.phase_time_breakdown(tm, normalize=as_share),
+                        width="stretch", key=f"timing_bar_{seed}")
+    with col_area:
+        opts = {f"{r.label}  ·  {r.policy}": (r.run, r.config_id)
+                for r in tm[["run", "config_id", "label", "policy"]]
+                .drop_duplicates().itertuples(index=False)}
+        pick = st.selectbox("Algorithm", list(opts), key=f"timing_algo_{seed}")
+        run, cid = opts[pick]
+        sub = tm[(tm["run"] == run) & (tm["config_id"] == cid)].sort_values("step")
+        st.caption("Time per step split by phase across the search — areas stack "
+                   "to the step's total wall-clock.")
+        st.plotly_chart(figures.phase_time_area(sub),
+                        width="stretch", key=f"timing_area_{seed}")
 
 
 def _render_candidate_evals(

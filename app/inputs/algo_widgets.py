@@ -791,11 +791,20 @@ def _render_ftboss(acfg: FTBOSSConfig) -> None:
 
     with _group("Surrogate / GP", _algo_badge(acfg)):
         _sel(st, acfg, "ftboss_ft_kernel", "Curve kernel",
-             ["freeze_thaw", "deep_freeze_thaw"], f"ftboss_kernel_{cid}",
+             ["freeze_thaw", "deep_freeze_thaw", "picheny"], f"ftboss_kernel_{cid}",
              help="'freeze_thaw' = analytic Swersky-2014 kernel (asymptote field k_x = "
                   "Matérn-2.5 ARD); its asymptote is the t→∞ query. 'deep_freeze_thaw' = "
                   "learned DyHPO deep kernel over the observed curve; dense-only, and its "
-                  "'asymptote' is the predicted RSE at the max-fidelity budget.")
+                  "'asymptote' is the predicted RSE at the max-fidelity budget. 'picheny' = "
+                  "Picheny-Ginsbourger-2013 space-time product kernel k_F + σ(t)σ(t')·r_Gx·"
+                  "r_Gt (errors of different curves correlate); dense-only, two-stage fit, "
+                  "asymptote is the t→∞ query (k_G→0).")
+        if acfg.ftboss_ft_kernel == "picheny":
+            _chk(st, acfg, "ftboss_two_stage", "Two-stage fit", f"ftboss_two_stage_{cid}",
+                 help="Picheny's two-stage estimation (paper §5): fit the time params "
+                      "(α, scale_G, η, ζ) from the converged init-seed error curves, then fit "
+                      "the structure params on the full k_Y likelihood. Off = a single joint "
+                      "MLL fit of all params on the dense backend.")
         _sel(st, acfg, "ftboss_gp_fit", "GP fit backend",
              ["woodbury", "hierarchical", "dense"], f"ftboss_gp_fit_{cid}",
              help="How the analytic GP is fit — all give the same posterior, differing only "
@@ -813,8 +822,14 @@ def _render_ftboss(acfg: FTBOSSConfig) -> None:
              min_value=1, max_value=1000, help="Keep every k-th binned point (1 = off).")
         _num(c3, acfg, "ftboss_curve_max_points", "Max points/curve", f"ftboss_cmaxpts_{cid}",
              min_value=0, max_value=100000,
-             help="Cap GP rows per curve, log-spaced dense toward the converged tail "
-                  "(the asymptote-informative region). 0 = off. Main lever on GP fit cost.")
+             help="Cap GP rows per curve, log-spaced. 0 = off. Main lever on GP fit cost.")
+        _sel(st, acfg, "ftboss_curve_subsample", "Subsample density",
+             ["tail", "head"], f"ftboss_csub_{cid}",
+             help="Where the log-spaced points cluster. 'tail' = dense at the converged end "
+                  "(the asymptote-informative region — best for the freeze-thaw kernel). "
+                  "'head' = dense at the steep early part (best for *characterizing the curve "
+                  "shape*, e.g. the Picheny kernel's temporal correlation); equal-length curves "
+                  "then share time points (aligned).")
         st.markdown("*GP fit*")
         g1, g2 = st.columns(2)
         _num(g1, acfg, "ftboss_gp_epochs", "GP fit epochs", f"ftboss_gpep_{cid}",

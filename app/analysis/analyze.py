@@ -779,15 +779,11 @@ def _reset_steps(ev) -> np.ndarray:
 def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], seed: int) -> None:
     """Compare every generated cBOSS/BESS config on shared plots (one colour per algo),
     then drop to per-algo surrogate detail (tabs). Half-width plots throughout."""
-    # Hard-reset / fit-error table first.
+    # Per-algo summary table: OOS method + scored count, hard resets, fit errors.
     _render_resets_table(algos)
 
-    # Scored-count + replay-fidelity summary (per algo; the replay must still mirror
-    # the run's saved one-step-ahead pf for the diagnostics to be trustworthy).
-    st.caption("  ·  ".join(
-        f"**{a.label}** [OOS: {a.meta.get('oos_method', '?')}]: "
-        f"scored {a.meta['n_scored']}/{a.meta['n_scored'] + a.meta['n_excluded']}"
-        for a in algos))
+    # Replay-fidelity check (the replay must still mirror the run's saved one-step-ahead
+    # pf for the diagnostics to be trustworthy).
     bad = [a for a in algos if not (a.meta["pf_mae"] < 0.05 and a.meta["pf_spearman"] > 0.95)]
     if bad:
         st.warning("⚠ Replay diverges from the saved run for: "
@@ -854,7 +850,9 @@ def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], see
     # Per-algo surrogate detail — tabs (the section is an expander; expanders can't
     # nest). Each tab: signed-distance, lengthscale-evolution, and the per-algo
     # acquisition value (kept off the shared plots since acqf scales aren't comparable).
-    st.markdown("###### Per-algorithm surrogate detail")
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.divider()
+    st.markdown("##### Per-algorithm surrogate detail")
     for tab, (i, a) in zip(st.tabs([f"{a.label} · {a.policy}" for a in algos]),
                            enumerate(algos)):
         with tab:
@@ -877,12 +875,30 @@ def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], see
                 st.plotly_chart(cf.acqf_value_single(
                     a.acq["steps"], a.acq["acqf_value"], a.acq["feasible"], a.acq["acqf_used"]),
                     width="stretch", key=f"cb_acq_{seed}_{i}")
+            # FTBOSS-only: the freeze-thaw kernel's own hyperparameters (temporal
+            # alpha/beta, noises, outputscale) and the learned input warp.
+            if "hp_alpha" in a.ev.files and a.ev["hp_alpha"].size:
+                hp_cols = st.columns(2)
+                with hp_cols[0]:
+                    st.caption("Freeze-thaw kernel hyperparameters across refits")
+                    st.plotly_chart(cf.ft_hyperparameters(a.ev),
+                                    width="stretch", key=f"cb_fthp_{seed}_{i}")
+                with hp_cols[1]:
+                    if "warp_a" in a.ev.files and a.ev["warp_a"].size:
+                        st.caption("Learned input warp per bond edge (dashed = identity)")
+                        st.plotly_chart(cf.ft_input_warp(a.ev, a.meta["n_cores"]),
+                                        width="stretch", key=f"cb_ftwarp_{seed}_{i}")
+                    else:
+                        st.caption("Input warping off (identity).")
 
-    # Algorithm-specific plots — half-width each.
+    # Algorithm-specific plots — half-width each. These apply only to a particular
+    # acquisition function (e.g. cBOSS's ficr), so they live in their own section.
     specific = [a for a in algos
                 if a.meta["acqf"] == "ficr" and np.isfinite(a.acq["infeasible_frac"]).any()]
     if specific:
-        st.markdown("###### Algorithm-specific")
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.divider()
+        st.markdown("##### Algorithm-specific")
         for i, a in enumerate(specific):
             cols = st.columns(2)
             with cols[0]:
@@ -896,16 +912,20 @@ def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], see
 
 
 def _render_resets_table(algos: list[SimpleNamespace]) -> None:
-    """One row per algo: the BO steps where its feasibility GP was hard-reset, plus
-    its NotPSDError count — replaces the per-panel reset markers."""
+    """One row per algo: which OOS set it was scored against (its own decomposition)
+    and how many structures were scored, plus the BO steps where its feasibility GP was
+    hard-reset and its NotPSDError count."""
     rows = []
     for a in algos:
         rs = _reset_steps(a.ev)
+        total = a.meta["n_scored"] + a.meta["n_excluded"]
         rows.append({
             "algorithm": a.label,
             "policy": a.policy,
+            "OOS": a.meta.get("oos_method", "?"),
+            "scored": f"{a.meta['n_scored']}/{total}",
             "hard-reset BO steps": ", ".join(str(int(s)) for s in rs) if rs.size else "—",
             "fit errors (NotPSD)": int(a.meta.get("n_fit_errors", 0)),
         })
-    st.caption("Hard resets (fresh full GP fit) and fitting errors per algorithm")
+    st.caption("OOS scoring, hard resets (fresh full GP fit) and fitting errors per algorithm")
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")

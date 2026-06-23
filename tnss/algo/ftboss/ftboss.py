@@ -54,7 +54,8 @@ from tnss.algo.boss.means import make_mean
 from tnss.algo.init_designs import sample_init_points
 from tnss.utils import atomic_write_json
 from tnss.algo.ftboss import acquisitions as ftacq
-from tnss.algo.ftboss.backends import FT_FITS, fit_ft_backend, make_ft_backend
+from tnss.algo.ftboss.backends import (FT_FITS, fit_ft_backend, fit_picheny_backend,
+                                       make_ft_backend)
 from tnss.algo.ftboss.surrogate import (DEEP_ASYM_BUDGET, FT_KERNELS, FTSurrogate, T_INF,
                                         encode_rows, log_subsample, make_ft_kernel,
                                         preprocess_curve)
@@ -104,7 +105,8 @@ class FTBOSS(BOSSBase):
         input_warp: bool = False,           # learned per-dim input warp on the rank features
         round_inputs: bool = False,         # snap rank features to the integer lattice in-kernel
         # --- FTBOSS-specific ------------------------------------------------
-        ft_kernel: str = "freeze_thaw",     # "freeze_thaw" | "deep_freeze_thaw"
+        ft_kernel: str = "freeze_thaw",     # "freeze_thaw" | "deep_freeze_thaw" | "picheny"
+        two_stage: bool = True,             # picheny only: paper's 2-stage fit (off = joint dense MLL)
         init_fidelity: int | None = None,   # tau_0: first partial decomp; None -> maxiter_tn // 10
         fidelity_step: int | None = None,   # delta_tau: epochs added per thaw; None -> maxiter_tn // 10
         max_fidelity: int | None = None,    # epoch CAP per structure (defaults to maxiter_tn)
@@ -114,7 +116,8 @@ class FTBOSS(BOSSBase):
         curve_len: int = 30,                # resample length for the deep kernel's curve branch
         curve_bin: int = 1,                 # block-average window to smooth the curve (1 = off)
         curve_stride: int = 1,              # keep every curve_stride-th binned point (1 = off)
-        curve_max_points: int = 64,         # cap points/curve, tail-dense log-spaced (0 = off)
+        curve_max_points: int = 64,         # cap points/curve, log-spaced (0 = off)
+        curve_subsample: str = "tail",      # log_subsample density: "tail" (asymptote) | "head" (curve shape)
         gp_epochs: int = 300,
         gp_lr: float = 0.05,
         # --- level-set acquisition -----------------------------------------
@@ -177,6 +180,7 @@ class FTBOSS(BOSSBase):
         self.input_warp = input_warp
         self.round_inputs = round_inputs
         self.ft_kernel = ft_kernel
+        self.two_stage = two_stage
         self.init_fidelity = init_fidelity
         self.fidelity_step = fidelity_step
         self.max_fidelity = maxiter_tn if max_fidelity is None else max_fidelity
@@ -187,6 +191,7 @@ class FTBOSS(BOSSBase):
         self.curve_bin = curve_bin
         self.curve_stride = curve_stride
         self.curve_max_points = curve_max_points
+        self.curve_subsample = curve_subsample
         self.gp_epochs = gp_epochs
         self.gp_lr = gp_lr
         self.stage1_acqf = stage1_acqf
@@ -237,7 +242,10 @@ class FTBOSS(BOSSBase):
         exploit; its rows carry observed-curve features and its "asymptote" is the
         prediction at the max-fidelity budget ``asym_budget=1.0``)."""
         deep = (self.ft_kernel == "deep_freeze_thaw")
-        gp_fit = "dense" if deep else self.gp_fit     # structured solves need the analytic kernel
+        picheny = (self.ft_kernel == "picheny")
+        # Structured (woodbury/hierarchical) solves need the additive analytic kernel; the
+        # deep and Picheny kernels have no block structure, so both run dense.
+        gp_fit = "dense" if (deep or picheny) else self.gp_fit
         ranks, budget, curve, t_obs, y = self._collect_training_points()
         train_x = encode_rows(self.ft_kernel, ranks, budget, curve, t_obs).float()
         train_y = y.float()
@@ -249,11 +257,19 @@ class FTBOSS(BOSSBase):
         likelihood = gpytorch.likelihoods.GaussianLikelihood()
         backend = make_ft_backend(gp_fit, train_x, train_y, kernel=kernel,
                                   mean_module=mean, likelihood=likelihood, D=self.D)
-        self._carried_gp_fit_time = fit_ft_backend(backend, epochs=self.gp_epochs, lr=self.gp_lr)
+        # Picheny can use either the paper's two-stage estimation (time params, then x
+        # params — ``two_stage``) or the single joint Adam loop over the full k_Y MLL like
+        # the other kernels. Both run on the dense backend.
+        if picheny and self.two_stage:
+            self._carried_gp_fit_time = fit_picheny_backend(
+                backend, D=self.D, epochs=self.gp_epochs, lr=self.gp_lr)
+        else:
+            self._carried_gp_fit_time = fit_ft_backend(
+                backend, epochs=self.gp_epochs, lr=self.gp_lr)
         surrogate = FTSurrogate(
             backend, D=self.D, rho_std=self._rho_std, curve_len=self.curve_len,
             curve_fn=(self._deep_curve_fn() if deep else None),
-            asym_budget=(DEEP_ASYM_BUDGET if deep else T_INF))
+            asym_budget=(DEEP_ASYM_BUDGET if deep else T_INF))   # picheny: σ(T_INF)→0 ⇒ k_Y→k_F
         assert surrogate.is_asymptote_posterior   # catch #2: regression asymptote, not a classifier latent
         self._record_surrogate(kernel, mean, likelihood, train_x, train_y)
         return surrogate
@@ -279,9 +295,10 @@ class FTBOSS(BOSSBase):
             "y_mu": float(self._y_mu), "y_sd": float(self._y_sd),
             "rho_std": float(self._rho_std),
             "build": {
-                # effective backend (deep kernel always runs dense); D is stored because
-                # the deep kernel's rows aren't D+1 wide, so reload can't infer it.
-                "gp_fit": ("dense" if self.ft_kernel == "deep_freeze_thaw" else self.gp_fit),
+                # effective backend (deep + picheny kernels always run dense); D is stored
+                # because the deep kernel's rows aren't D+1 wide, so reload can't infer it.
+                "gp_fit": ("dense" if self.ft_kernel in ("deep_freeze_thaw", "picheny")
+                           else self.gp_fit),
                 "ft_kernel": self.ft_kernel, "D": self.D,
                 "curve_len": self.curve_len, "max_rank": self.max_rank,
                 "input_warp": self.input_warp, "round_inputs": self.round_inputs,
@@ -314,7 +331,8 @@ class FTBOSS(BOSSBase):
                 e["curve"], curve_bin=self.curve_bin, curve_stride=self.curve_stride)
             if len(values) == 0:
                 continue
-            values, pos = log_subsample(values, pos, self.curve_max_points)
+            values, pos = log_subsample(values, pos, self.curve_max_points,
+                                        mode=self.curve_subsample)
             x_snap = normalize(e["x_int"].double().unsqueeze(0), self.bounds_int)  # (1,D)
             logv = np.log(np.clip(np.asarray(values, dtype=float), 1e-12, None))
             t_norm = np.clip(np.asarray(pos, dtype=float) / denom, 0.0, 1.0)
@@ -648,8 +666,12 @@ class FTBOSS(BOSSBase):
         rse, cr = entry["rse"], (entry["cr"] or 0.0)
         gp_time, sug_time = self._step_gp_time, self._step_suggest_time
         step = len(self.rows)
+        # Same phase vocabulary as every other family (app/phases.py): the initial design
+        # is "init" (hidden by default in analysis), the freeze-thaw search rounds are the
+        # "bo" phase — there is nothing FTBOSS-specific about the phase axis.
+        phase = getattr(self, "_row_phase", "bo")
         row = {
-            "step": step, "phase": "ft", "cr": cr, "rse": rse,
+            "step": step, "phase": phase, "cr": cr, "rse": rse,
             "step_loss": rse, "current_cr": cr,
             "objective": float(cr + self.lamda * rse), "objective_lambda": self.lamda,
             "feasible": int(rse <= self.feasible_rse), "feasible_rse": self.feasible_rse,
@@ -660,7 +682,7 @@ class FTBOSS(BOSSBase):
             **(self._pending_diag or {}),
         }
         self.rows.append(row)
-        self.decomp_traces.append({"step": step, "phase": "ft", "losses": list(new_losses)})
+        self.decomp_traces.append({"step": step, "phase": phase, "losses": list(new_losses)})
         self._pending_diag = None
 
     @torch.no_grad()
@@ -720,6 +742,7 @@ class FTBOSS(BOSSBase):
         repeated thaw wins, and a curve stops being thawed when the acquisition declines
         to pick it (catch #6)."""
         # 1. seed the basket -------------------------------------------------
+        self._row_phase = "init"
         seeds = self._init_points()
         for i, x in enumerate(seeds):
             self._observe(("new", x.unsqueeze(0)), full=True)  # init seeds run to full fidelity
@@ -728,6 +751,7 @@ class FTBOSS(BOSSBase):
         self._evict_cores(self.max_thawed_candidates)
 
         # 2. freeze-thaw rounds ---------------------------------------------
+        self._row_phase = "bo"
         surrogate = None
         for b in range(self.budget):
             self._step_gp_time = 0.0
@@ -740,7 +764,7 @@ class FTBOSS(BOSSBase):
             self._observe(cand)
             self._evict_cores(self.max_thawed_candidates, scores=self._last_evict_scores)
             self._log_step(b)
-            atomic_write_json(progress_file, {"phase": "ft", "step": b + 1,
+            atomic_write_json(progress_file, {"phase": "bo", "step": b + 1,
                                               "budget": self.budget, "oom": self._oom_count()})
 
         self._finalize_results()

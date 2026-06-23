@@ -19,9 +19,10 @@ from gpytorch.kernels import MaternKernel, ScaleKernel
 from tnss.kernels.deep_freeze_thaw_kernel import DeepFreezeThawKernel
 from tnss.kernels.freeze_thaw_kernel import FreezeThawKernel
 from tnss.kernels.input_warp_kernel import maybe_warp
+from tnss.kernels.picheny_kernel import PichenyKernel
 from tnss.kernels.round_kernel import maybe_round
 
-FT_KERNELS = ("freeze_thaw", "deep_freeze_thaw")
+FT_KERNELS = ("freeze_thaw", "deep_freeze_thaw", "picheny")
 
 # Asymptote query budget. Budgets are normalized so 1.0 = max fidelity. For the analytic
 # kernel a huge t makes the temporal kernel beta^a/(t+t'+beta)^a vanish, leaving the
@@ -50,6 +51,10 @@ def make_ft_kernel(kind: str, *, D: int, curve_len: int, max_rank: int = 1,
         return FreezeThawKernel(base_kernel=base, time_dim=D)
     if kind == "deep_freeze_thaw":
         return DeepFreezeThawKernel(D=D, curve_len=curve_len)
+    if kind == "picheny":
+        # Picheny–Ginsbourger product kernel over [ranks, budget]; input warp / rounding
+        # not wired here yet (ignored). Dense-only, asymptote = T_INF query (k_G→0).
+        return PichenyKernel(D=D)
     raise ValueError(f"ft_kernel must be one of {FT_KERNELS}, got {kind!r}")
 
 
@@ -77,28 +82,36 @@ def preprocess_curve(curve, *, curve_bin: int = 1, curve_stride: int = 1):
     return c, pos
 
 
-def log_subsample(values, pos, n_max: int):
-    """Cap an (already smoothed/thinned) curve to at most ``n_max`` points, spaced
-    log-densely toward the *tail*.
+def log_subsample(values, pos, n_max: int, mode: str = "tail"):
+    """Cap an (already smoothed/thinned) curve to at most ``n_max`` points, log-densely
+    spaced toward one end. ``n_max <= 0`` disables it.
 
-    The tail (large effort) carries the asymptote and has the smallest temporal
-    deviation ``k_tau(tau,tau) = beta^a/(2*tau+beta)^a + sigma^2 -> 0``, so a tail
-    point is a near-noiseless measurement of ``f(x)`` — it is the most informative
-    region for the asymptote posterior, while the fast-moving early curve only needs a
-    few points to pin the decay shape ``(alpha, beta)``. Distances from the end are
-    geometric (dense near the end, sparse early); the first point is always kept so the
-    early shape is anchored. ``n_max <= 0`` disables it.
+    - ``mode="tail"`` (default): dense near the *end*. The tail carries the asymptote and
+      has the smallest temporal deviation (``k_tau(tau,tau) -> 0``), so a tail point is a
+      near-noiseless read of ``f(x)`` — the most informative region for the asymptote
+      posterior; the first point is kept to anchor the early shape. Best for the analytic
+      freeze-thaw kernel, whose feasibility read-off is the asymptote.
+    - ``mode="head"``: dense near the *start*. Curves are steep early and flat late, so to
+      *characterize the curve shape* (the temporal correlation the Picheny product kernel
+      learns) you want most points where it moves fastest; the last point is kept to anchor
+      the asymptote. Because the spacing is index-based, equal-length curves get identical
+      indices → identical normalized times, i.e. aligned time points across curves.
 
-    ``values``/``pos`` are the outputs of :func:`preprocess_curve`; returns the same
-    pair, subsampled."""
+    ``values``/``pos`` are the outputs of :func:`preprocess_curve`; returns the same pair,
+    subsampled."""
     v = np.asarray(values, dtype=float)
     p = np.asarray(pos)
     L = len(v)
     if n_max <= 0 or L <= n_max:
         return v, p
-    dist = np.unique(np.round(np.geomspace(1, L, n_max)).astype(int)) - 1
-    dist = dist[(dist >= 0) & (dist < L)]
-    idx = np.unique(np.concatenate([[0], (L - 1) - dist]))   # tail-dense + anchor index 0
+    base = np.unique(np.round(np.geomspace(1, L, n_max)).astype(int)) - 1   # dense near 0
+    base = base[(base >= 0) & (base < L)]
+    if mode == "head":
+        idx = np.unique(np.concatenate([base, [L - 1]]))        # dense at start + last anchor
+    elif mode == "tail":
+        idx = np.unique(np.concatenate([[0], (L - 1) - base]))  # dense at end + first anchor
+    else:
+        raise ValueError(f"log_subsample mode must be 'tail' or 'head', got {mode!r}")
     return v[idx], p[idx]
 
 
@@ -110,7 +123,7 @@ def encode_rows(kind: str, ranks: torch.Tensor, budget: torch.Tensor,
     ignores the curve / t_obs columns, so we simply don't append them.
     """
     budget = budget.unsqueeze(-1)
-    if kind == "freeze_thaw":
+    if kind in ("freeze_thaw", "picheny"):        # both consume [ranks, budget] only
         return torch.cat([ranks, budget], dim=-1)
     return torch.cat([ranks, budget, curve, t_obs.unsqueeze(-1)], dim=-1)
 

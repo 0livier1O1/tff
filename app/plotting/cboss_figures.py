@@ -256,6 +256,51 @@ def lengthscales_grouped(series, labels) -> go.Figure:
     return _base_layout(fig, barmode="group", bargroupgap=0.0)
 
 
+def ft_hyperparameters(ev) -> go.Figure:
+    """Freeze-thaw kernel hyperparameters across refits — the temporal-kernel decay shape
+    ``alpha``/``beta`` (top), and the noise / scale terms on a log axis (bottom): per-curve
+    noise, likelihood noise, and the structure-kernel outputscale. `ev` is an FTBOSS
+    ``oos_eval.npz`` carrying the ``hp_*`` arrays."""
+    s = np.asarray(ev["hp_steps"], float)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                        row_heights=[0.5, 0.5])
+    for key, nm, color in (("hp_alpha", "α", "#0072B2"), ("hp_beta", "β", "#D55E00")):
+        fig.add_trace(go.Scatter(x=s, y=ev[key], mode="lines", name=nm,
+                                 line=dict(color=color)), row=1, col=1)
+    for key, nm, color in (("hp_curve_noise", "curve noise σ²", "#009E73"),
+                           ("hp_lik_noise", "likelihood noise", "#CC79A7"),
+                           ("hp_outputscale", "outputscale", "#E69F00")):
+        y = np.asarray(ev[key], float) if key in ev.files else np.array([])
+        if y.size and np.isfinite(y).any():
+            fig.add_trace(go.Scatter(x=s, y=y, mode="lines", name=nm,
+                                     line=dict(color=color)), row=2, col=1)
+    fig.update_yaxes(title_text="α, β", row=1, col=1)
+    fig.update_yaxes(title_text="noise / scale", type="log", row=2, col=1)
+    fig.update_xaxes(title_text="BO step (refit)", row=2, col=1)
+    return _base_layout(fig)
+
+
+def ft_input_warp(ev, n_cores: int) -> go.Figure:
+    """Learned per-edge input warp — the Kumaraswamy CDF ``w(x)=1-(1-x^a)^b`` for each
+    bond edge over the normalized rank axis. The dashed diagonal is the identity (a=b=1,
+    no warp); curvature shows where the kernel stretches / compresses that rank axis. `ev`
+    carries the final ``warp_a``/``warp_b``."""
+    a = np.asarray(ev["warp_a"], float)
+    b = np.asarray(ev["warp_b"], float)
+    labels = edge_labels(n_cores)
+    x = np.linspace(0.0, 1.0, 60)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="identity",
+                             line=dict(color="#999", dash="dash"), hoverinfo="skip"))
+    for i, color in zip(range(a.size), PALETTE * (a.size // len(PALETTE) + 1)):
+        w = 1.0 - (1.0 - x ** a[i]) ** b[i]
+        fig.add_trace(go.Scatter(x=x, y=w, mode="lines", line=dict(color=color),
+                                 name=labels[i] if i < len(labels) else str(i)))
+    fig.update_xaxes(title_text="normalized rank")
+    fig.update_yaxes(title_text="warped value")
+    return _base_layout(fig)
+
+
 # ---------------------------------------------------------------------------
 # GP fit-error timeline
 # ---------------------------------------------------------------------------

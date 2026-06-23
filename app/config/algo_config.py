@@ -257,9 +257,12 @@ class FTBOSSConfig(AlgoConfig):
     decomp_momentum: float = 0.5
     freq_update: int = 1                      # refit the freeze-thaw GP every round
 
-    # Surrogate kernel (only the analytic 'freeze_thaw' is wired to the acquisition;
+    # Surrogate kernel ('freeze_thaw' and 'picheny' are wired to the acquisition;
     # 'deep_freeze_thaw' has no closed-form look-ahead yet).
     ftboss_ft_kernel: str = "freeze_thaw"
+    # picheny only: use the paper's two-stage fit (time params, then x params); off = a
+    # single joint MLL fit on the dense backend.
+    ftboss_two_stage: bool = True
 
     # Fidelity schedule. 0 = auto (= maxiter_tn // 10); tau_0 (seed) and delta_tau
     # (thaw increment) are deliberately separate knobs.
@@ -277,7 +280,8 @@ class FTBOSSConfig(AlgoConfig):
     ftboss_curve_len: int = 30               # deep-kernel curve-branch resample length
     ftboss_curve_bin: int = 1                # block-average smoothing window (1 = off)
     ftboss_curve_stride: int = 1             # thinning stride (1 = off)
-    ftboss_curve_max_points: int = 64        # cap points/curve, tail-dense log-spaced (0 = off)
+    ftboss_curve_max_points: int = 64        # cap points/curve, log-spaced (0 = off)
+    ftboss_curve_subsample: str = "tail"     # log_subsample density: "tail" (asymptote) | "head" (curve shape)
     ftboss_gp_epochs: int = 300              # marginal-likelihood fit epochs
     ftboss_gp_lr: float = 0.05
 
