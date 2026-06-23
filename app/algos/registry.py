@@ -121,6 +121,7 @@ def _build_ftboss(acfg, adj_np, target_np, seed):
         n_runs=acfg.n_runs, lamda=acfg.lambda_fitness, freq_update=acfg.freq_update,
         gp_fit=acfg.ftboss_gp_fit, mean=acfg.mean,
         input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,
+        rse_transform=acfg.ftboss_rse_transform,
         ft_kernel=acfg.ftboss_ft_kernel, two_stage=acfg.ftboss_two_stage,
         init_fidelity=(acfg.ftboss_init_fidelity or None),
         fidelity_step=(acfg.ftboss_fidelity_step or None),

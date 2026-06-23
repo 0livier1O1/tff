@@ -21,17 +21,27 @@ import pandas as pd
 import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
+from app.config.constants import (
+    SUR_REFSIZE_CONVERGENCE, SUR_REFSIZE_NOISE, SUR_REFSIZE_EFFPOINTS,
+    SUR_GSUR_FIDELITY,
+)
 from app.analysis.cboss_diagnostics import (
     generate_cboss_diagnostics, has_cboss_diagnostics, load_cboss_diagnostics,
 )
-from app.analysis.cboss_oos import oos_method_for_config
+from app.analysis.cboss_oos import oos_method_for_config, load_or_build_oos
 from app.analysis.cboss_diagnostics import _algo_config
+from app.analysis.sur_refsize import (
+    generate_sur_refsize, has_sur_refsize, is_bess_lookahead, load_sur_refsize,
+)
 from app.plotting import cboss_figures as cf
 from app.analysis.debug_script import write_debug_script, SUPPORTED_FAMILIES
 from app.analysis.diagnostics import (
     generate_gp_diagnostics, has_gp_diagnostics, load_gp_diagnostics, load_rse_cr,
 )
-from app.analysis.ftboss_diagnostics import generate_ftboss_diagnostics
+from app.analysis.ftboss_diagnostics import (
+    generate_ftboss_diagnostics, ft_structure_catalog, ft_curve_prediction,
+    ft_curve_evolution,
+)
 from app.plotting import figures
 from app.plotting.traces import load_traces
 from app.problem_io import load_problem
@@ -480,6 +490,11 @@ def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> list[t
         om = _cfg_oos_method(cd)
         if (cd / f"{r.family}_results.npz").exists() and not has_cboss_diagnostics(cd, om):
             out.append(("ftboss" if r.family == "ftboss" else "feas", cd, r.label, om))
+        # BESS look-ahead (sur/gsur): ref-size sensitivity + gSUR↔SUR fidelity, recomputed
+        # from the reloaded surrogates (no OOS / decomposition needed).
+        if ((cd / "gp_states.pt").exists() and is_bess_lookahead(cd)
+                and not has_sur_refsize(cd)):
+            out.append(("sur_refsize", cd, r.label, None))
     return out
 
 
@@ -508,6 +523,10 @@ def _render_diag_generate_all(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> N
             bar.progress(i / n, text=f"Asymptote OOS [{om}] — {lab}  "
                                      f"(decomposes OOS on first use)")
             generate_ftboss_diagnostics(cd, om)
+        elif kind == "sur_refsize":
+            bar.progress(i / n, text=f"SUR ref-size sensitivity — {lab}  "
+                                     f"(reloads surrogates, no decomposition)")
+            generate_sur_refsize(cd)
         else:
             bar.progress(i / n, text=f"Replay + OOS [{om}] — {lab}  "
                                      f"(decomposes OOS on first use)")
@@ -890,6 +909,43 @@ def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], see
                                         width="stretch", key=f"cb_ftwarp_{seed}_{i}")
                     else:
                         st.caption("Input warping off (identity).")
+            # FTBOSS-only: per-structure freeze-thaw curve prediction (needs the snapshots).
+            if a.family == "ftboss":
+                st.divider()
+                if (a.cd / "gp_states.pt").exists():
+                    _render_ftboss_curves(a, seed, i, runs_dir)
+                else:
+                    st.caption("Curve prediction needs gp_states.pt (cleansed — re-run to enable).")
+            # BESS look-ahead (sur/gsur): SUR reference-size sensitivity + gSUR↔SUR
+            # fidelity, recomputed offline from the reloaded surrogates. 2×2 grid; each
+            # plot's title carries the native help (?) bubble explaining how to read it.
+            if is_bess_lookahead(a.cd) and has_sur_refsize(a.cd):
+                st.divider()
+                st.caption("SUR reference-size sensitivity & gSUR↔SUR fidelity — recomputed offline")
+                rd = load_sur_refsize(a.cd)
+
+                def _plot(fig, key, title, how):
+                    st.markdown(f"**{title}**", help=how)
+                    st.plotly_chart(fig, width="stretch", key=key)
+
+                r1 = st.columns(2)
+                with r1[0]:
+                    _plot(figures.sur_refsize_convergence(rd), f"sur_conv_{seed}_{i}",
+                          "Score noise vs reference size M", SUR_REFSIZE_CONVERGENCE)
+                with r1[1]:
+                    _plot(figures.sur_refsize_noise(rd), f"sur_noise_{seed}_{i}",
+                          "Per-step decision noise (operating M)", SUR_REFSIZE_NOISE)
+                r2 = st.columns(2)
+                with r2[0]:
+                    _plot(figures.sur_refsize_effpoints(rd), f"sur_eff_{seed}_{i}",
+                          "Effective fraction of reference points", SUR_REFSIZE_EFFPOINTS)
+                with r2[1]:
+                    if "fid_steps" in rd.files:
+                        _plot(figures.sur_gsur_fidelity(rd), f"sur_fid_{seed}_{i}",
+                              "gSUR ↔ SUR fidelity", SUR_GSUR_FIDELITY)
+                    else:
+                        st.caption("gSUR↔SUR fidelity unavailable — this cache predates it. "
+                                   "Regenerate the SUR reference-size diagnostics to enable.")
 
     # Algorithm-specific plots — half-width each. These apply only to a particular
     # acquisition function (e.g. cBOSS's ficr), so they live in their own section.
@@ -909,6 +965,69 @@ def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], see
 
     # One cleanse action for every config's gp_states.pt on this page.
     _render_gp_states_cleanse(runs_dir, [a.cd for a in algos], seed, "feas")
+
+
+def _ftboss_oos(a: SimpleNamespace, seed: int, runs_dir: Path):
+    """The shared OOS set for an FTBOSS config — reused (not rebuilt) from the same cache
+    its diagnostics generation already decomposed, so its full `losses` curves come free."""
+    repo_root = runs_dir.parent.parent
+    algo = _algo_config(a.cd)
+    problem_id = json.loads((a.cd.parents[1] / "config.json").read_text())["problem_id"]
+    return load_or_build_oos(repo_root, problem_id, seed, algo, oos_method=a.oos_method)
+
+
+def _render_ftboss_curves(a: SimpleNamespace, seed: int, i: int, runs_dir: Path) -> None:
+    """FTBOSS-only: per-structure freeze-thaw curve prediction. A structure is picked from
+    either the in-sample basket (real observed curve, thaw levels) or the held-out OOS set
+    (never seen by the GP — a true extrapolation test, its actual curve free from the OOS
+    cache). Left: the forecast at the final GP (prediction + ±2σ + actual + strided kernel
+    points + asymptote + ρ). Right: how the forecast sharpens as more epochs are observed."""
+    algo = _algo_config(a.cd)
+    max_rank = int(algo["max_rank"])
+    rse_transform = algo.get("ftboss_rse_transform", "log")
+    st.markdown("**Freeze-thaw curve prediction**")
+    src = st.radio("Structures", ["In-sample", "OOS (held-out)"], horizontal=True,
+                   key=f"ftcv_src_{seed}_{i}")
+
+    if src == "In-sample":
+        cat = ft_structure_catalog(a.cd, max_rank)
+        curves = np.load(a.cd / "ftboss_results.npz", allow_pickle=True)["curves"]
+        labels = {f"#{c['idx']}  ·  {c['kind']}  ({c['n_levels']} lvl, {c['epochs_done']} ep)": c
+                  for c in cat}
+        pick = st.selectbox("Structure", list(labels), key=f"ftcv_pick_{seed}_{i}")
+        c = labels[pick]
+        x_int, actual, in_sample = c["x_int"], curves[c["idx"]], True
+    else:
+        oos = _ftboss_oos(a, seed, runs_dir)
+        if oos.get("losses") is None:
+            st.caption("OOS curves unavailable (cache predates trajectory storage — rebuild "
+                       "the OOS set to enable the held-out curve view).")
+            return
+        feas_rse = float(a.meta["feasible_rse"])
+        order = np.argsort(oos["cr"])                    # span the CR range in the picker
+        sel = order[np.unique(np.linspace(0, len(order) - 1, 40).astype(int))]
+        labels = {f"#{int(j)}  ·  CR={oos['cr'][j]:.3g}  RSE={oos['rse'][j]:.2g}"
+                  + ("  ✓feasible" if oos["rse"][j] < feas_rse else ""): int(j) for j in sel}
+        pick = st.selectbox("Structure (OOS)", list(labels), key=f"ftcv_oos_pick_{seed}_{i}")
+        j = labels[pick]
+        x_int, actual, in_sample = oos["X"][j], oos["losses"][j], False
+
+    d1 = ft_curve_prediction(a.cd, x_int, max_rank, actual_rse=actual,
+                             rse_transform=rse_transform)
+    d2 = ft_curve_evolution(a.cd, x_int, max_rank, actual_rse=actual,
+                            in_sample=in_sample, rse_transform=rse_transform)
+    cols = st.columns(2)
+    with cols[0]:
+        st.caption("Forecast at the final GP — prediction, ±2σ band, actual curve; thin "
+                   "verticals = strided points fed to the kernel; ◆ = t→∞ asymptote; ρ = "
+                   "feasibility threshold.")
+        st.plotly_chart(cf.ft_curve_forecast(d1, pick), width="stretch",
+                        key=f"ftcv_f1_{seed}_{i}")
+    with cols[1]:
+        st.caption("Prediction vs epochs observed — light→dark as more of the curve is seen "
+                   "(in-sample: thaw levels; OOS: refits). Black = actual; band = latest.")
+        st.plotly_chart(cf.ft_curve_evolution_fig(d2, pick), width="stretch",
+                        key=f"ftcv_f2_{seed}_{i}")
 
 
 def _render_resets_table(algos: list[SimpleNamespace]) -> None:

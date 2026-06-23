@@ -553,3 +553,86 @@ def ficr_weights(steps, c, t: float, reset_steps=()) -> go.Figure:
     fig.update_yaxes(title_text="weight", range=[-0.02, 1.05])
     add_reset_markers(fig, reset_steps)
     return _base_layout(fig)
+
+
+# ---------------------------------------------------------------------------
+# FTBOSS freeze-thaw curve prediction (per structure)
+# ---------------------------------------------------------------------------
+
+def _rho_line(fig: go.Figure, rho: float) -> None:
+    fig.add_hline(y=float(rho), line_dash="dot", line_color="#009E73", line_width=1.2,
+                  annotation_text="ρ (feasible)", annotation_position="bottom right",
+                  annotation_font_size=10)
+
+
+def ft_curve_forecast(d: dict, label: str = "") -> go.Figure:
+    """The freeze-thaw curve forecast for one structure at one snapshot: predicted RSE
+    mean + ±2σ band over normalized budget t∈[0,1], the actual curve, the strided points
+    the kernel actually conditions on (thin verticals), the feasibility threshold ρ, and
+    the t→∞ asymptote posterior (marker + error bar at the right edge). RSE on a log axis."""
+    t = np.asarray(d["t_grid"], float)
+    fig = go.Figure()
+    # ±2σ band (drawn first, behind everything).
+    fig.add_trace(go.Scatter(x=np.concatenate([t, t[::-1]]),
+                             y=np.concatenate([d["hi_rse"], d["lo_rse"][::-1]]),
+                             fill="toself", fillcolor="rgba(0,114,178,0.15)",
+                             line=dict(width=0), hoverinfo="skip", name="±2σ"))
+    # thin verticals at the strided kernel points (what bin/stride/subsample kept).
+    for to in np.asarray(d["t_obs"], float):
+        fig.add_vline(x=float(to), line_color="#999", line_width=0.5, opacity=0.30)
+    if len(d["t_obs"]):
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines", name="kernel points",
+                                 line=dict(color="#999", width=0.5)))
+    fig.add_trace(go.Scatter(x=t, y=d["mu_rse"], mode="lines", name="prediction",
+                             line=dict(color="#0072B2", width=2)))
+    if len(d["actual_rse"]):
+        fig.add_trace(go.Scatter(x=d["actual_t"], y=d["actual_rse"], mode="lines",
+                                 name="actual", line=dict(color="#000", width=1.6)))
+    if len(d["t_obs"]):
+        fig.add_trace(go.Scatter(x=d["t_obs"], y=d["obs_rse"], mode="markers",
+                                 name="observed", marker=dict(color="#D55E00", size=5)))
+    # Asymptote (t→∞) as a marker with an asymmetric ±2σ error bar past the right edge.
+    fig.add_trace(go.Scatter(
+        x=[1.06], y=[d["asym_rse"]], mode="markers", name="asymptote (t→∞)",
+        marker=dict(color="#6a3d9a", size=8, symbol="diamond"),
+        error_y=dict(type="data", symmetric=False,
+                     array=[d["asym_hi"] - d["asym_rse"]],
+                     arrayminus=[d["asym_rse"] - d["asym_lo"]], color="#6a3d9a")))
+    _rho_line(fig, d["rho"])
+    fig.update_xaxes(title_text="normalized budget t (1 = full fidelity)", range=[-0.02, 1.12])
+    fig.update_yaxes(title_text="RSE", type="log")
+    return _base_layout(fig, title=(f"{label} · step {d['step']}" if label else f"step {d['step']}"))
+
+
+def ft_curve_evolution_fig(d: dict, label: str = "") -> go.Figure:
+    """How the forecast changes as the structure is observed for longer: one predicted
+    curve per series (in-sample → per thaw level; OOS → per snapshot), light→dark by how
+    much was observed, the actual curve in black, the latest ±2σ band, the thaw frontiers
+    as faint verticals, and ρ. RSE on a log axis."""
+    t = np.asarray(d["t_grid"], float)
+    series = d["series"]
+    n = len(series)
+    shades = (pcolors.sample_colorscale("Viridis", list(np.linspace(0.15, 0.95, n)))
+              if n > 1 else ["#21908d"])
+    fig = go.Figure()
+    # ±2σ band of the last (most-observed) series only — avoids stacking bands.
+    if series:
+        last = series[-1]
+        fig.add_trace(go.Scatter(x=np.concatenate([t, t[::-1]]),
+                                 y=np.concatenate([last["hi_rse"], last["lo_rse"][::-1]]),
+                                 fill="toself", fillcolor="rgba(33,144,141,0.12)",
+                                 line=dict(width=0), hoverinfo="skip", showlegend=False))
+    for s, col in zip(series, shades):
+        name = (f"{s['epochs']} ep" if s["epochs"] is not None else f"step {s['step']}")
+        fig.add_trace(go.Scatter(x=t, y=s["mu_rse"], mode="lines", name=name,
+                                 line=dict(color=col, width=1.8)))
+        if s["frontier_t"] is not None:
+            fig.add_vline(x=float(s["frontier_t"]), line_color=col, line_width=0.8, opacity=0.4)
+    if len(d["actual_rse"]):
+        fig.add_trace(go.Scatter(x=d["actual_t"], y=d["actual_rse"], mode="lines",
+                                 name="actual", line=dict(color="#000", width=1.8)))
+    _rho_line(fig, d["rho"])
+    fig.update_xaxes(title_text="normalized budget t (1 = full fidelity)", range=[-0.02, 1.02])
+    fig.update_yaxes(title_text="RSE", type="log")
+    sub = "thaw levels" if d["in_sample"] else "refits (held-out)"
+    return _base_layout(fig, title=(f"{label} · {sub}" if label else sub))

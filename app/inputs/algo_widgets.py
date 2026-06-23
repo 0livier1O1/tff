@@ -558,7 +558,7 @@ def _render_feasibility_gp_group(acfg) -> None:
 
 def _render_boss(acfg: BOSSConfig) -> None:
     cid = acfg.config_id
-    with _group("Acquisition", _algo_badge(acfg), expanded=True):
+    with _group("Acquisition", _algo_badge(acfg)):
         if acfg.policy == "boss-ucb":
             acfg.ucb_beta = st.slider(
                 "UCB β", 0.1, 10.0, float(acfg.ucb_beta), 0.1,
@@ -603,7 +603,7 @@ def _render_boss(acfg: BOSSConfig) -> None:
 
 def _render_cboss(acfg: CBOSSConfig) -> None:
     cid = acfg.config_id
-    with _group("Acquisition", _algo_badge(acfg), expanded=True):
+    with _group("Acquisition", _algo_badge(acfg)):
         if acfg.policy == "cboss-ficr":
             acfg.cboss_ficr_t = st.select_slider(
                 "ficr t (feasibility interpolation)", options=[0.5, 1.0, 2.0],
@@ -657,10 +657,10 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
 def _render_bess(acfg: BESSConfig) -> None:
     """BESS learns the feasibility boundary (level-set estimation). Same feasibility-
     GP surrogate as cBOSS; the contour acquisition is selected by policy
-    (bess-cucb / bess-tmse / bess-sur)."""
+    (bess-cucb / bess-tmse / bess-sur / bess-gsur)."""
     cid = acfg.config_id
-    # The contour finder is set by the policy (bess-cucb / bess-tmse / bess-sur).
-    with _group("Acquisition", _algo_badge(acfg), expanded=True):
+    # The contour finder is set by the policy (bess-cucb / bess-tmse / bess-sur / bess-gsur).
+    with _group("Acquisition", _algo_badge(acfg)):
         st.markdown("*Contour acquisition*")
         if acfg.policy == "bess-cucb":
             _sel(st, acfg, "bess_cucb_gamma_mode", "γ mode", ["constant", "adaptive"],
@@ -677,15 +677,32 @@ def _render_bess(acfg: BESSConfig) -> None:
                  help="Boundary band half-width (latent units). Small ε concentrates sampling "
                       "tightly on the boundary; larger ε rewards a wider margin around it.")
         elif acfg.policy == "bess-sur":
-            s1, s2 = st.columns(2)
-            _num(s1, acfg, "bess_sur_obs_noise", "SUR obs noise τ²", f"bess_sur_noise_{cid}",
-                 min_value=0.0, step=0.1, format="%.2f",
-                 help="Probit implicit observation noise in the kriging variance update. "
-                      "1.0 = the probit link's unit latent noise.")
-            _num(s2, acfg, "bess_sur_ref_size", "SUR ref points", f"bess_sur_ref_{cid}",
+            if acfg.bess_surrogate == "regression":
+                s1, s2 = st.columns(2)
+                _num(s1, acfg, "bess_sur_obs_noise", "SUR obs noise τ²", f"bess_sur_noise_{cid}",
+                     min_value=0.0, step=0.1, format="%.2f",
+                     help="Constant Gaussian look-ahead noise τ² in the kriging variance "
+                          "update (Lyu et al. Supp. eq C.1). Regression surrogate only.")
+                ref_col = s2
+            else:
+                st.caption("Classifier look-ahead noise is derived per-candidate from the "
+                           "probit Hessian (Lyu et al. Supp. Result 2) — no τ² to set.")
+                ref_col = st
+            _num(ref_col, acfg, "bess_sur_ref_size", "SUR ref points", f"bess_sur_ref_{cid}",
                  min_value=16, max_value=8192, step=64,
                  help="Reference points for SUR's integrated-error look-ahead. Caps its "
                       "O((M+b)²) cost — the expensive acquisition.")
+        elif acfg.policy == "bess-gsur":
+            if acfg.bess_surrogate == "regression":
+                _num(st, acfg, "bess_sur_obs_noise", "gSUR obs noise τ²", f"bess_sur_noise_{cid}",
+                     min_value=0.0, step=0.1, format="%.2f",
+                     help="Constant Gaussian look-ahead noise τ² (Lyu et al. Supp. eq C.2). "
+                          "Regression surrogate only. gSUR is the pointwise, single-point "
+                          "form of SUR — no reference design.")
+            else:
+                st.caption("gSUR is the pointwise form of SUR (no reference design). "
+                           "Classifier look-ahead noise is derived per-candidate from the "
+                           "probit Hessian (Lyu et al. Supp. Result 2) — no τ² to set.")
         _num(st, acfg, "bess_n_ref", "Boundary-error ref points", f"bess_n_ref_{cid}",
              min_value=64, max_value=16384, step=64,
              help="Fixed reference design over which the integrated boundary error E (the "
@@ -811,6 +828,11 @@ def _render_ftboss(acfg: FTBOSSConfig) -> None:
                   "in linear algebra. 'woodbury'/'hierarchical' exploit the kernel's block "
                   "structure (O(Σtₙ³+N³), much faster); 'dense' is the plain gpytorch ExactGP "
                   "(O(M³)). Ignored for the deep kernel (always dense).")
+        _sel(st, acfg, "ftboss_rse_transform", "RSE target transform", ["log", "identity"],
+             f"ftboss_rse_transform_{cid}",
+             help="Transform applied to RSE before the surrogate sees it. 'log' fits on log-RSE "
+                  "— the natural multiplicative scale for AGD error (spans orders of magnitude). "
+                  "'identity' fits directly on raw RSE.")
         _sel(st, acfg, "mean", "GP mean function", BO_MEANS, f"ftboss_mean_{cid}", help=BO_MEAN_HELP)
         _chk(st, acfg, "input_warp", "Use Input Warping", f"ftboss_input_warp_{cid}", help=BO_INPUT_WARP_HELP)
         _chk(st, acfg, "round_inputs", "Round to integers", f"ftboss_round_inputs_{cid}", help=BO_ROUND_HELP)

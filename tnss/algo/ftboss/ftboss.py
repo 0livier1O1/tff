@@ -104,6 +104,7 @@ class FTBOSS(BOSSBase):
         mean: str = "constant",             # GP prior mean over structure (constant|linear|log_size)
         input_warp: bool = False,           # learned per-dim input warp on the rank features
         round_inputs: bool = False,         # snap rank features to the integer lattice in-kernel
+        rse_transform: str = "log",         # surrogate target transform: 'log' (log-RSE) | 'identity' (raw RSE)
         # --- FTBOSS-specific ------------------------------------------------
         ft_kernel: str = "freeze_thaw",     # "freeze_thaw" | "deep_freeze_thaw" | "picheny"
         two_stage: bool = True,             # picheny only: paper's 2-stage fit (off = joint dense MLL)
@@ -170,6 +171,8 @@ class FTBOSS(BOSSBase):
             f"stage1_acqf must be 'cucb' or 'tmse', got {stage1_acqf!r}")
         assert cucb_gamma_mode in ("constant", "adaptive"), (
             f"cucb_gamma_mode must be 'constant' or 'adaptive', got {cucb_gamma_mode!r}")
+        assert rse_transform in ("log", "identity"), (
+            f"rse_transform must be 'log' or 'identity', got {rse_transform!r}")
         assert stage2_mode in ("A", "B", "C"), (
             f"stage2_mode must be 'A', 'B', or 'C', got {stage2_mode!r}")
         assert gp_fit in FT_FITS, f"gp_fit must be one of {FT_FITS}, got {gp_fit!r}"
@@ -194,6 +197,7 @@ class FTBOSS(BOSSBase):
         self.curve_subsample = curve_subsample
         self.gp_epochs = gp_epochs
         self.gp_lr = gp_lr
+        self.rse_transform = rse_transform
         self.stage1_acqf = stage1_acqf
         self.cucb_gamma_mode = cucb_gamma_mode
         self.cucb_gamma = cucb_gamma
@@ -216,11 +220,11 @@ class FTBOSS(BOSSBase):
         # The basket: one entry per structure ever touched, holding its partial
         # decomposition state and observed loss curve. See _new_entry().
         self.basket: list[dict] = []
-        # Standardization of the log-RSE targets + standardized feasibility threshold,
-        # (re)set by _collect_training_points each refit.
+        # Standardization of the transformed-RSE targets (T = rse_transform) + standardized
+        # feasibility threshold, (re)set by _collect_training_points each refit.
         self._y_mu = 0.0
         self._y_sd = 1.0
-        self._rho_std = math.log(max(feasible_rse, 1e-12))
+        self._rho_std = float(self._t_rse(feasible_rse))
         self._last_evict_scores: dict | None = None
         self._pending_diag: dict | None = None
         # Per-step timing attributed to the row (0 during the seed phase).
@@ -311,7 +315,8 @@ class FTBOSS(BOSSBase):
 
         Each basket entry's raw curve is smoothed+thinned with ``preprocess_curve``
         FIRST (catch #10 — the temporal kernel assumes a smoothly-decaying curve), then
-        every kept point becomes a row ``[ranks_std, t_norm]`` with target ``log(RSE)``.
+        every kept point becomes a row ``[ranks_std, t_norm]`` with target ``T(RSE)`` (the
+        ``rse_transform``: log-RSE by default, or raw RSE under ``'identity'``).
         Ranks are snapped to the integer lattice so identical structures share identical
         kernel features (the same-curve mask). Targets are standardized and the
         feasibility threshold is carried into the same space as ``rho_std`` (catch #12).
@@ -319,7 +324,7 @@ class FTBOSS(BOSSBase):
         Returns ``ranks (m,D), budget (m,), curve (m,curve_len), t_obs (m,), y (m,)``.
         The analytic kernel ignores ``curve``/``t_obs`` (zeros); the deep kernel gets each
         row's structure observed-curve, resampled to ``curve_len`` and standardized in the
-        same log-RSE space as the targets."""
+        same transformed-RSE space as the targets."""
         deep = (self.ft_kernel == "deep_freeze_thaw")
         ranks_rows, t_rows, y_rows, row_ci = [], [], [], []
         entry_logcurve = []                                         # per-entry resampled raw log-curve (deep)
@@ -334,7 +339,7 @@ class FTBOSS(BOSSBase):
             values, pos = log_subsample(values, pos, self.curve_max_points,
                                         mode=self.curve_subsample)
             x_snap = normalize(e["x_int"].double().unsqueeze(0), self.bounds_int)  # (1,D)
-            logv = np.log(np.clip(np.asarray(values, dtype=float), 1e-12, None))
+            logv = self._t_rse(values)                  # T(RSE) per kept curve point
             t_norm = np.clip(np.asarray(pos, dtype=float) / denom, 0.0, 1.0)
             ci = len(entry_logcurve)
             if deep:
@@ -349,11 +354,11 @@ class FTBOSS(BOSSBase):
 
         ranks = torch.cat(ranks_rows, dim=0)                        # (m, D) double
         budget = torch.tensor(t_rows, dtype=torch.double)           # (m,)
-        y_raw = torch.tensor(y_rows, dtype=torch.double)            # (m,) log-RSE
+        y_raw = torch.tensor(y_rows, dtype=torch.double)            # (m,) T(RSE)
         self._y_mu = float(y_raw.mean())
         self._y_sd = float(y_raw.std().clamp_min(1e-6)) if y_raw.numel() > 1 else 1.0
         y = (y_raw - self._y_mu) / self._y_sd
-        self._rho_std = (math.log(max(self.feasible_rse, 1e-12)) - self._y_mu) / self._y_sd
+        self._rho_std = (float(self._t_rse(self.feasible_rse)) - self._y_mu) / self._y_sd
         if deep:                                                    # standardized curve per row
             cstd = (torch.stack(entry_logcurve) - self._y_mu) / self._y_sd
             curve = cstd[torch.tensor(row_ci)]                      # (m, curve_len)
@@ -361,10 +366,22 @@ class FTBOSS(BOSSBase):
             curve = torch.zeros(ranks.shape[0], self.curve_len, dtype=torch.double)
         return ranks, budget, curve, budget.clone(), y
 
+    def _t_rse(self, values):
+        """Surrogate target transform ``T(rse)``. ``'log'`` (default) fits on log-RSE —
+        the natural multiplicative scale for AGD decomposition error, which spans orders
+        of magnitude and decays roughly geometrically; ``'identity'`` fits directly on raw
+        RSE (e.g. when you do not want the log compression). Clips to keep ``T`` well
+        defined (``> 0`` for log). Accepts a numpy array or a scalar; returns a float array."""
+        arr = np.asarray(values, dtype=float)
+        if self.rse_transform == "log":
+            return np.log(np.clip(arr, 1e-12, None))
+        return np.clip(arr, 0.0, None)
+
     def _resample_logcurve(self, curve) -> Tensor:
-        """A structure's observed RSE curve as a fixed-length log-RSE vector for the deep
-        kernel's conv branch: log, clip, then linearly resample to ``curve_len``."""
-        c = np.log(np.clip(np.asarray(curve, dtype=float), 1e-12, None))
+        """A structure's observed RSE curve as a fixed-length transformed-RSE vector for the
+        deep kernel's conv branch: apply ``T`` (:meth:`_t_rse`), then linearly resample to
+        ``curve_len``."""
+        c = self._t_rse(curve)
         if len(c) <= 1:
             fill = float(c[0]) if len(c) else 0.0
             return torch.full((self.curve_len,), fill, dtype=torch.double)

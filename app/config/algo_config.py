@@ -24,7 +24,7 @@ from typing import Any
 MABSS_POLICIES = ["mabss-greedy", "mabss-ucb", "mabss-exp3", "mabss-exp4"]
 BOSS_POLICIES  = ["boss-ei", "boss-ucb"]
 CBOSS_POLICIES = ["cboss-cei", "cboss-pf", "cboss-ficr"]
-BESS_POLICIES  = ["bess-cucb", "bess-tmse", "bess-sur"]
+BESS_POLICIES  = ["bess-cucb", "bess-tmse", "bess-sur", "bess-gsur"]
 # FTBOSS policy = Stage-1 shortlist acquisition (Stage-2 is always SUR); see FTBOSSConfig.
 FTBOSS_POLICIES = ["ftboss-cucb", "ftboss-tmse"]
 TNALE_POLICIES = ["tnale"]
@@ -228,11 +228,11 @@ class BESSConfig(FeasibilityGPConfig, AlgoConfig):
     bess_surrogate: str = "classifier"      # 'classifier' | 'regression'
     bess_rse_transform: str = "log"         # regression target transform: 'log' | 'identity'
 
-    # Acquisition (the contour finder is selected by policy: bess-cucb/tmse/sur).
+    # Acquisition (the contour finder is selected by policy: bess-cucb/tmse/sur/gsur).
     bess_cucb_gamma_mode: str = "constant"  # 'constant' | 'adaptive' (paper §3.2)
     bess_cucb_gamma: float = 1.96           # straddle constant (constant mode)
     bess_tmse_eps: float = 0.05             # tmse boundary band half-width (latent)
-    bess_sur_obs_noise: float = 1.0         # sur probit implicit observation noise τ²
+    bess_sur_obs_noise: float = 1.0         # sur/gsur Gaussian look-ahead τ² (regression only; classifier derives it from the probit Hessian, Supp. Result 2)
     bess_sur_ref_size: int = 512            # sur look-ahead reference points
     bess_n_ref: int = 2048                  # reference design for the boundary-error E
 
@@ -277,6 +277,7 @@ class FTBOSSConfig(AlgoConfig):
 
     # Curve preprocessing + freeze-thaw GP fit.
     ftboss_gp_fit: str = "woodbury"          # fit backend: dense | woodbury | hierarchical
+    ftboss_rse_transform: str = "log"        # surrogate target transform: 'log' (log-RSE) | 'identity' (raw RSE)
     ftboss_curve_len: int = 30               # deep-kernel curve-branch resample length
     ftboss_curve_bin: int = 1                # block-average smoothing window (1 = off)
     ftboss_curve_stride: int = 1             # thinning stride (1 = off)

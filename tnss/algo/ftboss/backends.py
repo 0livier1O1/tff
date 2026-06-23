@@ -21,6 +21,7 @@ from typing import Protocol, runtime_checkable
 
 import gpytorch
 import torch
+from linear_operator.utils.errors import NanError, NotPSDError
 
 from tnss.algo.boss.means import make_mean
 from tnss.algo.ftboss.surrogate import (DEEP_ASYM_BUDGET, FTSurrogate, FreezeThawGP, T_INF,
@@ -89,11 +90,17 @@ def fit_ft_backend(backend, *, epochs: int, lr: float, max_grad_norm: float = 10
     """Maximize the (structured or dense) marginal likelihood by Adam over the kernel,
     mean and likelihood hyperparameters — one loop for all three backends.
 
-    Two robustness guards (a structured fit can drive the Matern lengthscale to extremes
-    far more easily than gpytorch's dense MLL): gradients are clipped, and if a step
-    diverges (non-finite loss) the optimizer stops and the last finite-loss hypers are
-    restored — so the surrogate is never frozen on NaN parameters. Leaves the backend
-    frozen (factorization cached); returns the elapsed seconds."""
+    Robustness guards (a structured fit can drive the Matern lengthscale to extremes
+    far more easily than gpytorch's dense MLL): gradients are clipped, and a diverging
+    step rolls back to the last finite-loss hypers and stops — so the surrogate is never
+    frozen on NaN parameters. Divergence is detected three ways, because a structured MLL
+    can blow up either by *returning* a non-finite loss OR by *raising* inside its
+    Cholesky once the hypers are already NaN (the loss is never returned), and because
+    grad clipping does not sanitise a NaN gradient (it makes the clip coefficient NaN, so
+    ``opt.step`` would write NaN into the params): (1) the loss eval is wrapped so a
+    Cholesky ``NanError``/``LinAlgError`` is treated as divergence; (2) a non-finite
+    returned loss triggers rollback; (3) a non-finite gradient skips the step (the params
+    are still the last good ones). Leaves the backend frozen; returns elapsed seconds."""
     mods = (backend.kernel, backend.mean_module, backend.likelihood)
     params = [p for mod in mods for p in mod.parameters()]
     opt = torch.optim.Adam(params, lr=lr)
@@ -101,8 +108,11 @@ def fit_ft_backend(backend, *, epochs: int, lr: float, max_grad_norm: float = 10
     last_good = None
     for _ in range(epochs):
         opt.zero_grad()
-        loss = -backend.log_marginal_likelihood()
-        if not torch.isfinite(loss):                  # diverged: restore last good hypers, stop
+        try:
+            loss = -backend.log_marginal_likelihood()
+        except (NanError, NotPSDError, torch.linalg.LinAlgError):
+            loss = None                               # Cholesky hit NaN/singular mid-eval
+        if loss is None or not torch.isfinite(loss):  # diverged: restore last good hypers, stop
             if last_good is not None:
                 for mod, sd in zip(mods, last_good):
                     mod.load_state_dict(sd)
@@ -110,6 +120,8 @@ def fit_ft_backend(backend, *, epochs: int, lr: float, max_grad_norm: float = 10
         last_good = [{k: v.detach().clone() for k, v in mod.state_dict().items()} for mod in mods]
         loss.backward()
         torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+        if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in params):
+            break                                     # poisoned grads — don't step into NaN
         opt.step()
     backend.freeze()
     return time.time() - t0
@@ -118,15 +130,19 @@ def fit_ft_backend(backend, *, epochs: int, lr: float, max_grad_norm: float = 10
 def _adam_fit(params, loss_fn, *, epochs: int, lr: float, max_grad_norm: float = 10.0):
     """One Adam loop over ``params`` minimizing ``-loss_fn()`` with the same robustness
     guards as :func:`fit_ft_backend` (grad clip + rollback to the last finite-loss values
-    on divergence). Used for each stage of the Picheny two-stage fit."""
+    on divergence, where divergence covers a raised Cholesky error, a non-finite loss, and
+    a non-finite gradient). Used for each stage of the Picheny two-stage fit."""
     if not params:
         return
     opt = torch.optim.Adam(params, lr=lr)
     last_good = None
     for _ in range(epochs):
         opt.zero_grad()
-        loss = -loss_fn()
-        if not torch.isfinite(loss):
+        try:
+            loss = -loss_fn()
+        except (NanError, NotPSDError, torch.linalg.LinAlgError):
+            loss = None
+        if loss is None or not torch.isfinite(loss):
             if last_good is not None:
                 with torch.no_grad():
                     for p, g in zip(params, last_good):
@@ -135,6 +151,8 @@ def _adam_fit(params, loss_fn, *, epochs: int, lr: float, max_grad_norm: float =
         last_good = [p.detach().clone() for p in params]
         loss.backward()
         torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+        if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in params):
+            break
         opt.step()
 
 
