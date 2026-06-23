@@ -35,7 +35,7 @@ from tnss.algo.boss.base import BOSSBase
 from tnss.algo.boss.means import make_mean
 from tnss.algo.boss.regression_gp import RegressionGP
 from tnss.algo.cboss.feasibility import FeasibilityGP, MAX_CONSEC_FIT_ERRORS, make_kernel
-from tnss.algo.bess.acquisitions import ContourUCB, TargetedMSE, ContourSUR, _latent_moments
+from tnss.algo.bess.acquisitions import ContourUCB, TargetedMSE, ContourSUR, ContourGSUR, _latent_moments
 
 _SQRT2 = 2.0 ** 0.5
 
@@ -61,15 +61,19 @@ class BESS(BOSSBase):
                   rse = rho to margin = 0 — keeping the acquisitions (which use
                   ``|mu|`` with the contour at 0) unchanged across both surrogates.
                   Ignored when ``surrogate='classifier'``.
-    acqf        : 'cucb' (contour-UCB / straddle), 'tmse' (targeted MSE), or
-                  'sur' (stepwise uncertainty reduction — look-ahead, expensive)
+    acqf        : 'cucb' (contour-UCB / straddle), 'tmse' (targeted MSE),
+                  'sur' (stepwise uncertainty reduction — integrated look-ahead,
+                  expensive), or 'gsur' (gradient SUR — local single-point
+                  look-ahead, pointwise and cheap; reuses ``sur_obs_noise``)
     cucb_gamma_mode : 'constant' (use cucb_gamma) or 'adaptive' (the paper's §3.2
                   data-driven gamma_n = IQR(mu) / (3 * mean sigma), recomputed each
                   step over the reference design)
     cucb_gamma  : exploration weight for cucb in 'constant' mode (straddle 1.96)
     tmse_eps    : boundary band half-width (latent units) for tmse
-    sur_obs_noise : probit implicit observation noise tau^2 in the sur kriging
-                  update (default 1.0)
+    sur_obs_noise : constant Gaussian look-ahead noise tau^2 for sur/gsur, used ONLY
+                  with the regression surrogate (eq C.1). With the classifier the
+                  look-ahead noise is derived per-candidate from the probit Hessian
+                  (Lyu et al. 2021 Supp. Result 2) and this value is ignored.
     sur_ref_size : reference points used by sur's integrated-error look-ahead
                   (subset of the n_ref diagnostic design; caps its O((M+b)^2) cost)
     n_ref       : size of the fixed reference design used to estimate the
@@ -140,8 +144,8 @@ class BESS(BOSSBase):
             f"surrogate must be 'classifier' or 'regression', got {surrogate!r}")
         assert rse_transform in ("log", "identity"), (
             f"rse_transform must be 'log' or 'identity', got {rse_transform!r}")
-        assert acqf in ("cucb", "tmse", "sur"), (
-            f"acqf must be 'cucb', 'tmse', or 'sur', got {acqf!r}")
+        assert acqf in ("cucb", "tmse", "sur", "gsur"), (
+            f"acqf must be 'cucb', 'tmse', 'sur', or 'gsur', got {acqf!r}")
         assert cucb_gamma_mode in ("constant", "adaptive"), (
             f"cucb_gamma_mode must be 'constant' or 'adaptive', got {cucb_gamma_mode!r}")
         self.surrogate_type = surrogate
@@ -226,7 +230,9 @@ class BESS(BOSSBase):
             acqf = TargetedMSE(feas, eps=self.tmse_eps)
         elif self.acqf == "sur":
             acqf = ContourSUR(feas, ref_X=self._ref_X[:self.sur_ref_size],
-                              obs_noise=self._sur_obs_noise(feas))
+                              obs_noise=self._sur_obs_noise(feas), link=self._sur_link())
+        elif self.acqf == "gsur":
+            acqf = ContourGSUR(feas, obs_noise=self._sur_obs_noise(feas), link=self._sur_link())
         else:  # cucb
             gamma = self._cucb_gamma(feas)
             acqf = ContourUCB(feas, gamma=gamma)
@@ -268,13 +274,23 @@ class BESS(BOSSBase):
         q25, q75 = torch.quantile(mu, torch.tensor([0.25, 0.75], dtype=mu.dtype))
         return float((q75 - q25) / (3.0 * sigma.mean()).clamp_min(1e-12))
 
+    def _sur_link(self) -> str:
+        """Look-ahead noise model for sur/gsur (Lyu et al. 2021 Supplementary Material).
+        'gaussian' — the constant fitted ``tau^2`` kriging downdate (eq C.1), used for
+        the regression GP. 'probit' — the per-candidate look-ahead noise derived from
+        the expected next-step probit Hessian (Result 2, eqs C.8/C.15), used for the
+        variational classifier (which has no Gaussian observation noise)."""
+        return "gaussian" if self.surrogate_type == "regression" else "probit"
+
     @torch.no_grad()
     def _sur_obs_noise(self, feas) -> float:
-        """Observation-noise variance ``tau^2`` for sur's kriging look-ahead, in the
-        same (latent posterior) units as the variance it downdates. For the
-        classifier this is the probit link's implicit unit noise (``sur_obs_noise``,
-        default 1.0). For the regression GP it is the *fitted* noise mapped back
-        through the outcome ``Standardize`` into the margin's units."""
+        """Constant observation-noise variance ``tau^2`` for the *Gaussian* (regression)
+        sur/gsur kriging look-ahead — the *fitted* GP noise mapped back through the
+        outcome ``Standardize`` into the margin's units (eq C.1). Consulted only when
+        :meth:`_sur_link` is 'gaussian'; under the 'probit' link (classifier) the
+        acquisition derives its own per-candidate noise from the probit Hessian and
+        this value is ignored. The ``sur_obs_noise`` field survives only as the
+        Gaussian fallback for non-regression surrogates without a fitted likelihood."""
         if self.surrogate_type != "regression":
             return self.sur_obs_noise
         noise = float(feas.likelihood.noise.mean())
