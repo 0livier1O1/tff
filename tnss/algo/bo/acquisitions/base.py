@@ -36,4 +36,10 @@ class Acquisition(Protocol):
     """Builds the per-step BoTorch acquisition from the current model + state."""
 
     def build(self, model: Model, state: SearchState) -> AcquisitionFunction:
+        """Construct this step's acquisition.
+
+        model : the freshly fitted BoTorch surrogate, read via ``model.posterior(X)``.
+        state : per-step context — incumbents, infeasible fraction, reference design,
+            and the deterministic compression-ratio function.
+        """
         ...

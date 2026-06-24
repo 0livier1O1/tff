@@ -27,6 +27,7 @@ from botorch.acquisition import AcquisitionFunction
 from botorch.optim import optimize_acqf_discrete_local_search
 
 from tnss.algo.bo.acquisitions import Acquisition, SearchState
+from tnss.algo.bo.search_space import SearchSpace
 from tnss.algo.bo.surrogates import Surrogate
 
 
@@ -50,18 +51,18 @@ class BOSS:
         budget: int = 200,                # search steps after the initial design
         max_rank: int = 10,               # upper bound on every bond rank
         n_init: int = 20,                 # size of the initial design
-        init_design: str = "cr_stratified",
+        init_design: str = "cr_stratified",  # init sampler: 'sobol' / 'lhs' / 'cr_stratified'
         objective_weight: float = 10.0,   # lambda in the CR + lambda*RSE objective
         # --- acquisition optimiser (BoTorch discrete local search) ---
-        num_restarts: int = 10,
-        raw_samples: int = 256,
+        num_restarts: int = 10,           # discrete local-search restarts
+        raw_samples: int = 256,           # initial random candidates per restart
         # --- objective evaluation (decomposition) ---
-        decomp_method: str = "agd",
-        decomp_epochs: int = 250,
+        decomp_method: str = "agd",       # FCTN optimiser: 'agd' / 'als' / 'pam' / 'adam' / 'sgd'
+        decomp_epochs: int = 250,         # max optimisation epochs per structure
         decomp_runs: int = 1,             # restarts per structure, best RSE kept
         # --- identity / reproducibility ---
-        label: str | None = None,
-        seed: int = 0,
+        label: str | None = None,         # readable run identity, e.g. 'reg-cucb-white-monkey'
+        seed: int = 0,                    # RNG seed (initial design + decomposition)
     ):
         self.target = target
         self.surrogate = surrogate
@@ -84,9 +85,11 @@ class BOSS:
         self.label = label
         self.seed = seed
 
-        # Integer rank lattice in normalised space, the discrete_choices for the
-        # acquisition optimiser. Built in chunk 2 (search space).
-        self.choices: list[Tensor] | None = None
+        # The discrete search space: encoding <-> ranks <-> adjacency, the
+        # deterministic CR, and the integer rank lattice the acquisition optimiser
+        # searches over (its discrete_choices).
+        self.space = SearchSpace(target, max_rank)
+        self.choices = self.space.choices
 
         # Observation history (the only state the algorithm itself needs). `x` are
         # the normalised rank vectors [0,1]^D fed to the surrogate; the surrogate
@@ -143,7 +146,7 @@ class BOSS:
         raise NotImplementedError  # init designs: sobol / lhs / cr_stratified
 
     def compression_ratio(self, x: Tensor) -> Tensor:
-        raise NotImplementedError  # deterministic psi(x) from the adjacency
+        return self.space.compression_ratio(x)
 
     def _reconstruction_error(self, x: Tensor) -> Tensor:
         raise NotImplementedError  # decomposition: best RSE over decomp_runs
