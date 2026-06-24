@@ -60,6 +60,8 @@ class TargetedMSE:
         reduction over a wider margin around it.
     """
 
+    name = "tmse"
+
     def __init__(self, eps: float = 0.05):
         self.eps = eps
 

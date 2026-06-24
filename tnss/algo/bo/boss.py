@@ -12,9 +12,10 @@ The loop stays faithful to BoTorch: the surrogate returns a botorch `Model`, the
 acquisition is a botorch `AcquisitionFunction`, and candidates are chosen with
 `optimize_acqf_discrete_local_search` over the integer rank lattice.
 
-This module is the skeleton: the public shape and the loop. Every step that
-needs real algorithm code raises `NotImplementedError` and is filled in by a
-later chunk. Results-saving and diagnostic logging are deliberately deferred.
+The loop is complete — initial design, surrogate fit, acquisition optimisation
+over the rank lattice, decomposition, and result selection. Only results-saving
+and diagnostic logging are deliberately deferred (`save_results` is a stub,
+decided later from the graphs we want).
 """
 from __future__ import annotations
 
@@ -22,11 +23,14 @@ from pathlib import Path
 
 import torch
 from torch import Tensor
+from torch.quasirandom import SobolEngine
 
 from botorch.acquisition import AcquisitionFunction
 from botorch.optim import optimize_acqf_discrete_local_search
 
 from tnss.algo.bo.acquisitions import Acquisition, SearchState
+from tnss.algo.bo.init_design import sample_init_design
+from tnss.algo.bo.labels import make_label
 from tnss.algo.bo.search_space import SearchSpace
 from tnss.algo.bo.surrogates import Surrogate
 
@@ -56,6 +60,7 @@ class BOSS:
         # --- acquisition optimiser (BoTorch discrete local search) ---
         num_restarts: int = 10,           # discrete local-search restarts
         raw_samples: int = 256,           # initial random candidates per restart
+        n_reference: int = 256,           # fixed reference-design size (SUR / adaptive cUCB gamma)
         # --- objective evaluation (decomposition) ---
         decomp_method: str = "agd",       # FCTN optimiser: 'agd' / 'als' / 'pam' / 'adam' / 'sgd'
         decomp_epochs: int = 250,         # max optimisation epochs per structure
@@ -77,12 +82,15 @@ class BOSS:
 
         self.num_restarts = num_restarts
         self.raw_samples = raw_samples
+        self.n_reference = n_reference
 
         self.decomp_method = decomp_method
         self.decomp_epochs = decomp_epochs
         self.decomp_runs = decomp_runs
 
-        self.label = label
+        # Readable run identity '{clas|reg}-{acqf}-{word}'; auto-generated from the
+        # composed components + seed when not given explicitly.
+        self.label = label or make_label(surrogate, acquisition, seed)
         self.seed = seed
 
         # The discrete search space: encoding <-> ranks <-> adjacency, the
@@ -90,6 +98,12 @@ class BOSS:
         # searches over (its discrete_choices).
         self.space = SearchSpace(target, max_rank)
         self.choices = self.space.choices
+
+        # Fixed reference design: a scrambled-Sobol cover of [0,1]^D drawn once, so
+        # it is comparable across steps. SUR integrates its boundary-error look-ahead
+        # over it and adaptive cUCB reads its latent moments; never decomposed.
+        self.reference = SobolEngine(self.space.dim, scramble=True, seed=seed).draw(
+            n_reference).double()
 
         # Observation history (the only state the algorithm itself needs). `x` are
         # the normalised rank vectors [0,1]^D fed to the surrogate; the surrogate
@@ -136,24 +150,68 @@ class BOSS:
         self._append(x, float(rse), float(cr), bool(rse <= self.threshold))
 
     def best(self) -> dict:
-        """The structure the run returns: the feasible one of smallest CR in the
-        constrained mode, or the one of smallest CR + lambda*RSE in the naive
-        mode. (Selection rule resolved in a later chunk.)"""
-        raise NotImplementedError  # chunk: result selection
+        """The structure the run returns: the feasible one of smallest CR; or, when
+        no feasible structure was found, the one of smallest objective h = CR +
+        lambda*RSE. The naive objective is only a means to a good feasible structure,
+        so the feasible-CR rule is the answer the run reports in either mode."""
+        cr, rse, feasible = self._cr(), self._rse(), self._feasible()
+        if bool(feasible.any()):
+            pool = feasible.nonzero(as_tuple=True)[0]      # indices of feasible points
+            idx = int(pool[cr[pool].argmin()])             # smallest CR among them
+        else:
+            idx = int((cr + self.objective_weight * rse).argmin())  # smallest objective h
+        ranks = self.space.to_ranks(self.x[idx])
+        return {
+            "x": self.x[idx],
+            "ranks": ranks,
+            "adjacency": self.space.to_adjacency(ranks),
+            "rse": self.rse[idx],
+            "cr": self.cr[idx],
+            "feasible": self.feasible[idx],
+            "step": idx,
+        }
 
     # =================================================== search space (chunk 2)
-    def _initial_design(self) -> list[Tensor]:
-        raise NotImplementedError  # init designs: sobol / lhs / cr_stratified
+    def _initial_design(self) -> Tensor:
+        """The n_init seed structures in [0,1]^D (sobol / lhs / cr_stratified); the
+        rows are decomposed to seed history. cr_stratified scores candidates by the
+        deterministic compression ratio."""
+        return sample_init_design(
+            self.init_design, n=self.n_init, D=self.space.dim, seed=self.seed,
+            cr_fn=self.space.compression_ratio)
 
     def compression_ratio(self, x: Tensor) -> Tensor:
         return self.space.compression_ratio(x)
 
-    def _reconstruction_error(self, x: Tensor) -> Tensor:
-        raise NotImplementedError  # decomposition: best RSE over decomp_runs
+    def _reconstruction_error(self, x: Tensor) -> float:
+        """Best RSE of the structure at normalised point `x`, by decomposing it on
+        the GPU (the loop's one expensive measurement). The decomposition import is
+        deferred to here so the package stays importable without cupy / cuquantum."""
+        from tnss.algo.bo.decomposition import reconstruction_error  # GPU-only; fail late
+
+        adjacency = self.space.to_adjacency(self.space.to_ranks(x))
+        return reconstruction_error(
+            self.target, adjacency, method=self.decomp_method,
+            max_epochs=self.decomp_epochs, n_runs=self.decomp_runs)
 
     # ============================================= per-step context (chunk 3+)
     def _search_state(self) -> SearchState:
-        raise NotImplementedError  # assemble SearchState (incumbents, reference, ...)
+        """Assemble the per-step context the acquisitions read from the observation
+        history: the incumbents (smallest feasible CR psi*_n; smallest objective
+        h*_n), the infeasible fraction, the deterministic CR function, and the fixed
+        reference design."""
+        cr, rse, feasible = self._cr(), self._rse(), self._feasible()
+        objective = cr + self.objective_weight * rse
+        incumbent_cr = float(cr[feasible].min()) if bool(feasible.any()) else float("inf")
+        best_objective = float(objective.min()) if objective.numel() else float("inf")
+        infeasible_fraction = float((~feasible).double().mean()) if feasible.numel() else 0.0
+        return SearchState(
+            compression_ratio=self.space.compression_ratio,
+            incumbent_cr=incumbent_cr,
+            best_objective=best_objective,
+            infeasible_fraction=infeasible_fraction,
+            reference=self.reference,
+        )
 
     # ===================================================== history (core, tiny)
     def _append(self, x: Tensor, rse: float, cr: float, feasible: bool) -> None:

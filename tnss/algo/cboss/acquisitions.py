@@ -55,39 +55,6 @@ class PFWeightedImprovement(AcquisitionFunction):
         return (self.best_cr - cr).clamp_min(0.0) * pf
 
 
-class OptimisticPFImprovement(AcquisitionFunction):
-    r"""Optimistic PF-weighted improvement (oFI):
-
-        a(x) = max(CR* - CR(x), 0) * Phi( mu(x) / sqrt(1 + var(x)) + beta )
-
-    Plain FI (:class:`PFWeightedImprovement`) weights the deterministic CR improvement
-    by ``P(feasible | x) = Phi(mu / sqrt(1 + var))`` — the exact feasibility probability —
-    and so explores only through the current estimate: because CR carries no posterior
-    variance, FI has no exploration term of its own and exploits structures already
-    believed feasible. ``oFI`` adds a UCB-style optimism bonus ``beta >= 0`` to the
-    deflated latent margin, inflating the feasibility probability toward feasible so the
-    search also probes cheap structures it is merely *uncertain* about. ``beta = 0``
-    recovers FI exactly (the bonus argument is then the FeasibilityGP's ``proba``).
-    """
-
-    def __init__(self, feas_gp, neg_cr, best_cr: float, beta: float = 1.0):
-        super().__init__(model=feas_gp)
-        self.feas_gp = feas_gp
-        self.neg_cr = neg_cr
-        self.register_buffer("best_cr", torch.as_tensor(best_cr, dtype=torch.double))
-        self.register_buffer("beta", torch.as_tensor(float(beta), dtype=torch.double))
-        self._normal = torch.distributions.Normal(0.0, 1.0)
-
-    @t_batch_mode_transform(expected_q=1)
-    def forward(self, X: Tensor) -> Tensor:
-        x = X.squeeze(-2)
-        post = self.feas_gp.posterior(x)
-        mu, var = post.mean.squeeze(-1), post.variance.clamp_min(1e-12).squeeze(-1)
-        pf = self._normal.cdf(mu / (1.0 + var).sqrt() + self.beta)   # optimistic P(feasible)
-        cr = -self.neg_cr(x).squeeze(-1)
-        return (self.best_cr - cr).clamp_min(0.0) * pf
-
-
 class FeasibilityInterpolatedCR(AcquisitionFunction):
     r"""Feasibility-interpolated CR acquisition.
 

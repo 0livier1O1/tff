@@ -482,12 +482,6 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
                 key=f"cboss_ficr_t_{cid}",
                 help="Exponent t in α=(1-ct)·UCB + ct·P(feasible), c=infeasible fraction.",
             )
-        if acfg.policy == "cboss-ofi":
-            _num(st, acfg, "cboss_ofi_beta", "Optimism β", f"cboss_ofi_beta_{cid}",
-                 min_value=0.0, max_value=5.0, step=0.1, format="%.2f",
-                 help="Optimism bonus on the feasibility margin in α=(ψ*−ψ)⁺·Φ(μ/√(1+σ²)+β). "
-                      "β=0 recovers plain FI (PF-weighted improvement); β>0 inflates P(feasible) "
-                      "so the search also probes cheap structures it is merely uncertain about.")
         _chk(st, acfg, "cboss_seek_feasible_first", "Seek feasibility first", f"cboss_seek_{cid}",
              help="Until a feasible point is found, maximize P(feasible) instead of the "
                   "constrained acquisition (gives the acqf a feasible anchor).")
@@ -586,8 +580,9 @@ def _render_bess(acfg: BESSConfig) -> None:
                  help="Make the boundary acquisition objective-aware. 'none' = plain "
                       "cucb/sur/gsur. 'incumbent' = restrict to the cheaper-than-incumbent "
                       "region (hard mask → mcUCB / mSUR / mgSUR). 'improvement' = weight by the "
-                      "CR gap (ψ*−ψ)⁺, i.e. expected opportunity cost (→ wUCB / wSUR / wgSUR). "
-                      "For 'sur' the reference design is drawn CR-stratified when weighted.")
+                      "CR gap (ψ*−ψ)⁺, i.e. expected opportunity cost (→ wSUR / wgSUR; cUCB "
+                      "only masks, so it gives mcUCB). For 'sur' the reference design is drawn "
+                      "CR-stratified when weighted.")
         _num(st, acfg, "bess_n_ref", "Boundary-error ref points", f"bess_n_ref_{cid}",
              min_value=64, max_value=16384, step=64,
              help="Fixed reference design over which the integrated boundary error E (the "

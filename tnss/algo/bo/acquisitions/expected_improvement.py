@@ -22,6 +22,8 @@ class ExpectedImprovement:
     `SearchState` each step.
     """
 
+    name = "ei"
+
     def build(self, model: Model, state: SearchState) -> AcquisitionFunction:
         """LogExpectedImprovement with best_f = the best objective so far (h*_n).
 

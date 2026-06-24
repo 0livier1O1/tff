@@ -45,6 +45,8 @@ def objective_target(lamda: float) -> Callable[[Tensor, Tensor, Tensor], Tensor]
 class RegressionGP:
     """Exact-GP regression surrogate. `.fit(...)` returns a BoTorch `SingleTaskGP`."""
 
+    kind = "reg"
+
     def __init__(
         self,
         space: SearchSpace,

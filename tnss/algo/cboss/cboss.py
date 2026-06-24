@@ -33,8 +33,8 @@ from botorch.optim import optimize_acqf_discrete_local_search
 from tnss.algo.boss.base import BOSSBase
 from tnss.algo.cboss.feasibility import FeasibilityGP, MAX_CONSEC_FIT_ERRORS
 from tnss.algo.cboss.acquisitions import (
-    MaxFeasibility, PFWeightedImprovement, OptimisticPFImprovement,
-    FeasibilityInterpolatedCR, build_constrained_ei,
+    MaxFeasibility, PFWeightedImprovement, FeasibilityInterpolatedCR,
+    build_constrained_ei,
 )
 
 
@@ -78,7 +78,6 @@ class CBOSS(BOSSBase):
         lamda: float = 1.0,
         acqf: str = "cei",
         ficr_t: float = 1.0,
-        ofi_beta: float = 1.0,
         seek_feasible_first: bool = True,
         decomp_method: str = "adam",
         init_lr: float | None = None,
@@ -113,11 +112,10 @@ class CBOSS(BOSSBase):
             freq_update=freq_update, raw_samples=raw_samples,
             num_restarts=num_restarts, seed=seed, verbose=verbose,
         )
-        assert acqf in ("cei", "pf", "ofi", "ficr"), (
-            f"acqf must be 'cei', 'pf', 'ofi', or 'ficr', got {acqf!r}")
+        assert acqf in ("cei", "pf", "ficr"), (
+            f"acqf must be 'cei', 'pf', or 'ficr', got {acqf!r}")
         self.acqf = acqf
         self.ficr_t = ficr_t
-        self.ofi_beta = ofi_beta
         self.seek_feasible_first = seek_feasible_first
         self.kernel = kernel
         self.mean = mean
@@ -183,8 +181,6 @@ class CBOSS(BOSSBase):
             acqf = MaxFeasibility(feas)
         elif self.acqf == "pf":
             acqf = PFWeightedImprovement(feas, self._neg_cr, best_cr)
-        elif self.acqf == "ofi":
-            acqf = OptimisticPFImprovement(feas, self._neg_cr, best_cr, beta=self.ofi_beta)
         elif self.acqf == "ficr":
             acqf = FeasibilityInterpolatedCR(
                 feas, self._neg_cr, c=c, t=self.ficr_t, cr_bounds=cr_bounds)

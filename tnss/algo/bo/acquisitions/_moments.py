@@ -17,6 +17,7 @@ import torch
 from torch import Tensor
 
 from botorch.models.model import Model
+from gpytorch.likelihoods import BernoulliLikelihood
 
 
 def latent_moments(model: Model, x: Tensor) -> tuple[Tensor, Tensor]:
@@ -73,3 +74,30 @@ def lookahead_precision(mu: Tensor, var: Tensor) -> Tensor:
     v_minus = lam_m * (lam_m - z)                                 # B.3, y=-1  (C.18)
     p_plus = torch.special.ndtr(z / (1.0 + var).sqrt())          # C.5 (probit-deflated)
     return p_plus * v_plus + (1.0 - p_plus) * v_minus            # C.16
+
+
+def downdate_noise(model: Model, mu: Tensor, var: Tensor) -> Tensor:
+    """Effective observation-noise variance tau^2 for the SUR/gSUR kriging
+    look-ahead, selected by the surrogate's likelihood (Lyu et al. 2021, Supp.):
+
+    - Bernoulli (classification): no Gaussian noise exists, so tau^2 is the
+      per-candidate inverse expected next-step probit Hessian 1/vcheck
+      (eqs C.8/C.15) at the candidate's latent moments — varies with the point.
+    - Gaussian (regression): the GP's fitted observation noise mapped back through
+      the outcome `Standardize` into the latent (margin) units (eq C.1) — a
+      constant across candidates.
+
+    The link is therefore a property of the surrogate, not a user choice.
+
+    model : the boundary surrogate (its likelihood selects the branch).
+    mu, var : the candidate's latent moments, shape (b,) (used only for probit).
+    Returns tau^2 — a per-candidate (b,) tensor (probit) or a scalar (Gaussian),
+    either of which broadcasts over the kriging update.
+    """
+    if isinstance(model.likelihood, BernoulliLikelihood):
+        return 1.0 / lookahead_precision(mu, var).clamp_min(1e-6)
+    noise = model.likelihood.noise.mean()
+    transform = getattr(model, "outcome_transform", None)
+    if transform is not None and hasattr(transform, "stdvs"):
+        noise = noise * transform.stdvs.reshape(-1)[0].square()
+    return noise

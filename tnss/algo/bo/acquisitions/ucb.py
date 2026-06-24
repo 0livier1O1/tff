@@ -24,6 +24,8 @@ class LowerConfidenceBound:
         the mean (added to the negated mean). Larger beta explores more.
     """
 
+    name = "lcb"
+
     def __init__(self, beta: float = 2.0):
         self.beta = beta
 

@@ -92,15 +92,15 @@ class ContourUCB(AcquisitionFunction):
     the caller may instead pass the paper's §3.2 adaptive ``gamma_n`` (recomputed
     each step from the current posterior — see :meth:`BESS._cucb_gamma`).
 
-    An optional ``weight_fn`` w(x) makes the straddle objective-aware (the same w(u)
-    used by the weighted (g)SUR — see :meth:`BESS._sur_weight_fn`): candidates with
-    ``w(x) = 0`` are excluded (score ``-inf``, never selected) and the rest are scored
-    by ``w(x)`` times the straddle. The incumbent mask gives **mcUCB** (the straddle
-    restricted to the cheaper-than-incumbent region); the CR gap gives **wUCB** (the
-    straddle graded by the compression it would unlock). ``None`` = plain cUCB. The
-    mask is applied as a hard ``-inf`` rather than a 0-multiply because the straddle is
-    sign-indefinite — a 0 would otherwise outrank a near-boundary candidate with a
-    (legitimately) negative straddle.
+    An optional ``weight_fn`` w(x) restricts the straddle to the improving region
+    (the same w(u) the weighted (g)SUR uses — see :meth:`BESS._sur_weight_fn`). It acts
+    purely as a **mask**: candidates with ``w(x) = 0`` are excluded (score ``-inf``,
+    never selected) and the rest keep their plain straddle, giving **mcUCB** — cUCB
+    restricted to the cheaper-than-incumbent region. Only the support of w matters, not
+    its magnitude (so the incumbent and improvement weights both give mcUCB): the
+    straddle is sign-indefinite, so a magnitude grading would flip orderings, and the
+    ``-inf`` rather than a 0-multiply stops a non-improving candidate from outranking a
+    near-boundary one with a legitimately negative straddle. ``None`` = plain cUCB.
     """
 
     def __init__(self, feas_gp, gamma: float = 1.96, weight_fn=None):
@@ -115,8 +115,8 @@ class ContourUCB(AcquisitionFunction):
         mu, sigma = _latent_moments(self.feas_gp, x)
         straddle = self.gamma * sigma - mu.abs()
         if self.weight_fn is not None:
-            w = self.weight_fn(x).to(straddle).clamp_min(0.0)
-            straddle = torch.where(w > 0, w * straddle,
+            keep = self.weight_fn(x).to(straddle) > 0          # improving-region mask
+            straddle = torch.where(keep, straddle,
                                    torch.full_like(straddle, float("-inf")))
         return straddle
 

@@ -250,7 +250,7 @@ class BESS(BOSSBase):
         elif self.acqf == "gsur":
             acqf = ContourGSUR(feas, obs_noise=self._sur_obs_noise(feas), link=self._sur_link(),
                                weight_fn=self._sur_weight_fn(Y_cr, Y_feas))
-        else:  # cucb (+ optional incumbent/improvement weight -> mcUCB / wUCB)
+        else:  # cucb (+ optional incumbent/improvement mask -> mcUCB)
             gamma = self._cucb_gamma(feas)
             acqf = ContourUCB(feas, gamma=gamma, weight_fn=self._sur_weight_fn(Y_cr, Y_feas))
 

@@ -99,6 +99,8 @@ class ClassificationGP:
     reset_every : periodic hard-reset interval (0 = never).
     """
 
+    kind = "clas"
+
     def __init__(
         self,
         space: SearchSpace,
