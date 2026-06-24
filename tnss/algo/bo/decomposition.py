@@ -27,8 +27,9 @@ def reconstruction_error(
     init_lr: float | None = None, momentum: float = 0.5,
     loss_patience: int = 2500, lr_patience: int = 250,
     backend: str = "cupy", dtype: str = "float32", min_rse: float | None = None,
-) -> float:
-    """Best RSE over `n_runs` decompositions of `target` onto `adjacency`.
+) -> tuple[float, list[float]]:
+    """Best RSE over `n_runs` decompositions of `target` onto `adjacency`, with the
+    loss curve of that best restart.
 
     target : the dense tensor being approximated.
     adjacency : the integer N×N adjacency (bond ranks + physical mode-size diagonal).
@@ -38,7 +39,9 @@ def reconstruction_error(
         non-convex, so a single random init can stall in a poor basin).
     init_lr, momentum, loss_patience, lr_patience : decomposition optimiser knobs.
     min_rse : early-stop the restart loop once a run dips below this (None = no stop).
-    Returns the best RSE, or 1.0 if the structure cannot be contracted (GPU OOM).
+    Returns ``(best_rse, best_losses)`` — the per-epoch loss curve of the best
+    restart (for the loss-curve plot). On a structure too large to contract within
+    the GPU memory budget, returns ``(1.0, [])`` (recorded as infeasible).
     """
     tgt_np = target.numpy() if hasattr(target, "numpy") else target
     tgt_cp = cp.asarray(tgt_np)
@@ -47,6 +50,7 @@ def reconstruction_error(
     A_cp = cp.asarray(adjacency.numpy() if hasattr(adjacency, "numpy") else adjacency)
     try:
         best_rse = float("inf")
+        best_losses: list[float] = []
         for _ in range(n_runs):
             ntwrk = cuTensorNetwork(A_cp, backend=backend, dtype=dtype)   # fresh random init
             losses = ntwrk.decompose(
@@ -55,10 +59,12 @@ def reconstruction_error(
                 loss_patience=loss_patience, lr_patience=lr_patience,
             )
             val = float(losses[-1]) if losses else float("inf")
-            best_rse = min(best_rse, val)
+            if val < best_rse:
+                best_rse = val
+                best_losses = [float(x) for x in losses]
             if min_rse is not None and best_rse < min_rse:
                 break
-        return best_rse
+        return best_rse, best_losses
     except (MemoryLimitExceeded, OutOfMemoryError):
         # Too large to contract within the GPU memory budget: compute-infeasible.
-        return 1.0
+        return 1.0, []
