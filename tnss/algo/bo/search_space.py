@@ -7,8 +7,7 @@ sizes). BoTorch/GPyTorch operate on the normalised encoding [0,1]^D; this class
 converts between that encoding, the integer rank vector {1,...,max_rank}^D, and
 the full adjacency, computes the deterministic compression ratio, and exposes the
 integer rank lattice the acquisition optimiser searches. All conversions reuse
-the canonical helpers in `tnss.utils`, so the encoding stays identical to the
-existing search families.
+the canonical helpers in `tnss.utils`.
 """
 from __future__ import annotations
 

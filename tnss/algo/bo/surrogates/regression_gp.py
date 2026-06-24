@@ -10,7 +10,7 @@ the regression-mode contour acquisitions (boundary at the posterior zero).
 
 Refresh cadence: the hyperparameters are re-fit every `refit_every` steps (and on
 the first call); in between the GP is re-conditioned on all data with the hypers
-frozen — cheap exact conditioning. Mirrors `tnss.algo.boss.boss`.
+frozen — cheap exact conditioning.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
 from tnss.algo.bo.search_space import SearchSpace
-from tnss.algo.boss.means import make_mean
+from tnss.algo.bo.surrogates.means import make_mean
 from tnss.kernels.input_warp_kernel import maybe_warp
 from tnss.kernels.round_kernel import maybe_round
 
@@ -137,8 +137,7 @@ class RegressionGP:
 
     @staticmethod
     def _dedup(X: Tensor, Y: Tensor) -> tuple[Tensor, Tensor]:
-        """Keep the first occurrence of each unique X row (duplicate inputs break
-        an exact GP)."""
+        """Keep the first occurrence of each unique X row (duplicate inputs break an exact GP)."""
         _, inverse = torch.unique(X, dim=0, return_inverse=True)
         mask = torch.zeros(X.shape[0], dtype=torch.bool)
         seen: set[int] = set()
