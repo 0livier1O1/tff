@@ -77,6 +77,7 @@ def _build_cboss(acfg, adj_np, target_np, seed):
         cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
         max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
         n_runs=acfg.n_runs, acqf=_acqf(acfg), ficr_t=acfg.cboss_ficr_t,
+        ofi_beta=acfg.cboss_ofi_beta,
         lamda=acfg.lambda_fitness, seek_feasible_first=acfg.cboss_seek_feasible_first,
         kernel=acfg.kernel, mean=acfg.mean, var_strategy=acfg.var_strategy,
         wsp_mode=acfg.wsp_mode, input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,

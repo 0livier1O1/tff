@@ -91,17 +91,34 @@ class ContourUCB(AcquisitionFunction):
     boundary proximity against exploration; the classic straddle value is 1.96, but
     the caller may instead pass the paper's §3.2 adaptive ``gamma_n`` (recomputed
     each step from the current posterior — see :meth:`BESS._cucb_gamma`).
+
+    An optional ``weight_fn`` w(x) makes the straddle objective-aware (the same w(u)
+    used by the weighted (g)SUR — see :meth:`BESS._sur_weight_fn`): candidates with
+    ``w(x) = 0`` are excluded (score ``-inf``, never selected) and the rest are scored
+    by ``w(x)`` times the straddle. The incumbent mask gives **mcUCB** (the straddle
+    restricted to the cheaper-than-incumbent region); the CR gap gives **wUCB** (the
+    straddle graded by the compression it would unlock). ``None`` = plain cUCB. The
+    mask is applied as a hard ``-inf`` rather than a 0-multiply because the straddle is
+    sign-indefinite — a 0 would otherwise outrank a near-boundary candidate with a
+    (legitimately) negative straddle.
     """
 
-    def __init__(self, feas_gp, gamma: float = 1.96):
+    def __init__(self, feas_gp, gamma: float = 1.96, weight_fn=None):
         super().__init__(model=feas_gp)
         self.feas_gp = feas_gp
+        self.weight_fn = weight_fn
         self.register_buffer("gamma", torch.as_tensor(gamma, dtype=torch.double))
 
     @t_batch_mode_transform(expected_q=1)
     def forward(self, X: Tensor) -> Tensor:
-        mu, sigma = _latent_moments(self.feas_gp, X.squeeze(-2))
-        return self.gamma * sigma - mu.abs()
+        x = X.squeeze(-2)
+        mu, sigma = _latent_moments(self.feas_gp, x)
+        straddle = self.gamma * sigma - mu.abs()
+        if self.weight_fn is not None:
+            w = self.weight_fn(x).to(straddle).clamp_min(0.0)
+            straddle = torch.where(w > 0, w * straddle,
+                                   torch.full_like(straddle, float("-inf")))
+        return straddle
 
 
 class TargetedMSE(AcquisitionFunction):

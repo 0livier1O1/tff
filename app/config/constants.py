@@ -309,6 +309,15 @@ SUR_REFSIZE_EFFPOINTS = (
     r"fraction means the lever is placement — put points near the "
     r"$\mathrm{RSE}=\rho$ contour — not a larger $M$. Ideally a healthy "
     r"fraction that does not collapse toward 0."
+    "\n\n"
+    r"**Weighted runs.** With an incumbent/improvement weight the solid "
+    r"line uses the run's actual integrand $w(u)\,w_u$ (the cost weight "
+    r"times the reduction); the dotted line is the bare unweighted SUR. "
+    r"The mask/weight zeros out reference points outside the improving "
+    r"region, so the solid line sits below the dotted one and shrinks as "
+    r"$\psi^\star$ falls — if it collapses, the SUR reference design needs "
+    r"more low-CR points (or a larger $M$), which is why it is drawn "
+    r"CR-stratified when weighted."
 )
 
 SUR_GSUR_FIDELITY = (

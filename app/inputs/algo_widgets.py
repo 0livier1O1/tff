@@ -482,6 +482,12 @@ def _render_cboss(acfg: CBOSSConfig) -> None:
                 key=f"cboss_ficr_t_{cid}",
                 help="Exponent t in α=(1-ct)·UCB + ct·P(feasible), c=infeasible fraction.",
             )
+        if acfg.policy == "cboss-ofi":
+            _num(st, acfg, "cboss_ofi_beta", "Optimism β", f"cboss_ofi_beta_{cid}",
+                 min_value=0.0, max_value=5.0, step=0.1, format="%.2f",
+                 help="Optimism bonus on the feasibility margin in α=(ψ*−ψ)⁺·Φ(μ/√(1+σ²)+β). "
+                      "β=0 recovers plain FI (PF-weighted improvement); β>0 inflates P(feasible) "
+                      "so the search also probes cheap structures it is merely uncertain about.")
         _chk(st, acfg, "cboss_seek_feasible_first", "Seek feasibility first", f"cboss_seek_{cid}",
              help="Until a feasible point is found, maximize P(feasible) instead of the "
                   "constrained acquisition (gives the acqf a feasible anchor).")
@@ -574,14 +580,14 @@ def _render_bess(acfg: BESSConfig) -> None:
                 st.caption("gSUR is the pointwise form of SUR (no reference design). "
                            "Classifier look-ahead noise is derived per-candidate from the "
                            "probit Hessian (Lyu et al. Supp. Result 2) — no τ² to set.")
-        if acfg.policy in ("bess-sur", "bess-gsur"):
+        if acfg.policy in ("bess-cucb", "bess-sur", "bess-gsur"):
             _sel(st, acfg, "bess_sur_weight", "Objective weight w(u)",
                  ["none", "incumbent", "improvement"], f"bess_sur_weight_{cid}",
-                 help="Cost weight on the misclassification volume the (g)SUR look-ahead "
-                      "reduces. 'none' = uniform (plain SUR). 'incumbent' = score only the "
-                      "cheaper-than-incumbent region (hard mask). 'improvement' = weight by the "
-                      "CR gap (ψ*−ψ)⁺, i.e. expected opportunity cost. For 'sur' the reference "
-                      "design is drawn CR-stratified when weighted.")
+                 help="Make the boundary acquisition objective-aware. 'none' = plain "
+                      "cucb/sur/gsur. 'incumbent' = restrict to the cheaper-than-incumbent "
+                      "region (hard mask → mcUCB / mSUR / mgSUR). 'improvement' = weight by the "
+                      "CR gap (ψ*−ψ)⁺, i.e. expected opportunity cost (→ wUCB / wSUR / wgSUR). "
+                      "For 'sur' the reference design is drawn CR-stratified when weighted.")
         _num(st, acfg, "bess_n_ref", "Boundary-error ref points", f"bess_n_ref_{cid}",
              min_value=64, max_value=16384, step=64,
              help="Fixed reference design over which the integrated boundary error E (the "

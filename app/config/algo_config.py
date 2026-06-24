@@ -22,7 +22,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 BOSS_POLICIES  = ["boss-ei", "boss-ucb"]
-CBOSS_POLICIES = ["cboss-cei", "cboss-pf", "cboss-ficr"]
+CBOSS_POLICIES = ["cboss-cei", "cboss-pf", "cboss-ofi", "cboss-ficr"]
 BESS_POLICIES  = ["bess-cucb", "bess-tmse", "bess-sur", "bess-gsur"]
 # FTBOSS policy = Stage-1 shortlist acquisition (Stage-2 is always SUR); see FTBOSSConfig.
 FTBOSS_POLICIES = ["ftboss-cucb", "ftboss-tmse"]
@@ -159,6 +159,7 @@ class CBOSSConfig(FeasibilityGPConfig, AlgoConfig):
     # other families; the feasibility-GP surrogate fields come from the mixin.
 
     cboss_ficr_t: float = 1.0               # interpolation exponent (cboss-ficr only)
+    cboss_ofi_beta: float = 1.0             # optimism bonus on the feasibility margin (cboss-ofi only)
     cboss_seek_feasible_first: bool = True
     cboss_mc_samples: int = 128             # MC samples for the cei acquisition
 

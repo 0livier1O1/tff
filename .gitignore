@@ -26,3 +26,6 @@ context/tensor_networks/
 overleaf/
 *.pt
 *.tar.gz
+
+# webapp is its own separate git repository — not tracked by boss
+/webapp/

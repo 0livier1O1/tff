@@ -739,20 +739,33 @@ def sur_refsize_effpoints(d) -> go.Figure:
     the rest contribute ≈0. The participation ratio (Σw)²/Σw² is the *effective* number of
     contributing points; here it is shown as a fraction of the operating M (1.0 = every
     point pulls its weight, → 0 = a handful dominate). A persistently small fraction means
-    the lever is *placement* — concentrate points near the contour — not a larger M."""
-    steps, frac = d["tl_steps"], d["tl_peff"] / max(int(d["op_M"]), 1)
+    the lever is *placement* — concentrate points near the contour — not a larger M. For a
+    weighted run the solid line is the effective count under the run's cost weight w(u)
+    (the acquisition actually optimized); the dotted line is the bare unweighted SUR
+    integrand for reference — the gap is how much the mask/weight thins the design."""
+    op_M = max(int(d["op_M"]), 1)
+    steps = d["tl_steps"]
+    weighted = ("tl_peff_w" in d.files and "sur_weight" in d.files
+                and str(d["sur_weight"]) != "none")
+    peff_main = d["tl_peff_w"] if weighted else d["tl_peff"]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=steps, y=frac, mode="lines+markers",
+    fig.add_trace(go.Scatter(x=steps, y=peff_main / op_M, mode="lines+markers",
+                             name=(f"weighted ({str(d['sur_weight'])})" if weighted else "effective"),
                              line=dict(color="#4c78a8", width=2), marker=dict(size=4),
-                             showlegend=False,
-                             customdata=d["tl_peff"],
+                             showlegend=weighted, customdata=peff_main,
                              hovertemplate="step %{x}<br>%{y:.1%} of M<br>"
                                            "(%{customdata:.0f} effective points)<extra></extra>"))
+    if weighted:
+        fig.add_trace(go.Scatter(x=steps, y=d["tl_peff"] / op_M, mode="lines",
+                                 name="unweighted SUR",
+                                 line=dict(color="#bbb", width=1.5, dash="dot"),
+                                 hovertemplate="step %{x}<br>%{y:.1%} of M (unweighted)<extra></extra>"))
     fig.update_xaxes(title_text="BO step", rangemode="tozero")
     fig.update_yaxes(title_text="effective fraction of M", rangemode="tozero",
                      tickformat=".0%", showgrid=False)
     fig.update_layout(template="plotly_white", height=330,
-                      margin=dict(l=0, r=0, t=20, b=0), hovermode="x unified")
+                      margin=dict(l=0, r=0, t=20, b=0), hovermode="x unified",
+                      legend=_LEGEND if weighted else None)
     return fig
 
 
