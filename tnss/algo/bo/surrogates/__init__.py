@@ -1,5 +1,6 @@
 from tnss.algo.bo.surrogates.base import Surrogate
 from tnss.algo.bo.surrogates.classification_gp import ClassificationGP, feasibility_prob
+from tnss.algo.bo.surrogates.learning_curve_gp import LearningCurveGP
 from tnss.algo.bo.surrogates.regression_gp import RegressionGP, objective_target
 
 __all__ = [
@@ -8,4 +9,5 @@ __all__ = [
     "objective_target",
     "ClassificationGP",
     "feasibility_prob",
+    "LearningCurveGP",
 ]
