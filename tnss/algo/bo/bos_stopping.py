@@ -37,18 +37,18 @@ What changes for the fixed-threshold / noise-free target
   a table-d1 (feasible) cell is treated as "continue" at run time so the returned
   feasibility label ``z = 1{ell(n*) <= rho}`` is never a prediction.
 
-Driver-agnostic by design
---------------------------
-``BOSStopper.run`` consumes an ``extend_to(n) -> curve`` callable that advances a
-decomposition to ``n`` total epochs and returns the loss curve so far. The GPU
-adapter (resumable cuTensorNetwork) is a thin wrapper supplied by the BOSS loop;
-in tests ``extend_to`` is just a closure over a synthetic curve. The curve GP is a
-plain gpytorch exact GP (CPU is fine); only the decomposition driver needs a GPU.
+A decompose callback by design
+------------------------------
+:class:`BOSStopper` is a per-epoch callback: ``cuTensorNetwork.decompose`` invokes
+``stopper(loss)`` once per epoch and breaks the run when it returns ``True``. The
+stopper accumulates the loss curve itself, so a single continuous decomposition
+keeps its optimiser state (no re-chunking / fidelity loss) and is simply cut short.
+In tests the callback is driven by a plain loop over a synthetic curve. The curve
+GP is a plain gpytorch exact GP (CPU is fine); only the decomposition needs a GPU.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 
@@ -80,7 +80,7 @@ class BOSConfig:
     n_samples: int = 20000          # forward-simulation sample paths
     min_cell_samples: int = 30      # below this, a cell conservatively continues
     refit_every: int = 0            # rebuild table every k epochs (0 = once, at N0)
-    noise: float = 1e-3             # fixed curve-GP observation noise
+    noise: float = 1e-3             # fixed curve-GP observation noise TODO maybe do infered instead
     seed: int = 0                   # forward-simulation RNG seed
 
 
@@ -88,9 +88,8 @@ class BOSConfig:
 class BOSResult:
     z: int                          # feasibility label 1{ell(n*) <= rho}
     n_star: int                     # epoch the run stopped at
-    curve: list[float]              # realised loss curve up to n_star
-    reason: str                     # 'override' / 'infeasible_kill' / 'budget'
-    stopped_early: bool
+    reason: str                     # 'override' / 'infeasible_kill' / 'completed'
+    stopped_early: bool             # True if BOS broke the run before the budget
 
 
 # ======================================================= decision-table builder
@@ -126,100 +125,118 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     stat = np.cumsum(future, axis=1) / np.arange(1, future.shape[1] + 1)  # St per path
     future_cells = np.clip(np.searchsorted(grid, stat, side="right") - 1, 0, n_cells - 1)
 
-    # losses[step, cell] = [d1 feasible, d2 infeasible, continue]; +c*step folds the
-    # accumulated epoch cost into the terminals (continuing longer lands in a
-    # terminal with a larger step, so it implicitly costs more — as in the paper).
+    # Terminal losses, as a 2-D histogram over (step, cell): per cell the fraction p
+    # of paths-through-it whose endpoint is infeasible, from two bincounts (no loop).
+    # losses[step, cell] = [d1 feasible, d2 infeasible, continue]; the +c*(step+1)
+    # epoch cost folds in so continuing longer lands in a costlier terminal (paper).
+    M = future.shape[0]
+    step_cost = cfg.c * (np.arange(T) + 1.0)                          # (T,)
+    flat = (np.arange(T)[None, :] * n_cells + future_cells).ravel()   # (M*T,) into (step, cell)
+    counts = np.bincount(flat, minlength=T * n_cells).reshape(T, n_cells)
+    inf_w = np.broadcast_to(infeasible_end[:, None], (M, T)).astype(float).ravel()
+    inf_counts = np.bincount(flat, weights=inf_w, minlength=T * n_cells).reshape(T, n_cells)
+    visited = counts > 0
+    p_inf = np.divide(inf_counts, counts, out=np.zeros_like(inf_counts), where=visited)
+
     losses = np.full((T, n_cells, 3), np.inf)
-    p_inf = np.zeros((T, n_cells))
-    for step in range(T):
-        col = future_cells[:, step]
-        for cell in range(n_cells):
-            sel = col == cell
-            n_sel = int(sel.sum())
-            if n_sel == 0:
-                continue
-            p = float(infeasible_end[sel].mean())
-            p_inf[step, cell] = p
-            losses[step, cell, 0] = cfg.K1 * p + cfg.c * (step + 1)        # d1 wrong iff infeasible
-            losses[step, cell, 1] = cfg.K2 * (1.0 - p) + cfg.c * (step + 1)  # d2 wrong iff feasible
+    losses[..., 0] = np.where(visited, cfg.K1 * p_inf + step_cost[:, None], np.inf)
+    losses[..., 1] = np.where(visited, cfg.K2 * (1.0 - p_inf) + step_cost[:, None], np.inf)
 
-    # Backward induction for the continuation value. Last future epoch (== budget)
-    # has no continue option; earlier epochs average the next epoch's optimal loss
-    # over the paths passing through the cell.
+    # Backward induction for the continuation value. The sweep is inherently
+    # sequential (Bellman: step depends on step+1), but each step is vectorised — the
+    # per-cell average of the next epoch's optimal loss is one bincount. The last
+    # epoch has no continue option; a cell seen by <= min_cell_samples paths
+    # conservatively continues (loss 0).
     for step in range(T - 2, -1, -1):
-        nxt = future_cells[:, step + 1]
-        cur = future_cells[:, step]
-        # optimal loss at the next epoch per path: min over available decisions
-        next_avail = losses[step + 1, :, :2] if step + 1 == T - 1 else losses[step + 1, :, :]
-        next_best = np.min(next_avail, axis=1)            # (n_cells,)
-        path_next_loss = next_best[nxt]
-        for cell in range(n_cells):
-            sel = cur == cell
-            n_sel = int(sel.sum())
-            if n_sel > cfg.min_cell_samples:
-                losses[step, cell, 2] = float(path_next_loss[sel].mean())
-            else:
-                losses[step, cell, 2] = 0.0               # too few samples -> continue
+        avail = losses[step + 1, :, :2] if step + 1 == T - 1 else losses[step + 1]
+        path_next = avail.min(axis=1)[future_cells[:, step + 1]]      # optimal next loss per path
+        sums = np.bincount(future_cells[:, step], weights=path_next, minlength=n_cells)
+        losses[step, :, 2] = np.divide(
+            sums, counts[step], out=np.zeros(n_cells),
+            where=counts[step] > cfg.min_cell_samples)
 
-    # Decode the optimal decision per (step, cell).
-    actions = np.zeros((T, n_cells), dtype=int)
-    # last epoch: only the two terminals
-    actions[-1] = np.where(losses[-1, :, 0] <= losses[-1, :, 1],
-                           STOP_FEASIBLE, STOP_INFEASIBLE)
-    # earlier epochs: argmin over [d1, d2, continue] -> {1, 2, 0}
+    # Decode the optimal decision per (step, cell), vectorised over all rows.
     decode = np.array([STOP_FEASIBLE, STOP_INFEASIBLE, CONTINUE])
-    for step in range(T - 1):
-        actions[step] = decode[np.argmin(losses[step], axis=1)]
+    actions = np.empty((T, n_cells), dtype=int)
+    actions[:-1] = decode[np.argmin(losses[:-1], axis=2)]            # argmin over [d1, d2, cont]
+    actions[-1] = np.where(losses[-1, :, 0] <= losses[-1, :, 1],     # last epoch: terminals only
+                           STOP_FEASIBLE, STOP_INFEASIBLE)
     return actions, grid
 
 
-# ============================================================== stepping driver
+# ============================================================ decompose callback
 class BOSStopper:
-    """Drive one decomposition with BOS feasibility stopping.
+    """BOS feasibility stopping as a per-epoch ``decompose`` callback.
 
-    ``run`` is fed ``extend_to(n) -> curve`` (the loss curve advanced to n total
-    epochs). It observes the warm-up prefix, builds the decision table once (or
-    every ``refit_every`` epochs), then advances epoch by epoch: stopping *exactly*
-    the instant the curve crosses rho (feasible override), or on a table d2
-    (infeasible kill); a table d1 defers to the override so the returned label is
-    never a guess.
+    Pass an instance as ``callback`` to :meth:`cuTensorNetwork.decompose`: it is
+    invoked once per epoch as ``stopper(loss)`` and returns ``True`` to break the
+    decomposition. It accumulates the loss curve itself, builds the decision
+    table the moment the warm-up is observed (and rebuilds it every ``refit_every``
+    epochs), and breaks the run the instant feasibility is settled — *exactly* when
+    the curve crosses rho (feasible override), or on a table d2 (infeasible kill). A
+    table d1 defers to the override, so the returned label is never a guess.
+
+    After ``decompose`` returns, :meth:`result` gives the ``(z, n*, reason)`` outcome
+    and :attr:`curve` the realised loss curve (full or up to the break).
     """
 
-    def __init__(self, cfg: BOSConfig):
+    def __init__(self, cfg: BOSConfig, *, rho: float, budget: int):
         self.cfg = cfg
+        self.rho = float(rho)
+        self.budget = int(budget)
+        self._rng = np.random.default_rng(cfg.seed)
+        self._curve: list[float] = []
+        self._table: np.ndarray | None = None
+        self._grid: np.ndarray | None = None
+        self._origin = 0                                  # epoch the live table was built at
+        self._n_cells = cfg.grid_size - 1
+        self._decision: BOSResult | None = None
 
-    def run(self, extend_to: Callable[[int], np.ndarray], rho: float, budget: int
-            ) -> BOSResult:
-        cfg = self.cfg
-        rng = np.random.default_rng(cfg.seed)
-        n0 = min(cfg.warmup, budget)
+    def __call__(self, loss: float) -> bool:
+        """Observe one epoch's loss; return True to break the decomposition."""
+        self._curve.append(float(loss))
+        n = len(self._curve)                              # epochs done (1-indexed)
 
-        curve = np.asarray(extend_to(n0), dtype=float).reshape(-1)
-        hit = np.nonzero(curve <= rho)[0]
-        if hit.size:                                       # feasible already in warm-up
-            n = int(hit[0]) + 1
-            return BOSResult(1, n, curve[:n].tolist(), "override", n < budget)
+        if self._curve[-1] <= self.rho:                   # exact feasible certificate
+            return self._stop(1, n, "override")
+        if n < self.cfg.warmup or n >= self.budget:       # warming up / past the table horizon
+            return False
 
-        table, grid = build_decision_table(curve, rho, budget, cfg, rng)
-        table_origin = n0
-        n_cells = cfg.grid_size - 1
+        curve = np.asarray(self._curve, dtype=float)
+        if self._table is None:                           # build once at warm-up end
+            return self._build(curve, n)
+        if self.cfg.refit_every and (n - self._origin) >= self.cfg.refit_every:
+            return self._build(curve, n)                  # refit from the longer prefix
 
-        for n in range(n0 + 1, budget + 1):
-            curve = np.asarray(extend_to(n), dtype=float).reshape(-1)
-            ell = float(curve[-1])
-            if ell <= rho:                                 # exact feasible certificate
-                return BOSResult(1, n, curve.tolist(), "override", n < budget)
+        row = n - 1 - self._origin
+        if not 0 <= row < self._table.shape[0]:
+            return False
+        stat = float(curve[self._origin:].mean())         # running mean since the table's origin
+        cell = int(np.clip(np.searchsorted(self._grid, stat, side="right") - 1, 0, self._n_cells - 1))
+        if int(self._table[row, cell]) == STOP_INFEASIBLE:
+            return self._stop(0, n, "infeasible_kill")
+        return False                                      # CONTINUE / demoted d1 -> keep going
 
-            if cfg.refit_every and (n - table_origin) >= cfg.refit_every and n < budget:
-                table, grid = build_decision_table(curve, rho, budget, cfg, rng)
-                table_origin = n
+    def result(self) -> BOSResult:
+        """The stopping outcome; if no early stop fired, settle from the final curve."""
+        if self._decision is None:
+            n = len(self._curve)
+            z = int(n > 0 and self._curve[-1] <= self.rho)
+            self._decision = BOSResult(z, n, "completed", stopped_early=False)
+        return self._decision
 
-            stat = float(curve[table_origin:].mean())     # running mean since the table's origin
-            cell = int(np.clip(np.searchsorted(grid, stat, side="right") - 1, 0, n_cells - 1))
-            action = int(table[n - 1 - table_origin, cell])
-            if action == STOP_INFEASIBLE:
-                return BOSResult(0, n, curve.tolist(), "infeasible_kill", n < budget)
-            # CONTINUE and (demoted) STOP_FEASIBLE both keep going
+    @property
+    def curve(self) -> list[float]:
+        return self._curve
 
-        # Reached the budget without crossing rho -> infeasible at full cost.
-        return BOSResult(0, budget, curve.tolist(), "budget", False)
+    # --------------------------------------------------------------- internals
+    def _build(self, curve: np.ndarray, n: int) -> bool:
+        """(Re)build the decision table from the observed prefix; never stops itself."""
+        self._table, self._grid = build_decision_table(
+            curve, self.rho, self.budget, self.cfg, self._rng)
+        self._origin = n
+        return False
+
+    def _stop(self, z: int, n: int, reason: str) -> bool:
+        self._decision = BOSResult(z, n, reason, stopped_early=(n < self.budget))
+        return True

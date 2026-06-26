@@ -38,6 +38,25 @@ def latent_moments(model: Model, x: Tensor) -> tuple[Tensor, Tensor]:
     return mu, sigma
 
 
+def feasibility_prob(model: Model, x: Tensor) -> Tensor:
+    r"""Posterior probability of feasibility :math:`\mathbb P(z(\bx)=1)` at ``x``,
+    surrogate-agnostic via the likelihood (same branch logic as
+    :func:`downdate_noise`). The latent boundary is at ``mu = 0`` with feasible
+    ``mu > 0`` (the orientation the contour acquisitions assume), so:
+
+    - Bernoulli (classification): the probit-deflated ``Phi(mu / sqrt(1 + var))``.
+    - Gaussian (regression margin): ``Phi(mu / sigma)``.
+
+    x : query points (n, D). Returns P(feasible) shape (n,) in [0, 1].
+    """
+    mu, sigma = latent_moments(model, x)
+    if isinstance(model.likelihood, BernoulliLikelihood):
+        z = mu / (1.0 + sigma.square()).sqrt()
+    else:
+        z = mu / sigma
+    return torch.special.ndtr(z)
+
+
 def lookahead_precision(mu: Tensor, var: Tensor) -> Tensor:
     r"""Expected next-step probit Hessian :math:`\check v_{n+1}` (Lyu et al. 2021,
     Supplementary Material Result 2, eqs C.16–C.18) at points with *latent*
