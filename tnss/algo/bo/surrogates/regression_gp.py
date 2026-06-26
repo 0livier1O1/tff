@@ -84,11 +84,15 @@ class RegressionGP:
         self.refit_every = refit_every
         self.fit_maxiter = fit_maxiter
 
-        # Fresh mean / kernel modules per GP build (BoTorch mutates them in place).
-        self._mean = lambda: make_mean(
-            mean, space.dim, N=space.n_cores, max_rank=space.max_rank, t_shape=space.mode_sizes)
-        self._kernel = lambda: ScaleKernel(maybe_round(
-            maybe_warp(MaternKernel(nu=nu, ard_num_dims=space.dim), space.dim, input_warp),
+        # Fresh mean / kernel modules per GP build (BoTorch mutates them in place),
+        # sized to the actual input width `d`: D for the plain structure surrogate,
+        # D+1 when BOSS feeds a fidelity-augmented column (the trailing epoch fraction
+        # n/N). The fidelity path assumes a constant mean (log_size/linear read the
+        # rank vector) and round_inputs=False (the fidelity column is not a rank).
+        self._mean = lambda d: make_mean(
+            mean, d, N=space.n_cores, max_rank=space.max_rank, t_shape=space.mode_sizes)
+        self._kernel = lambda d: ScaleKernel(maybe_round(
+            maybe_warp(MaternKernel(nu=nu, ard_num_dims=d), d, input_warp),
             space.max_rank, round_inputs))
 
         self._state: dict | None = None  # warm-start hyperparameters (checkpoint)
@@ -107,7 +111,7 @@ class RegressionGP:
         hypers and falls back to the last good ones if the fit fails."""
         Xd, Yd = self._dedup(X, Y)
         gp = SingleTaskGP(Xd, Yd, outcome_transform=Standardize(m=1),
-                          mean_module=self._mean(), covar_module=self._kernel())
+                          mean_module=self._mean(Xd.shape[-1]), covar_module=self._kernel(Xd.shape[-1]))
         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -128,7 +132,7 @@ class RegressionGP:
         their last fit — no MLL optimisation. The outcome Standardize is
         recomputed from the current Y (a data normalisation, not a hyper)."""
         gp = SingleTaskGP(X, Y, outcome_transform=Standardize(m=1),
-                          mean_module=self._mean(), covar_module=self._kernel())
+                          mean_module=self._mean(X.shape[-1]), covar_module=self._kernel(X.shape[-1]))
         if self._state is not None:
             dst = gp.state_dict()
             keep = {k: v for k, v in self._state.items()

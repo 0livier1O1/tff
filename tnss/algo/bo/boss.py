@@ -137,11 +137,11 @@ class BOSS:
         # BOS feasibility stopping. When `bos` is set, each decomposition is driven by
         # a BOSStopper callback that breaks it the instant feasibility is settled.
         # Fidelity augmentation (the surrogate gains an epoch-fraction column and is
-        # trained on the interrupted runs' partial fidelities) is enabled only for the
-        # classification feasibility surrogate — the path BOS targets; other surrogates
-        # still early-stop but record the verdict at face value.
+        # trained on the interrupted runs' partial fidelities) is enabled for both GP
+        # surrogates: the classifier learns z(f)=1{RSE(f)<=rho}, the regressor the
+        # objective CR+lambda*RSE(f) — both per-fidelity via the shared target_fn.
         self.bos = bos
-        self._fidelity = bos is not None and getattr(surrogate, "kind", None) == "clas"
+        self._fidelity = bos is not None and getattr(surrogate, "kind", None) in ("clas", "reg")
         self._last_bos = None
         # Two-tier history: the verdict rows above drive best()/incumbents/artifacts;
         # these fidelity-augmented rows ([x, n/N], rse@n, cr, z@n) train the surrogate.
