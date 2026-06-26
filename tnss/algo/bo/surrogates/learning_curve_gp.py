@@ -36,12 +36,14 @@ class LearningCurveGP:
 
     Parameters
     ----------
-    noise : fixed observation-noise variance held on every curve point.
+    noise : observation-noise variance. A float holds it *fixed* on every curve
+        point (the paper's choice, for diverse forward samples); ``None`` lets the
+        marginal-likelihood fit *infer* it (a standard ``GaussianLikelihood``).
     fit_maxiter : max optimiser iterations for the marginal-likelihood fit.
     """
 
-    def __init__(self, noise: float = 1e-3, fit_maxiter: int = 200):
-        self.noise = float(noise)
+    def __init__(self, noise: float | None = 1e-3, fit_maxiter: int = 200):
+        self.noise = None if noise is None else float(noise)
         self.fit_maxiter = int(fit_maxiter)
         self._model: SingleTaskGP | None = None
 
@@ -49,9 +51,10 @@ class LearningCurveGP:
         """Fit the curve GP to the observed prefix ``(epochs, values)``."""
         x = torch.as_tensor(np.asarray(epochs, float), dtype=torch.double).reshape(-1, 1)
         y = torch.as_tensor(np.asarray(values, float), dtype=torch.double).reshape(-1, 1)
-        yvar = torch.full_like(y, self.noise)               # fixed observation noise
-        gp = SingleTaskGP(x, y, train_Yvar=yvar,
-                          mean_module=ZeroMean(), covar_module=ExpDecayKernel())
+        kw = dict(mean_module=ZeroMean(), covar_module=ExpDecayKernel())
+        if self.noise is not None:
+            kw["train_Yvar"] = torch.full_like(y, self.noise)   # fixed obs noise (paper)
+        gp = SingleTaskGP(x, y, **kw)                           # noise inferred when None
         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

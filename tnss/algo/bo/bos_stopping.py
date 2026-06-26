@@ -80,8 +80,13 @@ class BOSConfig:
     n_samples: int = 20000          # forward-simulation sample paths
     min_cell_samples: int = 30      # below this, a cell conservatively continues
     refit_every: int = 0            # rebuild table every k epochs (0 = once, at N0)
-    noise: float = 1e-3             # fixed curve-GP observation noise TODO maybe do infered instead
+    noise: float | None = 1e-3      # curve-GP obs noise: float = fixed (paper), None = inferred by ML
     seed: int = 0                   # forward-simulation RNG seed
+    # Extra fidelities (0-indexed epochs) recorded as fidelity-augmented surrogate
+    # inputs per evaluation, alongside the stop epoch n_t (paper default). Each is
+    # only added when it is below the run's stop epoch. Consumed by the BOSS
+    # recording path, and only when the surrogate is fidelity-aware.
+    interim_fid_epochs: tuple[int, ...] = (0, 9, 19, 29, 39)
 
 
 @dataclass
@@ -90,6 +95,25 @@ class BOSResult:
     n_star: int                     # epoch the run stopped at
     reason: str                     # 'override' / 'infeasible_kill' / 'completed'
     stopped_early: bool             # True if BOS broke the run before the budget
+
+
+# =========================================================== summary statistic
+def summary_statistic(curve: np.ndarray) -> np.ndarray:
+    """The BO-BOS summary statistic St: the running mean of the post-warm-up curve
+    segment, along the last axis. Returned *cumulatively* so the table builder gets
+    every epoch's value (shape preserved) and the runtime lookup reads the last one.
+
+    This is the single definition shared by ``build_decision_table`` (over the M
+    simulated paths) and ``BOSStopper`` (over the one realised curve), so the two
+    can never drift apart.
+
+    TODO(summary-stat): this matches the paper (running mean). Decomposition RSE
+    curves may be better summarised by a different statistic — e.g. the last value,
+    a log-slope, or an EMA that weights recent epochs. Swap the body here and both
+    the table build and the runtime lookup stay consistent; promote to a BOSConfig
+    knob once a second statistic actually exists.
+    """
+    return np.cumsum(curve, axis=-1) / np.arange(1, curve.shape[-1] + 1)
 
 
 # ======================================================= decision-table builder
@@ -122,7 +146,7 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
         future = future[keep]
     endpoints = future[:, -1]
     infeasible_end = endpoints > rho                      # theta_2 indicator at N
-    stat = np.cumsum(future, axis=1) / np.arange(1, future.shape[1] + 1)  # St per path
+    stat = summary_statistic(future)                      # St per path (running mean)
     future_cells = np.clip(np.searchsorted(grid, stat, side="right") - 1, 0, n_cells - 1)
 
     # Terminal losses, as a 2-D histogram over (step, cell): per cell the fraction p
@@ -211,7 +235,7 @@ class BOSStopper:
         row = n - 1 - self._origin
         if not 0 <= row < self._table.shape[0]:
             return False
-        stat = float(curve[self._origin:].mean())         # running mean since the table's origin
+        stat = float(summary_statistic(curve[self._origin:])[-1])   # St since the table's origin
         cell = int(np.clip(np.searchsorted(self._grid, stat, side="right") - 1, 0, self._n_cells - 1))
         if int(self._table[row, cell]) == STOP_INFEASIBLE:
             return self._stop(0, n, "infeasible_kill")
