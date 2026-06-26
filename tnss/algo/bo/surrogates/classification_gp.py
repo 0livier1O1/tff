@@ -158,12 +158,19 @@ class ClassificationGP:
     # ----------------------------------------------------- model + fit steps
     def _build(self, X: Tensor, Z: Tensor) -> SingleTaskVariationalGP:
         s = self.space
+        # Kernel ARD dimension follows the actual input width: D for the plain
+        # structure surrogate, D+1 when BOSS feeds a fidelity-augmented column
+        # (the trailing epoch fraction n/N). The fidelity path assumes a constant
+        # mean (ConstantMean is width-agnostic; log_size/linear read the rank vector
+        # and are not fidelity-aware) and round_inputs=False (the fidelity column is
+        # not a rank to snap).
+        d_in = X.shape[-1]
         return SingleTaskVariationalGP(
             X, Z,
             likelihood=BernoulliLikelihood(),
-            mean_module=make_mean(self.mean, s.dim, N=s.n_cores, max_rank=s.max_rank, t_shape=s.mode_sizes),
+            mean_module=make_mean(self.mean, d_in, N=s.n_cores, max_rank=s.max_rank, t_shape=s.mode_sizes),
             covar_module=make_feasibility_kernel(
-                self.kernel, s.dim, max_rank=s.max_rank,
+                self.kernel, d_in, max_rank=s.max_rank,
                 input_warp=self.input_warp, round_inputs=self.round_inputs),
             variational_strategy=STRATEGIES[self.var_strategy],
             inducing_points=X,

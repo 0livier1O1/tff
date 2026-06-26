@@ -27,6 +27,7 @@ def reconstruction_error(
     init_lr: float | None = None, momentum: float = 0.5,
     loss_patience: int = 2500, lr_patience: int = 250,
     backend: str = "cupy", dtype: str = "float32", min_rse: float | None = None,
+    callback=None,
 ) -> tuple[float, list[float]]:
     """Best RSE over `n_runs` decompositions of `target` onto `adjacency`, with the
     loss curve of that best restart.
@@ -57,6 +58,7 @@ def reconstruction_error(
                 tgt_cp, max_epochs=max_epochs, method=method,
                 init_lr=init_lr, momentum=momentum,
                 loss_patience=loss_patience, lr_patience=lr_patience,
+                callback=callback,                                       # BOS early-stop hook
             )
             val = float(losses[-1]) if losses else float("inf")
             if val < best_rse:

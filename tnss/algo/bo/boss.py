@@ -34,6 +34,8 @@ from botorch.acquisition import AcquisitionFunction
 from botorch.optim import optimize_acqf_discrete_local_search
 
 from tnss.algo.bo.acquisitions import Acquisition, SearchState
+from tnss.algo.bo.bos_stopping import BOSConfig, BOSStopper
+from tnss.algo.bo.fidelity import FidelityPinnedModel, fidelity_observations
 from tnss.algo.bo.init_design import sample_init_design
 from tnss.algo.bo.labels import make_label
 from tnss.algo.bo.search_space import SearchSpace
@@ -76,6 +78,8 @@ class BOSS:
         decomp_momentum: float = 0.5,     # decomposition optimiser momentum
         decomp_loss_patience: int = 2500, # decomposition loss-plateau patience
         decomp_lr_patience: int = 250,    # decomposition LR-plateau patience
+        # --- BOS feasibility stopping (optional; None = fixed-budget decomposition) ---
+        bos: BOSConfig | None = None,     # enable BOS early stopping of each decomposition
         # --- identity / reproducibility ---
         label: str | None = None,         # readable run identity, e.g. 'reg-cucb-white-monkey'
         seed: int = 0,                    # RNG seed (initial design + decomposition)
@@ -130,6 +134,22 @@ class BOSS:
         self.cr: list[float] = []
         self.feasible: list[bool] = []
 
+        # BOS feasibility stopping. When `bos` is set, each decomposition is driven by
+        # a BOSStopper callback that breaks it the instant feasibility is settled.
+        # Fidelity augmentation (the surrogate gains an epoch-fraction column and is
+        # trained on the interrupted runs' partial fidelities) is enabled only for the
+        # classification feasibility surrogate — the path BOS targets; other surrogates
+        # still early-stop but record the verdict at face value.
+        self.bos = bos
+        self._fidelity = bos is not None and getattr(surrogate, "kind", None) == "clas"
+        self._last_bos = None
+        # Two-tier history: the verdict rows above drive best()/incumbents/artifacts;
+        # these fidelity-augmented rows ([x, n/N], rse@n, cr, z@n) train the surrogate.
+        self._fx: list[Tensor] = []
+        self._frse: list[float] = []
+        self._fcr: list[float] = []
+        self._ffeasible: list[float] = []
+
         # Per-step records for save_results -> the dashboard artifacts: one trace
         # row per evaluated structure, its decomposition loss curve, and a CPU
         # snapshot of the surrogate fitted at each BO step.
@@ -145,23 +165,20 @@ class BOSS:
         self._evaluate_initial_design(progress, total)
         for b in range(self.budget):
             t0 = time.perf_counter()
-            model = self.surrogate.fit(
-                self._X(),
-                self._rse(),
-                self._cr(),
-                self._feasible(),
-                b,
-            )
+            model = self.surrogate.fit(*self._training_data(), b)
             gp_fit_time = time.perf_counter() - t0
 
             t0 = time.perf_counter()
-            acquisition = self.acquisition.build(model, self._search_state())
+            # In fidelity mode the surrogate lives in [0,1]^(D+1); the acquisitions
+            # search structure space at full fidelity n/N = 1 (paper: argmax_x acqf([x,N])).
+            acq_model = FidelityPinnedModel(model) if self._fidelity else model
+            acquisition = self.acquisition.build(acq_model, self._search_state())
             candidate = self._maximize_acquisition(acquisition)
             suggest_time = time.perf_counter() - t0
 
             step = self.n_init + b
             self._snapshot_gp(
-                model, step=step, phase="bo"
+                model, step=step, phase="bo"        # snapshot the base (un-pinned) model
             )
             self._evaluate(
                 candidate, step=step, phase="bo", gp_fit_time=gp_fit_time, suggest_time=suggest_time
@@ -206,9 +223,12 @@ class BOSS:
 
         cr = float(self.compression_ratio(x))
         feasible = bool(rse <= self.threshold)
-        self._append(x, float(rse), cr, feasible)
+        self._append(x, float(rse), cr, feasible)          # verdict history (drives best/save)
 
-        self.rows.append({
+        if self._fidelity:                                 # + per-fidelity surrogate rows
+            self._append_fidelity_rows(x, losses, cr)
+
+        row = {
             "step": step,
             "phase": phase,
             "cr": cr,
@@ -219,7 +239,12 @@ class BOSS:
             "gp_fit_time_s": gp_fit_time,
             "suggest_time_s": suggest_time,
             "step_time_s": gp_fit_time + suggest_time + eval_time,
-        })
+        }
+        if self._last_bos is not None:                     # BOS stop diagnostics
+            row["bos_stop_epoch"] = self._last_bos.n_star
+            row["bos_reason"] = self._last_bos.reason
+            row["bos_epochs_saved"] = self.decomp_epochs - self._last_bos.n_star
+        self.rows.append(row)
         self.decomp_traces.append({"step": step, "phase": phase, "losses": losses})
 
     def best(self) -> dict:
@@ -261,15 +286,28 @@ class BOSS:
         """Best RSE and the decomposition loss curve for the structure at normalised
         point `x`, by decomposing it on the GPU (the loop's one expensive
         measurement). The decomposition import is deferred to here so the package
-        stays importable without cupy / cuquantum."""
+        stays importable without cupy / cuquantum.
+
+        With BOS enabled, a BOSStopper callback drives a single continuous decomposition
+        and breaks it the moment feasibility is settled; ``self._last_bos`` holds the
+        ``(z, n*, reason)`` outcome for recording."""
         from tnss.algo.bo.decomposition import reconstruction_error  # GPU-only; fail late
 
         adjacency = self.space.to_adjacency(self.space.to_ranks(x))
-        return reconstruction_error(
+        stopper, n_runs = None, self.decomp_runs
+        if self.bos is not None:
+            # one continuous, interruptible run (the stateful stopper accumulates a
+            # single curve, so restarts would corrupt it -> n_runs = 1)
+            stopper = BOSStopper(self.bos, rho=self.threshold, budget=self.decomp_epochs)
+            n_runs = 1
+        rse, losses = reconstruction_error(
             self.target, adjacency, method=self.decomp_method,
-            max_epochs=self.decomp_epochs, n_runs=self.decomp_runs,
+            max_epochs=self.decomp_epochs, n_runs=n_runs,
             init_lr=self.decomp_init_lr, momentum=self.decomp_momentum,
-            loss_patience=self.decomp_loss_patience, lr_patience=self.decomp_lr_patience)
+            loss_patience=self.decomp_loss_patience, lr_patience=self.decomp_lr_patience,
+            callback=stopper)
+        self._last_bos = stopper.result() if stopper is not None else None
+        return rse, losses
 
     # ============================================= per-step context (chunk 3+)
     def _search_state(self) -> SearchState:
@@ -308,6 +346,30 @@ class BOSS:
 
     def _feasible(self) -> Tensor:
         return torch.tensor(self.feasible)
+
+    # ------------------------------------------- fidelity-augmented training set
+    def _training_data(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """The arrays the surrogate fits on: the fidelity-augmented set in fidelity
+        mode (X is the [0,1]^(D+1) ``[x, n/N]`` rows), else the plain verdict history
+        ([0,1]^D). The existing ``target_fn`` turns each row's (rse, cr, feasible) into
+        the right target for either surrogate."""
+        if self._fidelity:
+            return (torch.stack(self._fx), torch.tensor(self._frse),
+                    torch.tensor(self._fcr), torch.tensor(self._ffeasible))
+        return self._X(), self._rse(), self._cr(), self._feasible()
+
+    def _append_fidelity_rows(self, x: Tensor, losses: list[float], cr: float) -> None:
+        """Add this run's per-fidelity rows ``([x, n/N], rse@n, cr, z@n)`` to the
+        surrogate training set: the verdict at the stop epoch plus the interim epochs
+        below it (CR is fidelity-independent, so it is shared across the rows)."""
+        n_star = self._last_bos.n_star if self._last_bos is not None else len(losses)
+        fids, rses, feas = fidelity_observations(
+            losses, n_star, self.decomp_epochs, self.threshold, self.bos.interim_fid_epochs)
+        for f, r, z in zip(fids, rses, feas):
+            self._fx.append(torch.cat([x, torch.tensor([f], dtype=x.dtype)]))
+            self._frse.append(float(r))
+            self._fcr.append(cr)
+            self._ffeasible.append(float(z))
 
     # ===================================================== surrogate snapshot
     def _snapshot_gp(self, model, *, step: int, phase: str) -> None:
