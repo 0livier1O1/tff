@@ -528,8 +528,12 @@ class cuTensorNetwork:
         method="sgd",
         warm_start_method=None,
         warm_start_epochs=0,
+        callback=None,
         **kwargs,
     ):
+        # `callback`, if given, is invoked once per epoch of the MAIN pass as
+        # `callback(rse) -> bool`; returning True breaks the decomposition early
+        # (e.g. BOS feasibility stopping). The warm-start pass is never callbacked.
         # Automatically toggle Adam if requested via method string
         use_adam = kwargs.get("use_adam", False) or (method == "adam")
         kwargs["use_adam"] = use_adam
@@ -579,6 +583,7 @@ class cuTensorNetwork:
             lr_patience=lr_patience,
             max_epochs=max_epochs,
             momentum=momentum,
+            callback=callback,
             **kwargs,
         )
         if method == "als":
@@ -614,6 +619,7 @@ class cuTensorNetwork:
                 "decompose currently supports only backend='torch' (SGD + autograd)."
             )
 
+        callback = kwargs.get("callback")
         if not self.cores:
             raise ValueError("Network has no tensors to optimize.")
 
@@ -656,6 +662,9 @@ class cuTensorNetwork:
             epoch += 1
             loss_value = float(loss.detach().item())
 
+            if callback is not None and callback(loss_value):
+                break
+
             if loss_value < best_loss - min_delta:
                 best_loss = loss_value
                 wait = 0
@@ -695,6 +704,7 @@ class cuTensorNetwork:
         **kwargs,
     ):
         optimizer = "adam" if kwargs.get("use_adam", False) else "sgd"
+        callback = kwargs.get("callback")
         if not self.cores:
             raise ValueError("Network has no tensors to optimize.")
         if self._qualifiers is None:
@@ -748,6 +758,8 @@ class cuTensorNetwork:
             residual = contracted_t - target
             loss = cp.linalg.norm(residual) / target_norm
             loss_history.append(loss.item())
+            if callback is not None and callback(loss_history[-1]):
+                break
 
             residual_norm = cp.maximum(
                 cp.linalg.norm(residual), cp.finfo(residual.dtype).eps
@@ -828,6 +840,7 @@ class cuTensorNetwork:
         cvg_threshold = float(kwargs.get("cvg_threshold", 1e-7))
         verbose = int(kwargs.get("verbose", -1))
         vertices = tuple(kwargs.get("vertices", range(len(self.cores))))
+        callback = kwargs.get("callback")
 
         target = cp.asarray(target).astype(self.cores[0].dtype, copy=False)
         eps = cp.finfo(target.dtype).eps
@@ -914,6 +927,8 @@ class cuTensorNetwork:
             if verbose > 0:
                 print(it, ":", loss)
 
+            if callback is not None and callback(loss):
+                break
             if tol is not None and loss <= tol:
                 break
 
@@ -948,6 +963,7 @@ class cuTensorNetwork:
             )
 
         xp = cp
+        callback = kwargs.get("callback")
         target = xp.asarray(target).astype(self.cores[0].dtype, copy=False)
         N = len(self.cores)
         (itembytes, target_norm, env_specs, full_path, recon_peak,
@@ -998,6 +1014,8 @@ class cuTensorNetwork:
                 d = (loss_history[-1] - loss_history[-2]) if len(loss_history) > 1 else float("nan")
                 print(f"[pam {len(loss_history):>4}/{max_epochs}] "
                       f"rse={loss_history[-1]:.4e}  Δ={d:+.2e}")
+            if callback is not None and callback(loss_history[-1]):
+                break
             if tol is not None and loss_history[-1] <= tol:
                 break
 
@@ -1067,6 +1085,7 @@ class cuTensorNetwork:
             raise NotImplementedError(
                 f"AGD decomposition requires backend='cupy', got '{self.backend}'.")
         xp = cp
+        callback = kwargs.get("callback")
         target = xp.asarray(target).astype(self.cores[0].dtype, copy=False)
         N = len(self.cores)
         (itembytes, target_norm, env_specs, full_path, recon_peak,
@@ -1107,6 +1126,8 @@ class cuTensorNetwork:
                 d = (loss_history[-1] - loss_history[-2]) if len(loss_history) > 1 else float("nan")
                 print(f"[agd {len(loss_history):>4}/{max_epochs}] "
                       f"rse={loss_history[-1]:.4e}  Δ={d:+.2e}")
+            if callback is not None and callback(loss_history[-1]):
+                break
             if tol is not None and loss_history[-1] <= tol:
                 break
 
