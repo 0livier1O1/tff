@@ -25,7 +25,6 @@ import torch
 
 from botorch.fit import fit_gpytorch_mll
 from botorch.models import SingleTaskGP
-from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.means import ZeroMean
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
@@ -43,41 +42,40 @@ class LearningCurveGP:
         point (the paper's choice, for diverse forward samples); ``None`` lets the
         marginal-likelihood fit *infer* it (a standard ``GaussianLikelihood``).
     fit_maxiter : max optimiser iterations for the marginal-likelihood fit.
-    kernel : ``'expdecay'`` (Swersky exp-decay on raw epochs, the default),
-        ``'warped'`` (a Matern-2.5 over the epoch axis *normalised to [0,1]* with a
-        learned Kumaraswamy input warp), or ``'picheny'`` (the single-curve
-        Picheny-Ginsbourger space-time kernel: asymptote + warped-time exp envelope,
-        fixed budget-scaled params, no per-curve fit).
-    budget : the epoch budget N, used only by ``'warped'`` to normalise the epoch
-        axis to [0,1] for the warp + Matern.
+    kernel : the base curve kernel — ``'expdecay'`` (Swersky exponential decay) or
+        ``'picheny'`` (the single-curve Picheny-Ginsbourger space-time kernel:
+        asymptote + warped-time exp envelope). Both have learnable params (fit per curve).
+    input_warp : if True, compose a learned Kumaraswamy input warp (the shared
+        :func:`~tnss.kernels.input_warp_kernel.maybe_warp`) on the epoch axis, which is
+        then normalised to [0,1] by the budget. Off by default.
+    budget : the epoch budget N — scales the picheny param inits, and normalises the
+        epoch axis to [0,1] when ``input_warp`` is on.
     """
 
     def __init__(self, noise: float | None = 1e-3, fit_maxiter: int = 200,
-                 kernel: str = "expdecay", budget: int | None = None):
+                 kernel: str = "expdecay", input_warp: bool = False,
+                 budget: int | None = None):
         self.noise = None if noise is None else float(noise)
         self.fit_maxiter = int(fit_maxiter)
         self.kernel = kernel
+        self.input_warp = bool(input_warp)
         self.budget = budget
         self._model: SingleTaskGP | None = None
 
-    _WARPED = ("warped", "expdecay_warp", "picheny_warp")   # need epochs normalised to [0,1]
-
     def _epoch_x(self, epochs: np.ndarray) -> torch.Tensor:
-        """Epoch column; raw for the exp-decay / picheny kernels, normalised to [0,1]
-        (by the budget) for anything carrying a Kumaraswamy input warp."""
+        """Epoch column; raw for the base kernels, normalised to [0,1] (by the budget)
+        when an input warp is composed (the Kumaraswamy warp expects [0,1] inputs)."""
         x = torch.as_tensor(np.asarray(epochs, float), dtype=torch.double).reshape(-1, 1)
-        return x / float(self.budget) if self.kernel in self._WARPED else x
+        return x / float(self.budget) if self.input_warp else x
 
     def _covar(self, value_scale: float = 1.0):
-        if self.kernel == "warped":
-            return ScaleKernel(maybe_warp(MaternKernel(nu=2.5, ard_num_dims=1), 1, True))
-        if self.kernel == "expdecay_warp":
-            return maybe_warp(ExpDecayKernel(), 1, True)         # exp-decay over warped [0,1] time
-        if self.kernel == "picheny_warp":                        # picheny over warped [0,1] time
-            return maybe_warp(PichenyTimeKernel(budget=1, value_scale=value_scale), 1, True)
-        if self.kernel == "picheny":
-            return PichenyTimeKernel(self.budget, value_scale)
-        return ExpDecayKernel()
+        """Base curve kernel, with the optional Kumaraswamy input warp applied uniformly
+        via the shared ``maybe_warp`` (epochs are normalised to [0,1] in ``_epoch_x`` when
+        warping, so the picheny params are budget-1 scaled to match)."""
+        budget = 1 if self.input_warp else self.budget
+        base = (PichenyTimeKernel(budget, value_scale) if self.kernel == "picheny"
+                else ExpDecayKernel())
+        return maybe_warp(base, 1, self.input_warp)
 
     def fit(self, epochs: np.ndarray, values: np.ndarray) -> "LearningCurveGP":
         """Fit the curve GP to the observed prefix ``(epochs, values)``."""

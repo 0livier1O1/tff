@@ -34,6 +34,7 @@ from botorch.acquisition import AcquisitionFunction
 from botorch.optim import optimize_acqf_discrete_local_search
 
 from tnss.algo.bo.acquisitions import Acquisition, SearchState
+from tnss.algo.bo.diagnostics import RunDiagnostics
 from tnss.algo.bo.bos_stopping import BOSConfig, BOSStopper
 from tnss.algo.bo.fidelity import FidelityPinnedModel, fidelity_observations
 from tnss.algo.bo.init_design import sample_init_design
@@ -141,6 +142,13 @@ class BOSS:
         # surrogates: the classifier learns z(f)=1{RSE(f)<=rho}, the regressor the
         # objective CR+lambda*RSE(f) — both per-fidelity via the shared target_fn.
         self.bos = bos
+        # BOS is calibrated on the monotone AGD decomposition curve; the other optimisers
+        # (adam/sgd/als/pam) give spiky, non-monotone curves the curve GP mis-extrapolates,
+        # so BOS is restricted to AGD for now (no live RSE clamp / re-calibration yet).
+        if bos is not None and self.decomp_method != "agd":
+            raise ValueError(
+                f"BOS feasibility stopping currently supports only decomp_method='agd' "
+                f"(got {self.decomp_method!r}); the curve model assumes the monotone AGD RSE curve.")
         self._fidelity = bos is not None and getattr(surrogate, "kind", None) in ("clas", "reg")
         self._last_bos = None
         # Two-tier history: the verdict rows above drive best()/incumbents/artifacts;
@@ -156,6 +164,12 @@ class BOSS:
         self.rows: list[dict] = []
         self.decomp_traces: list[dict] = []
         self.gp_states: list[dict] = []
+        # Live, out-of-sample surrogate/acquisition diagnostics (see diagnostics.py).
+        self.diagnostics = RunDiagnostics()
+        # Ground-truth generating structure (set by the runner when available): the
+        # raw adjacency for a one-off reference decomposition, plus a reference record.
+        self._gen_adj: Tensor | None = None
+        self._generating: dict | None = None
 
     # ====================================================================== run
     def run(self, progress: Callable[[str, int, int], None] | None = None) -> dict:
@@ -172,7 +186,8 @@ class BOSS:
             # In fidelity mode the surrogate lives in [0,1]^(D+1); the acquisitions
             # search structure space at full fidelity n/N = 1 (paper: argmax_x acqf([x,N])).
             acq_model = FidelityPinnedModel(model) if self._fidelity else model
-            acquisition = self.acquisition.build(acq_model, self._search_state())
+            state = self._search_state()
+            acquisition = self.acquisition.build(acq_model, state)
             candidate = self._maximize_acquisition(acquisition)
             suggest_time = time.perf_counter() - t0
 
@@ -181,11 +196,76 @@ class BOSS:
                 model, step=step, phase="bo"        # snapshot the base (un-pinned) model
             )
             self._evaluate(
-                candidate, step=step, phase="bo", gp_fit_time=gp_fit_time, suggest_time=suggest_time
+                candidate, step=step, phase="bo", gp_fit_time=gp_fit_time,
+                suggest_time=suggest_time, model=model,        # model -> C2 sigma_fn
             )
+            # Live surrogate/acquisition diagnostics — out-of-sample at the chosen
+            # candidate (the model has not been refit on it). Best-effort.
+            self._record_diagnostics(step, model, acq_model, acquisition, candidate,
+                                     state.infeasible_fraction)
             if progress is not None:
                 progress("bo", step + 1, total)
         return self.best()
+
+    def _record_diagnostics(self, step, model, acq_model, acquisition, candidate,
+                            infeasible_frac) -> None:
+        """Capture this BO step's surrogate/acquisition diagnostics. Fully guarded:
+        a diagnostics failure must never interrupt or alter the search."""
+        try:
+            row = self.rows[-1]
+            self.diagnostics.record(
+                step=step, model=model, acq_model=acq_model, acquisition=acquisition,
+                candidate=candidate, objective=row["objective"], rse=row["rse"],
+                feasible=row["feasible"], infeasible_frac=infeasible_frac,
+            )
+        except Exception:
+            pass
+
+    def set_generating(self, gen_adj) -> None:
+        """Register the ground-truth generating structure (a full N×N adjacency with
+        raw bond ranks). Enables the per-step P(feasible) the surrogate assigns it
+        (the generating point, ranks clamped to the lattice for the classifier query)
+        and a one-off reference decomposition in `analyse` (the raw adjacency, full
+        rank). Best-effort — a bad adjacency simply disables both."""
+        try:
+            A = torch.as_tensor(np.asarray(gen_adj), dtype=torch.double)
+            self._gen_adj = A
+            N = A.shape[0]
+            iu = torch.triu_indices(N, N, offset=1)
+            ranks = A[iu[0], iu[1]]
+            denom = max(self.space.max_rank - 1, 1)
+            self.diagnostics.gen_x = ((ranks.clamp(1, self.space.max_rank) - 1.0) / denom).reshape(1, -1)
+        except Exception:
+            self._gen_adj = None
+
+    def analyse(self, progress: Callable[[str, int, int], None] | None = None) -> None:
+        """Post-run analysis phase. The live one-step-ahead surrogate diagnostics are
+        already captured during `run` (no re-fitting); this runs the only genuinely
+        post-hoc work — the generating-structure reference decomposition — and reports
+        an `analysis` phase. Guarded — it can never lose the completed run."""
+        self._reference_decomposition()
+        total = max(1, self.budget)
+        if progress is not None:
+            progress("analysis", total, total)
+
+    def _reference_decomposition(self) -> None:
+        """Decompose the generating structure once (full-rank, no lattice clamping)
+        for a reference RSE / CR / feasibility -> `self._generating`. Guarded."""
+        if self._gen_adj is None:
+            return
+        try:
+            from tnss.algo.bo.decomposition import reconstruction_error  # GPU-only
+            A = self._gen_adj
+            rse, _ = reconstruction_error(
+                self.target, A.int(), method=self.decomp_method,
+                max_epochs=self.decomp_epochs, n_runs=self.decomp_runs,
+                init_lr=self.decomp_init_lr, momentum=self.decomp_momentum,
+                loss_patience=self.decomp_loss_patience, lr_patience=self.decomp_lr_patience)
+            cr = float(A.prod(dim=-1).sum() / A.diagonal().prod())  # CR = Σ_i Π_j A_ij / Π diag
+            self._generating = {"rse": float(rse), "cr": cr,
+                                "feasible": int(float(rse) <= self.threshold)}
+        except Exception:
+            self._generating = None
 
     # ========================================================= loop components
     def _evaluate_initial_design(
@@ -212,13 +292,14 @@ class BOSS:
 
     def _evaluate(
         self, x: Tensor, *, step: int, phase: str,
-        gp_fit_time: float = 0.0, suggest_time: float = 0.0,
+        gp_fit_time: float = 0.0, suggest_time: float = 0.0, model=None,
     ) -> None:
         """Decompose one structure, append it to history, and record its trace row
-        (metrics + per-phase timings) and decomposition loss curve."""
+        (metrics + per-phase timings) and decomposition loss curve. ``model`` is the
+        current surrogate, passed only so BOS C2 can read its full-fidelity uncertainty."""
         x = x.reshape(-1)
         t0 = time.perf_counter()
-        rse, losses = self._reconstruction_error(x)
+        rse, losses = self._reconstruction_error(x, model=model)
         eval_time = time.perf_counter() - t0
 
         cr = float(self.compression_ratio(x))
@@ -282,11 +363,12 @@ class BOSS:
     def compression_ratio(self, x: Tensor) -> Tensor:
         return self.space.compression_ratio(x)
 
-    def _reconstruction_error(self, x: Tensor) -> tuple[float, list[float]]:
+    def _reconstruction_error(self, x: Tensor, model=None) -> tuple[float, list[float]]:
         """Best RSE and the decomposition loss curve for the structure at normalised
         point `x`, by decomposing it on the GPU (the loop's one expensive
         measurement). The decomposition import is deferred to here so the package
-        stays importable without cupy / cuquantum.
+        stays importable without cupy / cuquantum. ``model`` is the current surrogate,
+        passed only so a BOS C2 gate can read its full-fidelity uncertainty.
 
         With BOS enabled, a BOSStopper callback drives a single continuous decomposition
         and breaks it the moment feasibility is settled; ``self._last_bos`` holds the
@@ -298,7 +380,8 @@ class BOSS:
         if self.bos is not None:
             # one continuous, interruptible run (the stateful stopper accumulates a
             # single curve, so restarts would corrupt it -> n_runs = 1)
-            stopper = BOSStopper(self.bos, rho=self.threshold, budget=self.decomp_epochs)
+            stopper = BOSStopper(self.bos, rho=self.threshold, budget=self.decomp_epochs,
+                                 sigma_fn=self._c2_sigma_fn(x, model))
             n_runs = 1
         rse, losses = reconstruction_error(
             self.target, adjacency, method=self.decomp_method,
@@ -308,6 +391,21 @@ class BOSS:
             callback=stopper)
         self._last_bos = stopper.result() if stopper is not None else None
         return rse, losses
+
+    def _c2_sigma_fn(self, x: Tensor, model):
+        """Build ``sigma([x, fid])`` from the fidelity surrogate for BOS C2 — the
+        surrogate's posterior std at the candidate and an arbitrary epoch fraction. None
+        (C2 inert) when C2 is off, the surrogate is not fidelity-aware, or no model is
+        available yet (the initial design)."""
+        if not (self._fidelity and model is not None
+                and self.bos is not None and self.bos.c2_kappa is not None):
+            return None
+        xb = x.reshape(1, -1).double()
+        def sigma_fn(fid: float) -> float:
+            xf = torch.cat([xb, torch.full((1, 1), float(fid), dtype=xb.dtype)], dim=1)
+            with torch.no_grad():
+                return float(model.posterior(xf).variance.clamp_min(1e-12).sqrt().reshape(-1)[0])
+        return sigma_fn
 
     # ============================================= per-step context (chunk 3+)
     def _search_state(self) -> SearchState:
@@ -390,6 +488,8 @@ class BOSS:
         - ``boss_results.npz``  raw arrays X_std, Y_rse, Y_cr, Y_objective, Y_feasible
         - ``gp_states.pt``      the per-BO-step surrogate snapshots
         - ``decomp_traces.json`` per-structure decomposition loss curves
+        - ``diagnostics.csv``   per-step out-of-sample surrogate/acquisition diagnostics
+        - ``generating.json``   generating-structure reference {rse, cr, feasible} (when known)
         - ``.done``             completion sentinel
         """
         out_dir = Path(out_dir)
@@ -410,4 +510,17 @@ class BOSS:
 
         torch.save(self.gp_states, out_dir / "gp_states.pt")
         (out_dir / "decomp_traces.json").write_text(json.dumps(self.decomp_traces))
+
+        # Self-contained surrogate/acquisition diagnostics (tiny). Guarded so a
+        # diagnostics write can never block the run's primary artifacts / .done.
+        try:
+            self.diagnostics.save(out_dir)
+        except Exception:
+            pass
+        try:
+            if self._generating is not None:
+                (out_dir / "generating.json").write_text(json.dumps(self._generating))
+        except Exception:
+            pass
+
         (out_dir / ".done").write_text("ok")

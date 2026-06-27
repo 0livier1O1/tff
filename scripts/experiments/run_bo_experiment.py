@@ -59,7 +59,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--target-path", required=True)
-    parser.add_argument("--adj-path", default=None, help="Unused — the new engine derives the space from the target.")
+    parser.add_argument("--adj-path", default=None,
+                        help="Optional generating-structure adjacency (synthetic problems): "
+                             "enables generating-structure feasibility diagnostics + reference decomposition.")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -78,6 +80,16 @@ def main() -> None:
     t0 = time.time()
 
     if family == "boss":
+        # Register the generating structure when available (synthetic problems): it
+        # enables the per-step P(feasible) of the ground truth and the post-run
+        # reference decomposition. Guarded — never blocks the run.
+        if args.adj_path and Path(args.adj_path).exists():
+            try:
+                algo.set_generating(np.load(args.adj_path))
+            except Exception:
+                import traceback as _tb
+                print("set_generating failed (run kept):\n" + _tb.format_exc())
+
         def _progress(phase: str, completed: int, total: int) -> None:
             tmp = progress_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(
@@ -87,6 +99,13 @@ def main() -> None:
 
         _progress("init", 0, algo.n_init + algo.budget)
         algo.run(progress=_progress)
+        # Post-run analysis: fire each algorithm's diagnostics pass. Guarded so a
+        # diagnostics failure never costs us the completed search.
+        try:
+            algo.analyse(progress=_progress)
+        except Exception:
+            import traceback as _tb
+            print("post-run analysis failed (run kept):\n" + _tb.format_exc())
         algo.save_results(out_dir)
         best = algo.best()
         print(f"Done -> {out_dir}  (best CR {best['cr']:.4f}, RSE {best['rse']:.5f}, feasible {best['feasible']})")
