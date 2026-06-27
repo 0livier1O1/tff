@@ -164,6 +164,21 @@ class ClassificationGP:
         # mean (ConstantMean is width-agnostic; log_size/linear read the rank vector
         # and are not fidelity-aware) and round_inputs=False (the fidelity column is
         # not a rank to snap).
+        #
+        # TODO(picheny-unify): in the fidelity case (d_in == D+1, input = [ranks(D), n/N])
+        # this builds a Matern over D+1 dims, treating the epoch fraction as just another
+        # ARD coordinate — it ignores the curve structure. The principled alternative is the
+        # full space-time PichenyKernel(D) (already in tnss/kernels/picheny_kernel.py, today
+        # unused): k_Y((x,t),(x',t')) = k_F(x,x') + sigma(t)sigma(t') r_Gx(x,x') r_Gt(t,t'),
+        # with the trailing fidelity column AS the time t. That is the SAME Picheny family the
+        # BOS curve GP already uses (its single-curve reduction PichenyTimeKernel), closing the
+        # loop end-to-end: it correlates partially-converged evaluations ACROSS structures (the
+        # raison d'etre of Picheny — the BOS interim-fidelity rows then inform each other), and
+        # sigma(t)->0 gives a clean converged-structure read-off for FidelityPinnedModel's
+        # fid=1 acquisition query (k_Y -> k_F). Path: branch here to PichenyKernel(D) when
+        # d_in == s-search-dim + 1 (fidelity layout already puts the epoch fraction last);
+        # validate fk/mk + acquisition vs the Matern baseline on a fidelity run. Same change
+        # applies to RegressionGP._kernel. See also tnss/algo/bo/fidelity.py.
         d_in = X.shape[-1]
         return SingleTaskVariationalGP(
             X, Z,

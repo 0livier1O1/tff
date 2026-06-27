@@ -48,7 +48,7 @@ GP is a plain gpytorch exact GP (CPU is fine); only the decomposition needs a GP
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import numpy as np
@@ -73,7 +73,8 @@ class BOSConfig:
     observed prefix every k epochs (0 = off — the accuracy/cost knob flagged in the
     spec for when an N0-only fit extrapolates poorly).
     """
-    warmup: int = 8                 # N0: epochs observed before BOS engages
+    warmup: int | None = None       # N0: epochs before BOS engages (None = auto = round(0.16*budget),
+                                    #     the paper's N0/N ratio, which the curve study matched)
     K1: float = 100.0               # cost of a wrong feasible conclusion (d1)
     K2: float = 100.0               # cost of a wrong infeasible conclusion (d2)
     c: float = 1.0                  # per-epoch continuation cost
@@ -82,6 +83,9 @@ class BOSConfig:
     min_cell_samples: int = 30      # below this, a cell conservatively continues
     refit_every: int = 0            # rebuild table every k epochs (0 = once, at N0)
     noise: float | None = 1e-3      # curve-GP obs noise: float = fixed (paper), None = inferred by ML
+    fit_maxiter: int = 25           # curve-GP marginal-likelihood fit iters. Picheny needs few in
+                                    # practice; ~25 clips its expensive ill-conditioned tail (8x on
+                                    # worst-case fits) with no change to the stopping decision.
     seed: int = 0                   # forward-simulation RNG seed
     # Extra fidelities (0-indexed epochs) recorded as fidelity-augmented surrogate
     # inputs per evaluation, alongside the stop epoch n_t (paper default). Each is
@@ -102,12 +106,22 @@ class BOSConfig:
     converge_after_feasible: bool = False
     converge_rel_tol: float = 0.01
     converge_patience: int = 20
-    # Curve-model variants (forward simulator). curve_kernel: 'expdecay' (Swersky, the
-    # default) or 'warped' (Matern with a learned Kumaraswamy input warp on the epoch
-    # axis). log_rse: fit / decide on log(RSE) instead of raw RSE — RSE spans orders of
-    # magnitude, so log space separates feasible (~1e-6) from infeasible (~1) far more.
-    curve_kernel: str = "expdecay"
-    log_rse: bool = False
+    # Curve-model (forward simulator), defaulted to the winning config from the curve-model
+    # study. curve_kernel: 'picheny' (Picheny-Ginsbourger asymptote + warped-time, the best)
+    # or 'expdecay' (Swersky, simpler few-points-worse fallback). curve_input_warp: compose a
+    # learned Kumaraswamy input warp on the epoch axis (off by default — it is redundant for
+    # picheny and hurts exp-decay). log_rse: fit / decide on log(RSE) — RSE spans orders of
+    # magnitude, so log separates feasible (~1e-6) from infeasible (~1) far more (the dominant choice).
+    curve_kernel: str = "picheny"
+    log_rse: bool = True
+    curve_input_warp: bool = False
+    # Paper's time-varying penalty (Dai et al., bos_function.py): K1,t = K1 / gamma^bo_iteration
+    # grows over BO iterations (gamma < 1) — later iterations penalise a wrong feasible
+    # conclusion more, so the kill threshold tau = K2/(K1,t+K2) shrinks (more aggressive
+    # early-stop). None = off (constant K1, our default — the schedule is tied to the moving
+    # incumbent / no-regret proof, which the fixed-threshold target does not have). Capped at
+    # K1 <= 1e6 to stay finite over long runs. Needs the per-eval bo_iteration on BOSStopper.
+    k1_gamma: float | None = None
 
 
 @dataclass
@@ -155,7 +169,8 @@ def _value_range(log_rse: bool) -> tuple[float, float]:
 
 # ======================================================= decision-table builder
 def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
-                         cfg: BOSConfig, rng: np.random.Generator
+                         cfg: BOSConfig, rng: np.random.Generator,
+                         debug: bool = False
                          ) -> tuple[np.ndarray, np.ndarray]:
     """Forward-simulate from the observed ``prefix`` and run backward induction to
     a per-(future-epoch, summary-cell) decision table.
@@ -163,6 +178,11 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     Returns ``(actions, grid)`` where ``actions`` has shape ``(T, grid_size - 1)``
     with ``T = budget - len(prefix)`` future epochs and entries in
     {CONTINUE, STOP_FEASIBLE, STOP_INFEASIBLE}, and ``grid`` is the cell-edge array.
+
+    With ``debug=True`` also returns a dict of the internals
+    ``{"p_inf", "counts", "losses"}`` (the forward-sim infeasibility probability per
+    (step, cell) — which is independent of K1/K2 — the path visitation counts, and the
+    [d1, d2, continue] value surface) for diagnosing the stopping rule.
     """
     prefix = _curve_transform(prefix, cfg.log_rse).reshape(-1)   # raw or log(RSE)
     rho_t = float(np.log(rho)) if cfg.log_rse else float(rho)
@@ -172,15 +192,17 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     grid = np.linspace(lo, hi, cfg.grid_size)
     n_cells = cfg.grid_size - 1
     if T <= 0:
-        return np.zeros((0, n_cells), dtype=int), grid
+        empty = np.zeros((0, n_cells), dtype=int)
+        return (empty, grid, {}) if debug else (empty, grid)
 
     # Forward simulation (mirrors the reference run_BOS): curve GP fit to the prefix, M
     # sampled future curves over epochs N0+1..N, dropping paths that leave (lo, hi). The
     # summary statistic is the running mean over the *post-warm-up* epochs only (St in
     # the reference), and feasibility is decided by the endpoint ell(N). The kernel
     # ('expdecay' / 'warped') and value transform (raw / log) come from cfg.
-    gp = LearningCurveGP(noise=cfg.noise, kernel=cfg.curve_kernel, budget=budget).fit(
-        np.arange(1, n0 + 1), prefix)
+    gp = LearningCurveGP(noise=cfg.noise, kernel=cfg.curve_kernel,
+                         input_warp=cfg.curve_input_warp, budget=budget,
+                         fit_maxiter=cfg.fit_maxiter).fit(np.arange(1, n0 + 1), prefix)
     future = gp.sample_paths(np.arange(n0 + 1, budget + 1), cfg.n_samples, rng)
     keep = np.all((future > lo) & (future < hi), axis=1)
     if keep.any():                                        # never let the filter empty the set
@@ -226,6 +248,8 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     actions[:-1] = decode[np.argmin(losses[:-1], axis=2)]            # argmin over [d1, d2, cont]
     actions[-1] = np.where(losses[-1, :, 0] <= losses[-1, :, 1],     # last epoch: terminals only
                            STOP_FEASIBLE, STOP_INFEASIBLE)
+    if debug:
+        return actions, grid, {"p_inf": p_inf, "counts": counts, "losses": losses}
     return actions, grid
 
 
@@ -246,10 +270,14 @@ class BOSStopper:
     """
 
     def __init__(self, cfg: BOSConfig, *, rho: float, budget: int,
-                 sigma_fn: "Callable[[float], float] | None" = None):
+                 sigma_fn: "Callable[[float], float] | None" = None,
+                 bo_iteration: int = 0):
         self.cfg = cfg
         self.rho = float(rho)
         self.budget = int(budget)
+        # N0: explicit, or auto = round(0.16*budget) (the paper's N0/N, matched by the curve study)
+        self._warmup = int(cfg.warmup) if cfg.warmup is not None else max(2, round(0.16 * self.budget))
+        self._bo_iteration = int(bo_iteration)            # for the paper's K1,t = K1/gamma^t schedule
         self._rng = np.random.default_rng(cfg.seed)
         self._curve: list[float] = []
         self._table: np.ndarray | None = None
@@ -277,7 +305,7 @@ class BOSStopper:
                 self._best_loss, self._wait = ell, 0
                 return False
             return self._stop(1, n, "override")
-        if n < self.cfg.warmup or n >= self.budget:       # warming up / past the table horizon
+        if n < self._warmup or n >= self.budget:          # warming up / past the table horizon
             return False
 
         curve = np.asarray(self._curve, dtype=float)
@@ -311,8 +339,11 @@ class BOSStopper:
     # --------------------------------------------------------------- internals
     def _build(self, curve: np.ndarray, n: int) -> bool:
         """(Re)build the decision table from the observed prefix; never stops itself."""
+        cfg = self.cfg
+        if cfg.k1_gamma is not None:                       # paper's time-varying K1,t = K1/gamma^t
+            cfg = replace(cfg, K1=min(cfg.K1 / cfg.k1_gamma ** self._bo_iteration, 1e6))
         self._table, self._grid = build_decision_table(
-            curve, self.rho, self.budget, self.cfg, self._rng)
+            curve, self.rho, self.budget, cfg, self._rng)
         self._origin = n
         return False
 

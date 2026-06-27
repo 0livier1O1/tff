@@ -112,7 +112,15 @@ class PichenyTimeKernel(Kernel):
 
 
 class PichenyKernel(Kernel):
-    """Space-time kernel of Picheny & Ginsbourger (2013); see module docstring."""
+    """Space-time kernel of Picheny & Ginsbourger (2013); see module docstring.
+
+    TODO(picheny-unify): not yet wired into production. Intended consumer is the
+    fidelity-augmented structure surrogate — input ``[ranks(D), n/N]`` with the epoch
+    fraction as the time column — so the SAME Picheny family models both the per-curve
+    BOS forward sim (via the single-curve :class:`PichenyTimeKernel`) and the cross-structure
+    fidelity GP, correlating partially-converged evaluations across structures. Wiring seam +
+    plan: ``tnss/algo/bo/surrogates/classification_gp.py`` (``_build``) and ``RegressionGP._kernel``.
+    """
 
     has_lengthscale = False
 
