@@ -42,6 +42,75 @@ def _matern52(d: torch.Tensor) -> torch.Tensor:
     return (1.0 + _SQRT5 * d + (5.0 / 3.0) * d * d) * torch.exp(-_SQRT5 * d)
 
 
+class PichenyTimeKernel(Kernel):
+    r"""Single-curve (time-only) reduction of the Picheny-Ginsbourger kernel, for the BOS
+    curve GP. With the structure ``x`` fixed, the spatial factors are constant, leaving
+
+    .. math::
+        k(t, t') = c_F \;+\; \sigma(t)\,\sigma(t')\,\mathrm{Matern}_{5/2}\big(|a(t)-a(t')|\big),
+
+    with ``sigma(t)=sqrt(scale_G) exp(-alpha t)`` (the error envelope -> 0) and the time warp
+    ``a(t)=1/(zeta + eta t)`` (dense early, smooth late). The ``c_F`` term is the prior
+    variance on the converged asymptote ``F(x)`` — so the curve reverts to an *asymptote*,
+    not to 0 like the zero-mean exp-decay GP. This is the 'warp + exp' combination the kernel
+    bakes in. The five params (c_F, scale_G, alpha, zeta, eta) are *learnable* (Positive),
+    fit by marginal likelihood per curve; the budget ``N`` and value amplitude only set the
+    initialisation.
+    """
+
+    has_lengthscale = False
+    _PARAMS = ("c_F", "scale_G", "alpha", "zeta", "eta")
+
+    def __init__(self, budget: int, value_scale: float = 1.0, **kwargs):
+        super().__init__(**kwargs)
+        n = float(budget)
+        # learnable, Positive-constrained; budget/amplitude only set the fit's starting point
+        inits = dict(c_F=(0.3 * value_scale) ** 2, scale_G=float(value_scale) ** 2,
+                     alpha=4.0 / n, zeta=1.0, eta=5.0 / n)
+        for name in self._PARAMS:
+            self.register_parameter(f"raw_{name}",
+                                    torch.nn.Parameter(torch.zeros(*self.batch_shape, 1)))
+            self.register_constraint(f"raw_{name}", Positive())
+            self._set(name, inits[name])
+
+    def _set(self, name: str, value) -> None:
+        raw = getattr(self, f"raw_{name}")
+        c = getattr(self, f"raw_{name}_constraint")
+        v = torch.as_tensor(value, dtype=raw.dtype, device=raw.device)
+        self.initialize(**{f"raw_{name}": c.inverse_transform(v)})
+
+    def _get(self, name: str) -> torch.Tensor:
+        return getattr(self, f"raw_{name}_constraint").transform(getattr(self, f"raw_{name}")).reshape(())
+
+    @property
+    def c_F(self): return self._get("c_F")
+    @property
+    def scale_G(self): return self._get("scale_G")
+    @property
+    def alpha(self): return self._get("alpha")
+    @property
+    def zeta(self): return self._get("zeta")
+    @property
+    def eta(self): return self._get("eta")
+
+    def _sigma(self, t: torch.Tensor) -> torch.Tensor:
+        return self.scale_G.sqrt() * torch.exp(-self.alpha * t)
+
+    def _warp(self, t: torch.Tensor) -> torch.Tensor:
+        return 1.0 / (self.zeta + self.eta * t)
+
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor, diag: bool = False, **params):
+        t1, t2 = x1[..., 0], x2[..., 0]
+        if diag:
+            amp = self._sigma(t1) * self._sigma(t2)
+            r_gt = _matern52((self._warp(t1) - self._warp(t2)).abs())
+            return self.c_F + amp * r_gt
+        amp = self._sigma(t1).unsqueeze(-1) * self._sigma(t2).unsqueeze(-2)
+        a1, a2 = self._warp(t1), self._warp(t2)
+        r_gt = _matern52((a1.unsqueeze(-1) - a2.unsqueeze(-2)).abs())
+        return self.c_F + amp * r_gt
+
+
 class PichenyKernel(Kernel):
     """Space-time kernel of Picheny & Ginsbourger (2013); see module docstring."""
 

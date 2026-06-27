@@ -49,6 +49,7 @@ GP is a plain gpytorch exact GP (CPU is fine); only the decomposition needs a GP
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
@@ -87,6 +88,26 @@ class BOSConfig:
     # only added when it is below the run's stop epoch. Consumed by the BOSS
     # recording path, and only when the surrogate is fidelity-aware.
     interim_fid_epochs: tuple[int, ...] = (0, 9, 19, 29, 39)
+    # C2 (paper, Algorithm 1): gate the infeasible-kill on the surrogate's full-fidelity
+    # confidence — only kill if sigma([x,N]) <= c2_kappa * sigma([x,n]) (kappa >= 1).
+    # If the surrogate is too unsure about the converged outcome, keep decomposing. None
+    # = off; needs the fidelity surrogate (a sigma_fn) to evaluate. Larger kappa = more
+    # early-stopping; smaller = more full runs. The override (exact feasibility) is never
+    # gated — C2 only guards the probabilistic kill.
+    c2_kappa: float | None = None
+    # Convergence-after-feasibility: instead of hard-stopping the instant RSE <= rho, keep
+    # decomposing until the loss plateaus, so feasible 'winners' get a refined (converged)
+    # RSE rather than one cropped at rho. Plateau = no relative improvement > rel_tol for
+    # `patience` epochs (the decomposers' usual criterion). Off = hard stop (default).
+    converge_after_feasible: bool = False
+    converge_rel_tol: float = 0.01
+    converge_patience: int = 20
+    # Curve-model variants (forward simulator). curve_kernel: 'expdecay' (Swersky, the
+    # default) or 'warped' (Matern with a learned Kumaraswamy input warp on the epoch
+    # axis). log_rse: fit / decide on log(RSE) instead of raw RSE — RSE spans orders of
+    # magnitude, so log space separates feasible (~1e-6) from infeasible (~1) far more.
+    curve_kernel: str = "expdecay"
+    log_rse: bool = False
 
 
 @dataclass
@@ -116,6 +137,22 @@ def summary_statistic(curve: np.ndarray) -> np.ndarray:
     return np.cumsum(curve, axis=-1) / np.arange(1, curve.shape[-1] + 1)
 
 
+# ============================================================== curve transform
+_LOG_FLOOR = 1e-6   # RSE floor for the log transform -> log space spans [log(1e-6), 0]
+
+
+def _curve_transform(curve: np.ndarray, log_rse: bool) -> np.ndarray:
+    """Map RSE into the space the curve GP / grid operate in: identity, or log of the
+    clamped RSE (RSE spans orders of magnitude, so log separates the classes far more)."""
+    curve = np.asarray(curve, dtype=float)
+    return np.log(np.clip(curve, _LOG_FLOOR, 1.0)) if log_rse else curve
+
+
+def _value_range(log_rse: bool) -> tuple[float, float]:
+    """(lo, hi) of the transformed value axis — the grid span and path-filter bounds."""
+    return (float(np.log(_LOG_FLOOR)), 0.0) if log_rse else (0.0, 1.0)
+
+
 # ======================================================= decision-table builder
 def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
                          cfg: BOSConfig, rng: np.random.Generator
@@ -127,25 +164,29 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     with ``T = budget - len(prefix)`` future epochs and entries in
     {CONTINUE, STOP_FEASIBLE, STOP_INFEASIBLE}, and ``grid`` is the cell-edge array.
     """
-    prefix = np.asarray(prefix, dtype=float).reshape(-1)
+    prefix = _curve_transform(prefix, cfg.log_rse).reshape(-1)   # raw or log(RSE)
+    rho_t = float(np.log(rho)) if cfg.log_rse else float(rho)
+    lo, hi = _value_range(cfg.log_rse)
     n0 = len(prefix)
     T = budget - n0
-    grid = np.linspace(0.0, 1.0, cfg.grid_size)
+    grid = np.linspace(lo, hi, cfg.grid_size)
     n_cells = cfg.grid_size - 1
     if T <= 0:
         return np.zeros((0, n_cells), dtype=int), grid
 
-    # Forward simulation (mirrors the reference run_BOS): GP fit to the prefix, M
-    # sampled future curves over epochs N0+1..N, dropping paths that leave (0, 1).
-    # The summary statistic is the running mean over the *post-warm-up* epochs only
-    # (St in the reference), and feasibility is decided by the endpoint ell(N).
-    gp = LearningCurveGP(noise=cfg.noise).fit(np.arange(1, n0 + 1), prefix)
+    # Forward simulation (mirrors the reference run_BOS): curve GP fit to the prefix, M
+    # sampled future curves over epochs N0+1..N, dropping paths that leave (lo, hi). The
+    # summary statistic is the running mean over the *post-warm-up* epochs only (St in
+    # the reference), and feasibility is decided by the endpoint ell(N). The kernel
+    # ('expdecay' / 'warped') and value transform (raw / log) come from cfg.
+    gp = LearningCurveGP(noise=cfg.noise, kernel=cfg.curve_kernel, budget=budget).fit(
+        np.arange(1, n0 + 1), prefix)
     future = gp.sample_paths(np.arange(n0 + 1, budget + 1), cfg.n_samples, rng)
-    keep = np.all((future > 0.0) & (future < 1.0), axis=1)
+    keep = np.all((future > lo) & (future < hi), axis=1)
     if keep.any():                                        # never let the filter empty the set
         future = future[keep]
     endpoints = future[:, -1]
-    infeasible_end = endpoints > rho                      # theta_2 indicator at N
+    infeasible_end = endpoints > rho_t                    # theta_2 indicator at N
     stat = summary_statistic(future)                      # St per path (running mean)
     future_cells = np.clip(np.searchsorted(grid, stat, side="right") - 1, 0, n_cells - 1)
 
@@ -204,7 +245,8 @@ class BOSStopper:
     and :attr:`curve` the realised loss curve (full or up to the break).
     """
 
-    def __init__(self, cfg: BOSConfig, *, rho: float, budget: int):
+    def __init__(self, cfg: BOSConfig, *, rho: float, budget: int,
+                 sigma_fn: "Callable[[float], float] | None" = None):
         self.cfg = cfg
         self.rho = float(rho)
         self.budget = int(budget)
@@ -215,13 +257,25 @@ class BOSStopper:
         self._origin = 0                                  # epoch the live table was built at
         self._n_cells = cfg.grid_size - 1
         self._decision: BOSResult | None = None
+        self._sigma_fn = sigma_fn                         # sigma([x, fid]) from the surrogate (C2)
+        self._converging = False                          # in the post-feasibility plateau phase
+        self._best_loss = float("inf")
+        self._wait = 0
 
     def __call__(self, loss: float) -> bool:
         """Observe one epoch's loss; return True to break the decomposition."""
         self._curve.append(float(loss))
         n = len(self._curve)                              # epochs done (1-indexed)
+        ell = self._curve[-1]
 
-        if self._curve[-1] <= self.rho:                   # exact feasible certificate
+        if self._converging:                              # post-feasibility: run to plateau
+            return self._converge_step(ell, n)
+
+        if ell <= self.rho:                               # exact feasible certificate
+            if self.cfg.converge_after_feasible and n < self.budget:
+                self._converging = True                   # refine the RSE instead of cropping at rho
+                self._best_loss, self._wait = ell, 0
+                return False
             return self._stop(1, n, "override")
         if n < self.cfg.warmup or n >= self.budget:       # warming up / past the table horizon
             return False
@@ -235,11 +289,12 @@ class BOSStopper:
         row = n - 1 - self._origin
         if not 0 <= row < self._table.shape[0]:
             return False
-        stat = float(summary_statistic(curve[self._origin:])[-1])   # St since the table's origin
+        stat = float(summary_statistic(                             # St since the table's origin
+            _curve_transform(curve[self._origin:], self.cfg.log_rse))[-1])
         cell = int(np.clip(np.searchsorted(self._grid, stat, side="right") - 1, 0, self._n_cells - 1))
-        if int(self._table[row, cell]) == STOP_INFEASIBLE:
-            return self._stop(0, n, "infeasible_kill")
-        return False                                      # CONTINUE / demoted d1 -> keep going
+        if int(self._table[row, cell]) == STOP_INFEASIBLE and self._c2_passes(n):
+            return self._stop(0, n, "infeasible_kill")    # C1 (table) and C2 (surrogate) agree
+        return False                                      # CONTINUE / demoted d1 / C2 blocked -> keep going
 
     def result(self) -> BOSResult:
         """The stopping outcome; if no early stop fired, settle from the final curve."""
@@ -260,6 +315,26 @@ class BOSStopper:
             curve, self.rho, self.budget, self.cfg, self._rng)
         self._origin = n
         return False
+
+    def _converge_step(self, loss: float, n: int) -> bool:
+        """Post-feasibility plateau watch: keep decomposing until the loss stops
+        improving, then stop with the refined (converged) RSE. Feasibility (z=1) was
+        already certified at the rho crossing."""
+        if loss < self._best_loss * (1.0 - self.cfg.converge_rel_tol):
+            self._best_loss, self._wait = loss, 0
+        else:
+            self._wait += 1
+        if n >= self.budget or self._wait >= self.cfg.converge_patience:
+            return self._stop(1, n, "converged")
+        return False
+
+    def _c2_passes(self, n: int) -> bool:
+        """C2 (paper): allow the infeasible-kill only if the surrogate is confident about
+        the full-fidelity outcome — ``sigma([x,N]) <= kappa * sigma([x,n])``. Always true
+        when C2 is off (no kappa) or no surrogate is wired (e.g. the initial design)."""
+        if self.cfg.c2_kappa is None or self._sigma_fn is None:
+            return True
+        return self._sigma_fn(1.0) <= self.cfg.c2_kappa * self._sigma_fn(n / self.budget)
 
     def _stop(self, z: int, n: int, reason: str) -> bool:
         self._decision = BOSResult(z, n, reason, stopped_early=(n < self.budget))
