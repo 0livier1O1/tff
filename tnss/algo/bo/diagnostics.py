@@ -72,6 +72,15 @@ class RunDiagnostics:
         self.gen_x = gen_x
         # Per-evaluation BOS curve-GP continuation prediction (one entry per decomposition).
         self.curve_bands: list[dict] = []
+        # Fixed out-of-sample feasibility test set, scored live each BO step (set_oos).
+        # The held-out predictions accumulate per step; train-overlap exclusion and the
+        # per-refit metrics are computed once, after the run (finalize_oos).
+        self.oos: dict | None = None
+        self.oos_steps: list[int] = []
+        self.oos_proba: list[np.ndarray] = []      # per-step P(feasible) over the OOS set
+        self.oos_sigma: list[np.ndarray] = []      # per-step latent sd over the OOS set
+        self.oos_metrics: list[dict] | None = None    # finalized per-refit bal-acc / ROC-AUC
+        self.oos_eval: dict | None = None             # finalized snapshot arrays for the curves
 
     def record_curve_band(self, *, step: int, gp, origin: int, budget: int, log_rse: bool,
                           k_sigma: float = 2.0) -> None:
@@ -136,13 +145,84 @@ class RunDiagnostics:
             pass
         self.rows.append(row)
 
+    # ----------------------------------------------------------------- fixed OOS
+    def set_oos(self, *, x: Tensor, ranks: np.ndarray, cr: np.ndarray,
+                rse: np.ndarray, y: np.ndarray) -> None:
+        """Register the fixed OOS test set: normalised inputs `x` (M, D) for surrogate
+        scoring, the integer `ranks` (for the after-run train-overlap exclusion), and
+        the decomposed `cr` / `rse` / feasibility `y` labels. Built once, off the BO
+        loop; the per-step scoring it enables (`score_oos`) never affects algo time."""
+        self.oos = {"x": x, "ranks": np.asarray(ranks), "cr": np.asarray(cr, float),
+                    "rse": np.asarray(rse, float), "y": np.asarray(y).astype(int)}
+
+    def score_oos(self, *, step: int, acq_model) -> None:
+        """Score the *current* surrogate on the fixed OOS set: P(feasible) and the
+        latent sd at every held-out point. Called after the BO step's timings are
+        already recorded, so it never affects the measured algo time — a cheap GP
+        posterior, no refit. Best-effort; a failure just drops this step's OOS row."""
+        if self.oos is None:
+            return
+        try:
+            x = self.oos["x"]
+            pf = feasibility_prob(acq_model, x).detach().reshape(-1).cpu().numpy()
+            post = acq_model.posterior(x)
+            sd = post.variance.clamp_min(0).sqrt().detach().reshape(-1).cpu().numpy()
+            self.oos_steps.append(int(step))
+            self.oos_proba.append(pf)
+            self.oos_sigma.append(sd)
+        except Exception:
+            pass
+
+    def finalize_oos(self, train_ranks) -> None:
+        """After the run: keep only OOS points that never entered the evaluated design
+        (the comparable intersection), then compute per-refit balanced accuracy /
+        ROC-AUC and the post-init/final snapshot arrays the curve plots use. Pure numpy
+        over the already-captured live predictions — no GP, no refit, untimed."""
+        if self.oos is None or not self.oos_steps:
+            return
+        try:
+            from sklearn.metrics import balanced_accuracy_score, roc_auc_score
+        except Exception:
+            return
+        oos_ranks, y = self.oos["ranks"], self.oos["y"]
+        train = {tuple(int(v) for v in r) for r in np.asarray(train_ranks)}
+        keep = np.array([tuple(int(v) for v in r) not in train for r in oos_ranks])
+        if not keep.any():
+            return
+        yk = y[keep]
+
+        def _auc(p):
+            return float(roc_auc_score(yk, p)) if yk.min() != yk.max() else float("nan")
+
+        def _bacc(p):
+            return float(balanced_accuracy_score(yk, (np.asarray(p) >= 0.5).astype(int)))
+
+        self.oos_metrics = [
+            {"step": s, "bal_accuracy": _bacc(p[keep]), "roc_auc": _auc(p[keep])}
+            for s, p in zip(self.oos_steps, self.oos_proba)
+        ]
+        self.oos_eval = {
+            "y": yk, "cr": self.oos["cr"][keep], "rse": self.oos["rse"][keep],
+            "rse_all": self.oos["rse"],
+            "xnorm": np.linalg.norm(oos_ranks.astype(float), axis=1)[keep],
+            "p_post": self.oos_proba[0][keep], "p_final": self.oos_proba[-1][keep],
+            "sigma_final": self.oos_sigma[-1][keep],
+            "steps": np.asarray(self.oos_steps),
+            "n_scored": int(keep.sum()), "n_excluded": int((~keep).sum()),
+        }
+
     def frame(self) -> pd.DataFrame:
         return pd.DataFrame(self.rows)
 
     def save(self, out_dir: Path) -> None:
-        """Write `diagnostics.csv` and `curve_bands.json` (each skipped if empty)."""
+        """Write the per-step `diagnostics.csv`, the BOS `curve_bands.json`, and the
+        fixed-OOS `oos_metrics.csv` / `oos_eval.npz` (each skipped if empty)."""
         out_dir = Path(out_dir)
         if self.rows:
             self.frame().to_csv(out_dir / "diagnostics.csv", index=False)
         if self.curve_bands:
             (out_dir / "curve_bands.json").write_text(json.dumps(self.curve_bands))
+        if self.oos_metrics:
+            pd.DataFrame(self.oos_metrics).to_csv(out_dir / "oos_metrics.csv", index=False)
+        if self.oos_eval:
+            np.savez(out_dir / "oos_eval.npz", **self.oos_eval)

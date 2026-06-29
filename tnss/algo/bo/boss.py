@@ -218,6 +218,10 @@ class BOSS:
                 candidate=candidate, objective=row["objective"], rse=row["rse"],
                 feasible=row["feasible"], infeasible_frac=infeasible_frac,
             )
+            # Score the current surrogate on the fixed OOS set. This runs *after*
+            # _evaluate recorded the step's perf_counter timings, so it can't affect
+            # the measured algo time — only wall-clock.
+            self.diagnostics.score_oos(step=step, acq_model=acq_model)
         except Exception:
             pass
 
@@ -238,12 +242,38 @@ class BOSS:
         except Exception:
             self._gen_adj = None
 
+    def set_oos(self, oos_ranks, oos_cr, oos_rse) -> None:
+        """Register a fixed out-of-sample test set (integer rank vectors with their
+        decomposed CR / RSE) for live surrogate scoring each BO step. The decomposition
+        is the caller's, done once off the BO loop; scoring is a cheap posterior run
+        after each step's timings are recorded, so the measured algo time is unaffected.
+        Ranks are normalised to the surrogate's [0,1]^D lattice exactly as `set_generating`
+        does. Best-effort: a bad set simply disables OOS diagnostics."""
+        try:
+            mr = self.space.max_rank
+            ranks = np.clip(np.rint(np.asarray(oos_ranks)).astype(int), 1, mr)
+            rse = np.asarray(oos_rse, dtype=float).reshape(-1)
+            x = torch.as_tensor((ranks - 1.0) / max(mr - 1, 1), dtype=torch.double)
+            y = (rse <= self.threshold).astype(int)
+            self.diagnostics.set_oos(
+                x=x, ranks=ranks, cr=np.asarray(oos_cr, dtype=float).reshape(-1), rse=rse, y=y)
+        except Exception:
+            pass
+
     def analyse(self, progress: Callable[[str, int, int], None] | None = None) -> None:
         """Post-run analysis phase. The live one-step-ahead surrogate diagnostics are
         already captured during `run` (no re-fitting); this runs the only genuinely
-        post-hoc work — the generating-structure reference decomposition — and reports
-        an `analysis` phase. Guarded — it can never lose the completed run."""
+        post-hoc work — the generating-structure reference decomposition and the fixed
+        OOS finalisation (train-overlap exclusion + per-refit metrics over the live
+        predictions) — and reports an `analysis` phase. Guarded — it can never lose the
+        completed run."""
         self._reference_decomposition()
+        try:                                              # exclude OOS ∩ evaluated design
+            train = [np.asarray(self.space.to_ranks(self.x[i])).astype(int)
+                     for i in range(len(self.x))]
+            self.diagnostics.finalize_oos(train)
+        except Exception:
+            pass
         total = max(1, self.budget)
         if progress is not None:
             progress("analysis", total, total)
@@ -511,6 +541,7 @@ class BOSS:
         - ``gp_states.pt``      the per-BO-step surrogate snapshots
         - ``decomp_traces.json`` per-structure decomposition loss curves
         - ``diagnostics.csv``   per-step out-of-sample surrogate/acquisition diagnostics
+        - ``oos_metrics.csv`` / ``oos_eval.npz``  fixed-OOS per-refit feasibility scores (when an OOS set was set)
         - ``curve_bands.json``  BOS curve-GP predicted decomposition-continuation bands (when BOS on)
         - ``generating.json``   generating-structure reference {rse, cr, feasible} (when known)
         - ``.done``             completion sentinel

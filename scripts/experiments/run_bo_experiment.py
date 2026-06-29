@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -32,6 +33,11 @@ for _p in (ROOT, ROOT / "tensors"):
         sys.path.insert(0, str(_p))
 
 from app.algos.bo_registry import build_algo
+
+# Size of the fixed out-of-sample feasibility test set scored live each BO step.
+# Built once per (problem, seed) and cached (decomposition is the expensive part);
+# override with BOSS_OOS_N (e.g. a small value for a quick smoke).
+_OOS_N = int(os.environ.get("BOSS_OOS_N", "2000"))
 
 
 def _seed_all(seed: int) -> None:
@@ -89,6 +95,27 @@ def main() -> None:
             except Exception:
                 import traceback as _tb
                 print("set_generating failed (run kept):\n" + _tb.format_exc())
+
+        # Fixed out-of-sample feasibility test set for live surrogate scoring — only on
+        # the seeds selected for diagnostics (run config `oos_seeds`; absent ⇒ all seeds).
+        # Building it (decomposing _OOS_N structures) is the costly part, so this lets you
+        # illustrate the surrogate plots on one seed instead of paying it on every seed.
+        # GPU-sharded + cached per (problem, seed); the per-step scoring it enables runs
+        # after each step's timings are recorded, so the measured algo time is unaffected.
+        run_cfg = json.loads(Path(args.run_config).read_text())
+        oos_seeds = run_cfg.get("oos_seeds")
+        if oos_seeds is None or args.seed in oos_seeds:
+            try:
+                from app.analysis.cboss_oos import load_or_build_oos, oos_method_for_config
+                repo_root = Path(args.run_config).resolve().parents[3]   # <webapp data root>
+                oos = load_or_build_oos(repo_root, run_cfg.get("problem_id"), args.seed, entry,
+                                        n=_OOS_N, oos_method=oos_method_for_config(entry))
+                algo.set_oos(oos["X"], oos["cr"], oos["rse"])
+            except Exception:
+                import traceback as _tb
+                print("OOS build failed (run kept):\n" + _tb.format_exc())
+        else:
+            print(f"OOS diagnostics skipped for seed {args.seed} (not in oos_seeds).")
 
         def _progress(phase: str, completed: int, total: int) -> None:
             tmp = progress_file.with_suffix(".tmp")
