@@ -21,11 +21,19 @@ outputscale), parity (y, mu), and — for the contour / feasibility family
 (SUR / gSUR / cUCB) — the acquisition-value trace (acq, pf_pred, infeasible_frac)
 and generating-structure feasibility (pf_gen, the P(feasible) the surrogate
 assigns the ground-truth structure each step).
+
+It also stores (`curve_bands.json`) the BOS decomposition-curve continuation band:
+the diagnostics object is *handed* the curve GP BOS already fit for its stopping
+decision and runs it forward over the remaining epochs — an after-run prediction
+of what each (possibly early-stopped) decomposition curve would have done, not part
+of the BO loop.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 from torch import Tensor
@@ -62,6 +70,31 @@ class RunDiagnostics:
         # Normalised generating structure (1, D) — enables the per-step P(feasible)
         # the surrogate assigns the ground truth. None disables that column.
         self.gen_x = gen_x
+        # Per-evaluation BOS curve-GP continuation prediction (one entry per decomposition).
+        self.curve_bands: list[dict] = []
+
+    def record_curve_band(self, *, step: int, gp, origin: int, budget: int, log_rse: bool,
+                          k_sigma: float = 2.0) -> None:
+        """After-run diagnostics: run the *BOS-fitted* curve GP forward over the remaining
+        epochs (origin+1..budget) and store its predicted continuation band — the analytic
+        posterior mean ± k·σ (k=2 ≈ 95%). The per-epoch marginal is Gaussian, so this is the
+        exact band (no sampling). In log-RSE space, exp() of mean±kσ gives the correct
+        asymmetric (lognormal) band in RSE. The GP is passed in (BOS already trained it for
+        the stopping decision); nothing is refit. Best-effort — never raises, never touches BO."""
+        try:
+            future = np.arange(origin + 1, budget + 1)
+            if gp is None or len(future) == 0:
+                return
+            mean, std = gp.predict(future)                  # curve-GP value space (log-RSE if log_rse)
+            inv = np.exp if log_rse else (lambda v: v)
+            self.curve_bands.append({
+                "step": int(step), "epochs": future.astype(int).tolist(),
+                "mid": inv(mean).tolist(),
+                "lo": inv(mean - k_sigma * std).tolist(),
+                "hi": inv(mean + k_sigma * std).tolist(),
+            })
+        except Exception:
+            pass
 
     def record(self, *, step: int, model, acq_model, acquisition, candidate: Tensor,
                objective: float, rse: float, feasible: int,
@@ -107,7 +140,9 @@ class RunDiagnostics:
         return pd.DataFrame(self.rows)
 
     def save(self, out_dir: Path) -> None:
-        """Write `diagnostics.csv` (skipped if nothing was captured)."""
-        if not self.rows:
-            return
-        self.frame().to_csv(Path(out_dir) / "diagnostics.csv", index=False)
+        """Write `diagnostics.csv` and `curve_bands.json` (each skipped if empty)."""
+        out_dir = Path(out_dir)
+        if self.rows:
+            self.frame().to_csv(out_dir / "diagnostics.csv", index=False)
+        if self.curve_bands:
+            (out_dir / "curve_bands.json").write_text(json.dumps(self.curve_bands))

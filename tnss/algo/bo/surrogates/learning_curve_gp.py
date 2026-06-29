@@ -106,3 +106,14 @@ class LearningCurveGP:
             post = self._model.posterior(xs)                 # noise-free latent posterior
             samples = post.rsample(torch.Size([n_samples]))  # (n_samples, len(future), 1)
         return samples.squeeze(-1).detach().cpu().numpy()
+
+    def predict(self, future_epochs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Analytic noise-free posterior ``(mean, std)`` at ``future_epochs``, each shape
+        ``(len(future_epochs),)``, in the curve's value space (log-RSE if fit on logs). The
+        per-epoch marginal is Gaussian, so this is the exact band — no sampling needed."""
+        xs = self._epoch_x(future_epochs)
+        with torch.no_grad():
+            post = self._model.posterior(xs)                 # noise-free latent posterior
+            mean = post.mean.squeeze(-1).detach().cpu().numpy()
+            std = post.variance.clamp_min(0.0).sqrt().squeeze(-1).detach().cpu().numpy()
+        return mean, std

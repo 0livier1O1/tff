@@ -48,6 +48,7 @@ GP is a plain gpytorch exact GP (CPU is fine); only the decomposition needs a GP
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, replace
 from typing import Callable
 
@@ -115,6 +116,15 @@ class BOSConfig:
     curve_kernel: str = "picheny"
     log_rse: bool = True
     curve_input_warp: bool = False
+    # Summary statistic St — the 1-D state the decision table is indexed by; the curve is
+    # compressed to it so the backward induction runs on a finite (t, St) grid. 'running_mean'
+    # (paper; full-history average, smooth but laggy), 'last' (the current loss ell(t), most
+    # responsive and ~the converged value for monotone curves), or 'window' (trailing mean of
+    # the last `summary_window` epochs, a middle ground). The same statistic bins the simulated
+    # paths and is read at run time, so they cannot drift. For smooth monotone AGD curves the
+    # choice barely moves the decision; it matters more on noisy curves.
+    summary_stat: str = "running_mean"
+    summary_window: int = 10
     # Paper's time-varying penalty (Dai et al., bos_function.py): K1,t = K1 / gamma^bo_iteration
     # grows over BO iterations (gamma < 1) — later iterations penalise a wrong feasible
     # conclusion more, so the kill threshold tau = K2/(K1,t+K2) shrinks (more aggressive
@@ -122,6 +132,13 @@ class BOSConfig:
     # incumbent / no-regret proof, which the fixed-threshold target does not have). Capped at
     # K1 <= 1e6 to stay finite over long runs. Needs the per-eval bo_iteration on BOSStopper.
     k1_gamma: float | None = None
+    # Ground-truth mode (ON by default): compute the stop decision (n*, reason, z) but DON'T
+    # break — run the decomposition to the full budget anyway, so the real continuation is always
+    # observed and one can check whether BOS would have cut a good run. The recorded n*/reason are
+    # the would-be stop and the eval time is charged exactly to it (boss._evaluate); the realised
+    # curve and final RSE are the full run. Set False only for production early-stopping (real
+    # wall-clock savings, but no ground truth) — not exposed in the dashboard.
+    eval_mode: bool = True
 
 
 @dataclass
@@ -130,25 +147,48 @@ class BOSResult:
     n_star: int                     # epoch the run stopped at
     reason: str                     # 'override' / 'infeasible_kill' / 'completed'
     stopped_early: bool             # True if BOS broke the run before the budget
+    stop_time: float | None = None  # perf_counter at the would-be stop (for exact time accounting)
+    curve_gp: object | None = None  # the fitted BOS learning-curve GP — handed to the diagnostics band
+    gp_origin: int = 0              # epoch the curve GP was fit at; the band predicts gp_origin+1..budget
 
 
 # =========================================================== summary statistic
-def summary_statistic(curve: np.ndarray) -> np.ndarray:
-    """The BO-BOS summary statistic St: the running mean of the post-warm-up curve
-    segment, along the last axis. Returned *cumulatively* so the table builder gets
-    every epoch's value (shape preserved) and the runtime lookup reads the last one.
+def summary_statistic(curve: np.ndarray, kind: str = "running_mean",
+                      window: int = 10) -> np.ndarray:
+    """The BOS summary statistic St, computed *cumulatively* along the last axis (every
+    prefix's value, shape preserved) so the table builder gets all epochs and the runtime
+    lookup reads the last one. This is the single definition shared by
+    ``build_decision_table`` (over the M simulated paths, where it carries an implicit
+    per-path index, St^(m)) and ``BOSStopper`` (over the one realised curve), so the
+    binning and the lookup can never drift apart.
 
-    This is the single definition shared by ``build_decision_table`` (over the M
-    simulated paths) and ``BOSStopper`` (over the one realised curve), so the two
-    can never drift apart.
+    ``kind`` chooses the scalar the curve is compressed to:
 
-    TODO(summary-stat): this matches the paper (running mean). Decomposition RSE
-    curves may be better summarised by a different statistic — e.g. the last value,
-    a log-slope, or an EMA that weights recent epochs. Swap the body here and both
-    the table build and the runtime lookup stay consistent; promote to a BOSConfig
-    knob once a second statistic actually exists.
+    - ``'running_mean'`` — St = mean(ell(1:t)), the full-history average (the paper's
+      choice; smooth but *laggy*, since stale early epochs keep it above the current level).
+    - ``'last'`` — St = ell(t), the current loss (most responsive, and ~the converged value
+      for a monotone curve, so no lag). The cumulative form is just the curve itself.
+    - ``'window'`` — St = mean(ell(t-w+1 : t)), a trailing window of ``window`` epochs (a
+      middle ground; degenerates to the running mean while t <= w).
+
+    For smooth, monotone AGD curves the choice barely moves the decision (the classes
+    separate cleanly); the averaging summaries earn their keep mainly on noisy curves.
     """
-    return np.cumsum(curve, axis=-1) / np.arange(1, curve.shape[-1] + 1)
+    curve = np.asarray(curve, dtype=float)
+    if kind == "last":
+        return curve
+    csum = np.cumsum(curve, axis=-1)
+    L = curve.shape[-1]
+    if kind == "running_mean":
+        return csum / np.arange(1, L + 1)
+    if kind == "window":
+        w = max(1, int(window))
+        pad = np.zeros(curve.shape[:-1] + (1,))                 # leading 0 -> prefix sums
+        csp = np.concatenate([pad, csum], axis=-1)
+        idx = np.arange(1, L + 1)
+        lo = np.maximum(idx - w, 0)
+        return (csp[..., idx] - csp[..., lo]) / (idx - lo)      # trailing-window mean
+    raise ValueError(f"unknown summary_stat {kind!r} (expected running_mean/last/window)")
 
 
 # ============================================================== curve transform
@@ -197,9 +237,10 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
 
     # Forward simulation (mirrors the reference run_BOS): curve GP fit to the prefix, M
     # sampled future curves over epochs N0+1..N, dropping paths that leave (lo, hi). The
-    # summary statistic is the running mean over the *post-warm-up* epochs only (St in
-    # the reference), and feasibility is decided by the endpoint ell(N). The kernel
-    # ('expdecay' / 'warped') and value transform (raw / log) come from cfg.
+    # summary statistic (cfg.summary_stat; running mean by default) is taken over the
+    # *post-warm-up* epochs only, and feasibility is decided by the endpoint ell(N). The
+    # kernel ('picheny' / 'expdecay', optionally input-warped) and value transform (raw /
+    # log) come from cfg.
     gp = LearningCurveGP(noise=cfg.noise, kernel=cfg.curve_kernel,
                          input_warp=cfg.curve_input_warp, budget=budget,
                          fit_maxiter=cfg.fit_maxiter).fit(np.arange(1, n0 + 1), prefix)
@@ -209,7 +250,7 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
         future = future[keep]
     endpoints = future[:, -1]
     infeasible_end = endpoints > rho_t                    # theta_2 indicator at N
-    stat = summary_statistic(future)                      # St per path (running mean)
+    stat = summary_statistic(future, cfg.summary_stat, cfg.summary_window)   # St^(m) per path
     future_cells = np.clip(np.searchsorted(grid, stat, side="right") - 1, 0, n_cells - 1)
 
     # Terminal losses, as a 2-D histogram over (step, cell): per cell the fraction p
@@ -249,7 +290,8 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     actions[-1] = np.where(losses[-1, :, 0] <= losses[-1, :, 1],     # last epoch: terminals only
                            STOP_FEASIBLE, STOP_INFEASIBLE)
     if debug:
-        return actions, grid, {"p_inf": p_inf, "counts": counts, "losses": losses}
+        return actions, grid, {"p_inf": p_inf, "counts": counts, "losses": losses,
+                               "gp": gp, "n0": n0}
     return actions, grid
 
 
@@ -284,11 +326,13 @@ class BOSStopper:
         self._grid: np.ndarray | None = None
         self._origin = 0                                  # epoch the live table was built at
         self._n_cells = cfg.grid_size - 1
+        self._gp = None                                   # fitted curve GP from the last table build (for diagnostics)
         self._decision: BOSResult | None = None
         self._sigma_fn = sigma_fn                         # sigma([x, fid]) from the surrogate (C2)
         self._converging = False                          # in the post-feasibility plateau phase
         self._best_loss = float("inf")
         self._wait = 0
+        self._eval_mode = bool(cfg.eval_mode)             # record the would-be stop but never break
 
     def __call__(self, loss: float) -> bool:
         """Observe one epoch's loss; return True to break the decomposition."""
@@ -300,7 +344,7 @@ class BOSStopper:
             return self._converge_step(ell, n)
 
         if ell <= self.rho:                               # exact feasible certificate
-            if self.cfg.converge_after_feasible and n < self.budget:
+            if self.cfg.converge_after_feasible and n < self.budget and not self._eval_mode:
                 self._converging = True                   # refine the RSE instead of cropping at rho
                 self._best_loss, self._wait = ell, 0
                 return False
@@ -318,7 +362,8 @@ class BOSStopper:
         if not 0 <= row < self._table.shape[0]:
             return False
         stat = float(summary_statistic(                             # St since the table's origin
-            _curve_transform(curve[self._origin:], self.cfg.log_rse))[-1])
+            _curve_transform(curve[self._origin:], self.cfg.log_rse),
+            self.cfg.summary_stat, self.cfg.summary_window)[-1])
         cell = int(np.clip(np.searchsorted(self._grid, stat, side="right") - 1, 0, self._n_cells - 1))
         if int(self._table[row, cell]) == STOP_INFEASIBLE and self._c2_passes(n):
             return self._stop(0, n, "infeasible_kill")    # C1 (table) and C2 (surrogate) agree
@@ -330,6 +375,8 @@ class BOSStopper:
             n = len(self._curve)
             z = int(n > 0 and self._curve[-1] <= self.rho)
             self._decision = BOSResult(z, n, "completed", stopped_early=False)
+        self._decision.curve_gp = self._gp                # hand the fitted curve GP to diagnostics
+        self._decision.gp_origin = self._origin
         return self._decision
 
     @property
@@ -338,13 +385,17 @@ class BOSStopper:
 
     # --------------------------------------------------------------- internals
     def _build(self, curve: np.ndarray, n: int) -> bool:
-        """(Re)build the decision table from the observed prefix; never stops itself."""
+        """(Re)build the decision table from the observed prefix; never stops itself.
+        Retains the fitted curve GP (built at origin = n) so the diagnostics layer can run
+        the continuation prediction off it — the band itself is NOT computed here (it is
+        after-run diagnostics, not part of the BO stopping decision)."""
         cfg = self.cfg
         if cfg.k1_gamma is not None:                       # paper's time-varying K1,t = K1/gamma^t
             cfg = replace(cfg, K1=min(cfg.K1 / cfg.k1_gamma ** self._bo_iteration, 1e6))
-        self._table, self._grid = build_decision_table(
-            curve, self.rho, self.budget, cfg, self._rng)
+        self._table, self._grid, dbg = build_decision_table(
+            curve, self.rho, self.budget, cfg, self._rng, debug=True)
         self._origin = n
+        self._gp = dbg.get("gp")
         return False
 
     def _converge_step(self, loss: float, n: int) -> bool:
@@ -368,5 +419,7 @@ class BOSStopper:
         return self._sigma_fn(1.0) <= self.cfg.c2_kappa * self._sigma_fn(n / self.budget)
 
     def _stop(self, z: int, n: int, reason: str) -> bool:
-        self._decision = BOSResult(z, n, reason, stopped_early=(n < self.budget))
-        return True
+        if self._decision is None:                        # the first epoch BOS would stop at
+            self._decision = BOSResult(z, n, reason, stopped_early=(n < self.budget),
+                                       stop_time=time.perf_counter())   # exact would-be-stop wall time
+        return not self._eval_mode                        # eval mode: keep decomposing to budget

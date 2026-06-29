@@ -301,6 +301,14 @@ class BOSS:
         t0 = time.perf_counter()
         rse, losses = self._reconstruction_error(x, model=model)
         eval_time = time.perf_counter() - t0
+        # BOS time correction (eval mode): the decomposition ran to the full budget for
+        # ground-truth diagnostics, but in production BOS would have stopped at n*. Charge the
+        # EXACT measured wall-clock to that epoch — the stopper timestamps the would-be-stop
+        # callback on the same perf_counter clock as t0 (not a per-epoch approximation). Normal
+        # mode already breaks at n*, so eval_time stays the real measured time.
+        if (self.bos is not None and self.bos.eval_mode
+                and self._last_bos is not None and self._last_bos.stop_time is not None):
+            eval_time = self._last_bos.stop_time - t0
 
         cr = float(self.compression_ratio(x))
         feasible = bool(rse <= self.threshold)
@@ -326,7 +334,21 @@ class BOSS:
             row["bos_reason"] = self._last_bos.reason
             row["bos_epochs_saved"] = self.decomp_epochs - self._last_bos.n_star
         self.rows.append(row)
-        self.decomp_traces.append({"step": step, "phase": phase, "losses": losses})
+        # The full loss curve (in eval mode, the ground-truth continuation past n*) plus, for
+        # BOS runs, the would-be stop and the curve-GP predicted continuation band — diagnostics
+        # for whether BOS would have cut a good run. The band fit is after the timing windows.
+        trace = {"step": step, "phase": phase, "losses": losses}
+        if self.bos is not None and self._last_bos is not None:
+            trace["bos_stop_epoch"] = self._last_bos.n_star
+            trace["bos_reason"] = self._last_bos.reason
+        self.decomp_traces.append(trace)
+        # Continuation-band diagnostics (after-run): hand BOS's already-fitted curve GP to
+        # the diagnostics object, which runs the forward prediction and stores the band.
+        # Not part of the BO; guarded so it can never affect the search.
+        if self.bos is not None and self._last_bos is not None and self._last_bos.curve_gp is not None:
+            self.diagnostics.record_curve_band(
+                step=step, gp=self._last_bos.curve_gp, origin=self._last_bos.gp_origin,
+                budget=self.decomp_epochs, log_rse=self.bos.log_rse)
 
     def best(self) -> dict:
         """The structure the run returns: the feasible one of smallest CR; or, when
@@ -489,6 +511,7 @@ class BOSS:
         - ``gp_states.pt``      the per-BO-step surrogate snapshots
         - ``decomp_traces.json`` per-structure decomposition loss curves
         - ``diagnostics.csv``   per-step out-of-sample surrogate/acquisition diagnostics
+        - ``curve_bands.json``  BOS curve-GP predicted decomposition-continuation bands (when BOS on)
         - ``generating.json``   generating-structure reference {rse, cr, feasible} (when known)
         - ``.done``             completion sentinel
         """

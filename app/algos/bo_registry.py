@@ -20,9 +20,12 @@ decomposition optimiser knobs (decomp_init_lr / momentum / loss_patience / lr_pa
 """
 from __future__ import annotations
 
+from dataclasses import fields
+
 import numpy as np
 
 from tnss.algo.bo.boss import BOSS
+from tnss.algo.bo.bos_stopping import BOSConfig
 from tnss.algo.bo.search_space import SearchSpace
 from tnss.algo.bo.surrogates import ClassificationGP, RegressionGP, objective_target
 from tnss.algo.bo.acquisitions import (
@@ -49,6 +52,8 @@ _DEFAULTS = {
     "n_reference": 256, "raw_samples": 256, "num_restarts": 10,
     "decomp_method": "agd", "decomp_epochs": 250, "decomp_runs": 1,
     "decomp_init_lr": 0.01, "decomp_momentum": 0.9, "decomp_loss_patience": 500, "decomp_lr_patience": 50,
+    "bos": False,   # BOS feasibility early-stopping off by default; bos_<field> keys override BOSConfig
+
     # TnALE
     "tnale_topology": "ring", "tnale_local_step_init": 2, "tnale_local_step_main": 1,
     "tnale_interp_on": True, "tnale_interp_iters": 2, "tnale_local_opt_iter": 1,
@@ -113,6 +118,28 @@ def _build_acquisition(entry: dict):
     raise ValueError(f"Unknown acquisition: {name!r}")
 
 
+def _build_bos(entry: dict) -> BOSConfig | None:
+    """Assemble a BOSConfig from the entry's ``bos_<field>`` keys (full passthrough). Returns
+    None unless ``bos`` is truthy (BOS off — fixed-budget decomposition). A ``None``/absent value
+    keeps the BOSConfig default (the studied winning config: picheny + log, N0 auto = 0.16*N,
+    fit_maxiter 25), matching the registry's ``_get`` convention — the webapp's camel->snake
+    mapper emits every key as None when unset, so None must mean 'default' (incl the None-able
+    warmup / noise / c2_kappa / k1_gamma, whose defaults are already None where it matters).
+    Iterating the dataclass fields means new BOSConfig knobs are exposed automatically. BOS is
+    AGD-only — BOSS raises if it is enabled with a non-AGD decomp_method."""
+    if not entry.get("bos"):
+        return None
+    kw = {}
+    for f in fields(BOSConfig):
+        val = entry.get(f"bos_{f.name}")
+        if val is None:
+            continue                                      # absent / null -> keep BOSConfig default
+        if f.name == "interim_fid_epochs" and isinstance(val, (list, tuple)):
+            val = tuple(val)
+        kw[f.name] = val
+    return BOSConfig(**kw)
+
+
 def _build_boss(entry: dict, target, seed: int) -> BOSS:
     max_rank = _get(entry, "max_rank")
     space = SearchSpace(target, max_rank)
@@ -131,6 +158,7 @@ def _build_boss(entry: dict, target, seed: int) -> BOSS:
         decomp_init_lr=_get(entry, "decomp_init_lr"), decomp_momentum=_get(entry, "decomp_momentum"),
         decomp_loss_patience=_get(entry, "decomp_loss_patience"),
         decomp_lr_patience=_get(entry, "decomp_lr_patience"),
+        bos=_build_bos(entry),
         label=entry.get("label") or entry.get("name"), seed=seed,
     )
 
