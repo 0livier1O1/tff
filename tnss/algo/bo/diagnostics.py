@@ -18,7 +18,9 @@ Per-step columns: k, mu, sd, acq, y_obj, y_rse, feasible, infeasible_frac,
 pf_pred, pf_gen, acq_gen, noise, outputscale, ls0..lsD-1, and — for BITE/FBITE only —
 interp_improve / interp_boundary / interp_ct, the acquisition's own
 (improvement, alpha_bullet, c_t) split at the chosen candidate (via its `terms`
-method), so the two interpolated terms are captured live, not reconstructed.
+method), so the two interpolated terms are captured live, not reconstructed
+(plus interp_improve_raw / interp_boundary_raw when reference-normalisation is
+active, the pre-normalisation values that show the scale gap it closes).
 These feed: calibration
 (k, mu, sd, y), acquisition (k, acq, sd), hyperparameters (k, ls*, noise,
 outputscale), parity (y, mu), and — for the contour / feasibility family
@@ -142,6 +144,9 @@ class RunDiagnostics:
                 row["interp_improve"] = float(t["improve"].reshape(-1)[0])
                 row["interp_boundary"] = float(t["boundary"].reshape(-1)[0])
                 row["interp_ct"] = float(t["c_t"])
+                if "improve_raw" in t:                    # normalisation active: keep the pre-norm scale visible
+                    row["interp_improve_raw"] = float(t["improve_raw"].reshape(-1)[0])
+                    row["interp_boundary_raw"] = float(t["boundary_raw"].reshape(-1)[0])
             except Exception:
                 pass
         try:                                          # P(feasible) at the candidate

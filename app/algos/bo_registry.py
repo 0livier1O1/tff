@@ -46,7 +46,7 @@ _DEFAULTS = {
     "refit_every": 5, "full_epochs": 400, "refine_epochs": 60, "lr": 0.1,
     "tol": 1e-4, "patience": 10, "reset_every": 0, "fit_maxiter": 200,
     "weighting": "mask", "beta": 2.0, "eps": 0.05, "gamma": None,
-    "acq_inner": "sur", "acq_t": 1.0,
+    "acq_inner": "sur", "acq_t": 1.0, "interp_normalize": "none",
     "init_design": "cr_stratified", "n_init": 20, "cr_warp_lambda": 0.0, "cr_pool_bias": 1.0,
     "budget": 200, "max_rank": 8, "threshold": 0.01, "objective_weight": 10.0,
     "n_reference": 256, "raw_samples": 256, "num_restarts": 10,
@@ -116,7 +116,7 @@ def _build_acquisition(entry: dict):
         # eps / gamma. t powers the infeasible fraction into the weight c_n^t.
         inner = _build_acquisition({**entry, "acquisition": _get(entry, "acq_inner")})
         cls = BITE if name == "bite" else FBITE
-        return cls(inner, t=_get(entry, "acq_t"))
+        return cls(inner, t=_get(entry, "acq_t"), normalize=_get(entry, "interp_normalize"))
     raise ValueError(f"Unknown acquisition: {name!r}")
 
 

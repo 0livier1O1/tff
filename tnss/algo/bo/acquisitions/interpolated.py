@@ -36,6 +36,7 @@ from botorch.models.model import Model
 from botorch.utils.transforms import t_batch_mode_transform
 
 from tnss.algo.bo.acquisitions._moments import feasibility_prob
+from tnss.algo.bo.acquisitions._normalization import TransformFn, make_term_normalizer
 from tnss.algo.bo.acquisitions.base import Acquisition, SearchState
 
 
@@ -82,20 +83,39 @@ class FeasibilityImprovement:
 # ---------------------------------------------------------------------------
 
 class _InterpolatedFunction(AcquisitionFunction):
-    r"""(1 - c_t) * improvement(x) + c_t * alpha_bullet(x)."""
+    r"""(1 - c_t) * improvement(x) + c_t * alpha_bullet(x).
+
+    ``norm_improve`` / ``norm_boundary`` are optional reference-set transforms
+    (see ``_normalization``) applied to the two terms before blending, so c_t
+    controls the trade-off rather than being swamped by the terms' raw scales.
+    None on either keeps that term raw."""
 
     def __init__(self, model: Model, inner: AcquisitionFunction, c_t: float,
-                 improvement_fn: Callable[[Tensor], Tensor]):
+                 improvement_fn: Callable[[Tensor], Tensor],
+                 norm_improve: TransformFn | None = None,
+                 norm_boundary: TransformFn | None = None):
         super().__init__(model=model)
         self.inner = inner
         self._improvement_fn = improvement_fn
+        self._norm_improve = norm_improve
+        self._norm_boundary = norm_boundary
         self.register_buffer("c_t", torch.as_tensor(c_t, dtype=torch.double))
+
+    def _components(self, X: Tensor):
+        """The two terms at ``X`` (b, q=1, D): each as blended (raw, or reference-
+        normalised when a transform is set) and as raw. Returns
+        ``(improve, boundary, improve_raw, boundary_raw)``, all (b,). Shared by
+        ``forward`` (blends the first pair) and ``terms`` (records both pairs)."""
+        improve_raw = self._improvement_fn(X.squeeze(-2))
+        boundary_raw = self.inner(X).to(improve_raw)       # alpha_bullet over the same X
+        improve = self._norm_improve(improve_raw) if self._norm_improve is not None else improve_raw
+        boundary = self._norm_boundary(boundary_raw) if self._norm_boundary is not None else boundary_raw
+        return improve, boundary, improve_raw, boundary_raw
 
     @t_batch_mode_transform(expected_q=1)
     def forward(self, X: Tensor) -> Tensor:
-        improvement = self._improvement_fn(X.squeeze(-2))
-        inner = self.inner(X).to(improvement)             # alpha_bullet over the same X
-        return (1.0 - self.c_t) * improvement + self.c_t * inner
+        improve, boundary, _, _ = self._components(X)
+        return (1.0 - self.c_t) * improve + self.c_t * boundary
 
     @torch.no_grad()
     def terms(self, X: Tensor) -> dict:
@@ -103,28 +123,54 @@ class _InterpolatedFunction(AcquisitionFunction):
         sub-acquisitions ``forward`` blends — so the run can record the two interpolated
         terms directly rather than the diagnostics backing them out of the saved total
         (which needs the incumbent reconstructed and breaks where c_t -> 0). ``improve``
-        and ``boundary`` are (b,) tensors; ``c_t`` a float."""
-        improvement = self._improvement_fn(X.squeeze(-2))
-        boundary = self.inner(X).to(improvement)
-        return {"improve": improvement, "boundary": boundary, "c_t": float(self.c_t)}
+        and ``boundary`` are the blended (post-normalisation) terms; when normalisation
+        is active the raw pre-normalisation terms are added too, so the scale gap the
+        normalisation closes stays visible. All (b,) tensors; ``c_t`` a float."""
+        improve, boundary, improve_raw, boundary_raw = self._components(X)
+        out = {"improve": improve, "boundary": boundary, "c_t": float(self.c_t)}
+        if self._norm_improve is not None or self._norm_boundary is not None:
+            out["improve_raw"] = improve_raw
+            out["boundary_raw"] = boundary_raw
+        return out
 
 
 class _Interpolated:
     """Shared `Acquisition` spec for BITE / FBITE — differ only in the improvement
     term. `alpha_bullet` is the boundary-exploration spec; `t` powers the infeasible
-    fraction c_n into the interpolation weight c_n^t (t in {0.5, 1, 2})."""
+    fraction c_n into the interpolation weight c_n^t (t in {0.5, 1, 2}). `normalize`
+    ('none' / 'minmax' / 'quantile', see `_normalization`) maps the two terms onto a
+    common scale over the reference design before blending, so c_t is the actual dial
+    rather than being swamped by their raw magnitudes."""
 
-    def __init__(self, alpha_bullet: Acquisition, t: float = 1.0):
+    def __init__(self, alpha_bullet: Acquisition, t: float = 1.0, normalize: str = "none"):
         self.alpha_bullet = alpha_bullet
         self.t = float(t)
+        self.normalize = normalize
 
     def _improvement_fn(self, model: Model, state: SearchState) -> Callable[[Tensor], Tensor]:
         raise NotImplementedError
 
+    def _normalizers(self, inner: AcquisitionFunction,
+                     improvement_fn: Callable[[Tensor], Tensor], state: SearchState):
+        """Calibrate the two term transforms on the reference design R, once per step.
+        Returns (norm_improve, norm_boundary), or (None, None) when normalize='none'.
+        Evaluated under no_grad — the transforms hold detached constants, so a later
+        gradient optimiser still differentiates cleanly through the candidate (minmax)."""
+        if self.normalize == "none":
+            return None, None
+        R = state.reference
+        with torch.no_grad():
+            improve_R = improvement_fn(R)                        # (n,)
+            boundary_R = inner(R.unsqueeze(-2)).reshape(-1)      # acqf wants (n, q=1, D)
+        return (make_term_normalizer(improve_R, self.normalize),
+                make_term_normalizer(boundary_R, self.normalize))
+
     def build(self, model: Model, state: SearchState) -> AcquisitionFunction:
         inner = self.alpha_bullet.build(model, state)
+        improvement_fn = self._improvement_fn(model, state)
         c_t = float(state.infeasible_fraction) ** self.t
-        return _InterpolatedFunction(model, inner, c_t, self._improvement_fn(model, state))
+        norm_improve, norm_boundary = self._normalizers(inner, improvement_fn, state)
+        return _InterpolatedFunction(model, inner, c_t, improvement_fn, norm_improve, norm_boundary)
 
 
 class BITE(_Interpolated):
