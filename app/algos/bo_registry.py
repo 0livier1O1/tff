@@ -29,8 +29,8 @@ from tnss.algo.bo.bos_stopping import BOSConfig
 from tnss.algo.bo.search_space import SearchSpace
 from tnss.algo.bo.surrogates import ClassificationGP, RegressionGP, objective_target
 from tnss.algo.bo.acquisitions import (
-    BITE, FBITE, ContourGSUR, ContourSUR, ContourUCB, ExpectedImprovement,
-    FeasibilityImprovement, LowerConfidenceBound, TargetedMSE,
+    BITE, FBITE, ContourGSUR, ContourLPPM, ContourSUR, ContourUCB,
+    ExpectedImprovement, FeasibilityImprovement, LowerConfidenceBound, TargetedMSE,
 )
 from tnss.algo.tnale import TnALE
 from tnss.algo.random_search import RandomSearch
@@ -106,6 +106,8 @@ def _build_acquisition(entry: dict):
         return ContourSUR(weighting=_weighting(entry))
     if name == "gsur":
         return ContourGSUR(weighting=_weighting(entry))
+    if name == "lppm":
+        return ContourLPPM(weighting=_weighting(entry))
     if name == "fi":
         return FeasibilityImprovement()
     if name in ("bite", "fbite"):

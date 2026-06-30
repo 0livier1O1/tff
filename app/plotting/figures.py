@@ -421,6 +421,40 @@ def gp_hyperparameters(d: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def gp_lengthscales(d: pd.DataFrame) -> go.Figure:
+    """ARD lengthscale trajectory — one row per bond, value over BO steps (heatmap).
+    The lengthscale half of `gp_hyperparameters`, split out so it sits beside the
+    scalar params."""
+    k = d["k"].values
+    ls = d[[c for c in d.columns if c.startswith("ls")]].values.T
+    fig = go.Figure(go.Heatmap(x=k, y=list(range(ls.shape[0])), z=ls, colorscale="Viridis",
+                               colorbar=dict(title="ls")))
+    fig.update_yaxes(title_text="bond dim")
+    fig.update_xaxes(title_text="BO step")
+    fig.update_layout(template="plotly_white", margin=dict(l=0, r=0, t=20, b=0))
+    return fig
+
+
+def gp_fitted_scalars(d: pd.DataFrame) -> go.Figure:
+    """Scalar fitted GP parameters over BO steps (log axis): observation noise,
+    outputscale, and any further fitted scalars present as columns (e.g. input-warp
+    concentrations, once those are captured — they appear automatically)."""
+    k = d["k"].values
+    extra = [c for c in d.columns if c not in ("k", "noise", "outputscale") and not c.startswith("ls")]
+    fig = go.Figure()
+    for name, color in (("noise", "#d62728"), ("outputscale", "#9467bd")):
+        if name in d.columns:
+            fig.add_trace(go.Scatter(x=k, y=d[name], mode="lines", name=name,
+                                     line=dict(color=color)))
+    for c in extra:
+        fig.add_trace(go.Scatter(x=k, y=d[c], mode="lines", name=c))
+    fig.update_yaxes(title_text="value", type="log")
+    fig.update_xaxes(title_text="BO step")
+    fig.update_layout(template="plotly_white", margin=dict(l=0, r=0, t=24, b=0),
+                      legend=dict(orientation="h", y=1.02, yanchor="bottom"))
+    return fig
+
+
 def gp_acquisition(d: pd.DataFrame) -> go.Figure:
     """Acquisition behaviour — log-EI at the chosen point (declining = search
     maturing) and the GP σ there (explore ↔ exploit), across BO steps."""

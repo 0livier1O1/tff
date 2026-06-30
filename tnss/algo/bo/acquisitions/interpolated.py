@@ -97,6 +97,17 @@ class _InterpolatedFunction(AcquisitionFunction):
         inner = self.inner(X).to(improvement)             # alpha_bullet over the same X
         return (1.0 - self.c_t) * improvement + self.c_t * inner
 
+    @torch.no_grad()
+    def terms(self, X: Tensor) -> dict:
+        """The (improvement, boundary, c_t) split at ``X`` (b, q=1, D), from the SAME
+        sub-acquisitions ``forward`` blends — so the run can record the two interpolated
+        terms directly rather than the diagnostics backing them out of the saved total
+        (which needs the incumbent reconstructed and breaks where c_t -> 0). ``improve``
+        and ``boundary`` are (b,) tensors; ``c_t`` a float."""
+        improvement = self._improvement_fn(X.squeeze(-2))
+        boundary = self.inner(X).to(improvement)
+        return {"improve": improvement, "boundary": boundary, "c_t": float(self.c_t)}
+
 
 class _Interpolated:
     """Shared `Acquisition` spec for BITE / FBITE — differ only in the improvement

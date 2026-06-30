@@ -15,7 +15,11 @@ so the bulky per-step snapshots in `gp_states.pt` can be deleted later with no
 loss to any plot.
 
 Per-step columns: k, mu, sd, acq, y_obj, y_rse, feasible, infeasible_frac,
-pf_pred, pf_gen, noise, outputscale, ls0..lsD-1. These feed: calibration
+pf_pred, pf_gen, noise, outputscale, ls0..lsD-1, and — for BITE/FBITE only —
+interp_improve / interp_boundary / interp_ct, the acquisition's own
+(improvement, alpha_bullet, c_t) split at the chosen candidate (via its `terms`
+method), so the two interpolated terms are captured live, not reconstructed.
+These feed: calibration
 (k, mu, sd, y), acquisition (k, acq, sd), hyperparameters (k, ls*, noise,
 outputscale), parity (y, mu), and — for the contour / feasibility family
 (SUR / gSUR / cUCB) — the acquisition-value trace (acq, pf_pred, infeasible_frac)
@@ -130,6 +134,14 @@ class RunDiagnostics:
             row["acq"] = float(acquisition(x.unsqueeze(0)).reshape(-1)[0])
         except Exception:
             pass
+        if hasattr(acquisition, "terms"):             # BITE/FBITE: the two blended terms, recorded directly
+            try:
+                t = acquisition.terms(x.unsqueeze(0))
+                row["interp_improve"] = float(t["improve"].reshape(-1)[0])
+                row["interp_boundary"] = float(t["boundary"].reshape(-1)[0])
+                row["interp_ct"] = float(t["c_t"])
+            except Exception:
+                pass
         try:                                          # P(feasible) at the candidate
             row["pf_pred"] = float(feasibility_prob(acq_model, x).reshape(-1)[0])
         except Exception:

@@ -536,6 +536,46 @@ def acqf_value_single(steps, acqf_value, feasible, acqf_used) -> go.Figure:
     return _base_layout(fig)
 
 
+def interpolated_terms(steps, improvement, boundary, improve_label: str,
+                       boundary_label: str) -> go.Figure:
+    """The two terms BITE/FBITE interpolate, at the chosen candidate per BO step, on dual
+    y-axes (their scales differ): the CR-improvement term (left) and the boundary
+    acquisition α• (right). Recovered algebraically from the saved acquisition total, the
+    interpolation weight and the deterministic CR — not a replay."""
+    steps = np.asarray(steps, float)
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Scatter(x=steps, y=np.asarray(improvement, float), mode="lines+markers",
+                             name=improve_label, line=dict(color=COLOR[0])), secondary_y=False)
+    fig.add_trace(go.Scatter(x=steps, y=np.asarray(boundary, float), mode="lines+markers",
+                             name=boundary_label, line=dict(color=COLOR[1])), secondary_y=True)
+    fig.update_xaxes(title_text="BO step")
+    fig.update_yaxes(title_text=improve_label, color=COLOR[0], secondary_y=False)
+    fig.update_yaxes(title_text=boundary_label, color=COLOR[1], secondary_y=True)
+    fig = _base_layout(fig)
+    fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+    return fig
+
+
+def interpolation_weights(steps, c, t: float) -> go.Figure:
+    """BITE / FBITE interpolation weight cₙ^t vs BO step. cₙ is the infeasible fraction of
+    the data; the boundary term gets weight cₙ^t and the CR-improvement term 1−cₙ^t, so
+    as infeasibility rises (cₙ→1) the criterion defers to boundary exploration, and as it
+    falls (cₙ→0) it pursues compression. `t` (0.5/1/2) is the power."""
+    steps = np.asarray(steps, float)
+    c = np.clip(np.asarray(c, float), 0.0, 1.0)
+    ct = c ** t
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=steps, y=c, mode="lines+markers", name="infeasible fraction cₙ",
+                             line=dict(color="#888")))
+    fig.add_trace(go.Scatter(x=steps, y=ct, mode="lines+markers",
+                             name=f"boundary weight cₙ^t (t={t:g})", line=dict(color=COLOR[1])))
+    fig.add_trace(go.Scatter(x=steps, y=1.0 - ct, mode="lines+markers",
+                             name="CR-improvement weight 1−cₙ^t", line=dict(color=COLOR[0])))
+    fig.update_xaxes(title_text="BO step")
+    fig.update_yaxes(title_text="weight", range=[-0.02, 1.05])
+    return _base_layout(fig)
+
+
 def ficr_weights(steps, c, t: float, reset_steps=()) -> go.Figure:
     """`ficr` interpolation weights vs BO step: feasibility weight c·t and the
     complementary UCB weight, with the infeasible fraction c."""
