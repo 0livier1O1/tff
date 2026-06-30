@@ -49,7 +49,7 @@ _DEFAULTS = {
     "acq_inner": "sur", "acq_t": 1.0, "interp_normalize": "none",
     "init_design": "cr_stratified", "n_init": 20, "cr_warp_lambda": 0.0, "cr_pool_bias": 1.0,
     "budget": 200, "max_rank": 8, "threshold": 0.01, "objective_weight": 10.0,
-    "n_reference": 256, "raw_samples": 256, "num_restarts": 10,
+    "n_reference": 256, "raw_samples": 256, "num_restarts": 10, "acq_optimizer": "discrete",
     "decomp_method": "agd", "decomp_epochs": 250, "decomp_runs": 1,
     "decomp_init_lr": 0.01, "decomp_momentum": 0.9, "decomp_loss_patience": 500, "decomp_lr_patience": 50,
     "bos": False,   # BOS feasibility early-stopping off by default; bos_<field> keys override BOSConfig
@@ -153,6 +153,7 @@ def _build_boss(entry: dict, target, seed: int) -> BOSS:
         n_init=_get(entry, "n_init"), init_design=_get(entry, "init_design"),
         cr_warp_lambda=_get(entry, "cr_warp_lambda"), cr_pool_bias=_get(entry, "cr_pool_bias"),
         objective_weight=_get(entry, "objective_weight"),
+        acq_optimizer=_get(entry, "acq_optimizer"),
         num_restarts=_get(entry, "num_restarts"), raw_samples=_get(entry, "raw_samples"),
         n_reference=_get(entry, "n_reference"),
         decomp_method=_get(entry, "decomp_method"), decomp_epochs=_get(entry, "decomp_epochs"),

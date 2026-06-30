@@ -17,7 +17,6 @@ from typing import Callable
 import numpy as np
 import torch
 
-from tnss.algo.boss.boss import BOSS
 from tnss.algo.cboss import CBOSS
 from tnss.algo.bess import BESS
 from tnss.algo.ftboss.ftboss import FTBOSS
@@ -25,7 +24,7 @@ from tnss.algo.tnale import TnALE
 from tnss.algo.random_search import RandomSearch
 
 
-SINGLE_OBJECT_FAMILIES = ("boss", "cboss", "bess", "ftboss", "tnale", "random")
+SINGLE_OBJECT_FAMILIES = ("cboss", "bess", "ftboss", "tnale", "random")
 
 
 # ---------------------------------------------------------------------------
@@ -56,19 +55,6 @@ def _target_torch(target_np) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Builders — (acfg, adj_np, target_np, seed) -> constructed algorithm
 # ---------------------------------------------------------------------------
-
-def _build_boss(acfg, adj_np, target_np, seed):
-    return BOSS(
-        _target_torch(target_np),
-        budget=acfg.budget, n_init=acfg.n_init, init_design=acfg.init_method,
-        cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
-        max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
-        freq_update=acfg.freq_update, lamda=acfg.lambda_fitness, n_runs=acfg.n_runs,
-        acqf=_acqf(acfg), ucb_beta=acfg.ucb_beta, kernel=acfg.kernel, mean=acfg.mean,
-        input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,
-        seed=seed, verbose=True, **_decomp_kwargs(acfg),
-    )
-
 
 def _build_cboss(acfg, adj_np, target_np, seed):
     return CBOSS(
@@ -233,11 +219,11 @@ def _save_none(algo, out_dir: Path, acfg):
 # ---------------------------------------------------------------------------
 
 _BUILDERS: dict[str, Callable] = {
-    "boss": _build_boss, "cboss": _build_cboss, "bess": _build_bess,
+    "cboss": _build_cboss, "bess": _build_bess,
     "ftboss": _build_ftboss, "tnale": _build_tnale, "random": _build_random,
 }
 _SAVERS: dict[str, Callable] = {
-    "boss": _save_bo("boss_results.npz"), "cboss": _save_bo("cboss_results.npz"),
+    "cboss": _save_bo("cboss_results.npz"),
     "bess": _save_bo("bess_results.npz"), "ftboss": _save_ftboss,
     "tnale": _save_none, "random": _save_random,
 }

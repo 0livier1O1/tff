@@ -31,7 +31,7 @@ from torch import Tensor
 from torch.quasirandom import SobolEngine
 
 from botorch.acquisition import AcquisitionFunction
-from botorch.optim import optimize_acqf_discrete_local_search
+from botorch.optim import optimize_acqf, optimize_acqf_discrete_local_search
 
 from tnss.algo.bo.acquisitions import Acquisition, SearchState
 from tnss.algo.bo.diagnostics import RunDiagnostics
@@ -67,8 +67,9 @@ class BOSS:
         cr_warp_lambda: float = 0.0,      # cr_stratified: Box-Cox warp (lam<0 -> more low-CR)
         cr_pool_bias: float = 1.0,        # cr_stratified: pool bias toward low ranks (>=1)
         objective_weight: float = 10.0,   # lambda in the CR + lambda*RSE objective
-        # --- acquisition optimiser (BoTorch discrete local search) ---
-        num_restarts: int = 10,           # discrete local-search restarts
+        # --- acquisition optimiser ---
+        acq_optimizer: str = "discrete",  # 'discrete' (local search over the lattice) / 'continuous' (gradient optimize_acqf, snapped)
+        num_restarts: int = 10,           # restarts (both optimisers)
         raw_samples: int = 256,           # initial random candidates per restart
         n_reference: int = 256,           # fixed reference-design size (SUR / adaptive cUCB gamma)
         # --- objective evaluation (decomposition) ---
@@ -99,6 +100,7 @@ class BOSS:
         self.objective_weight = objective_weight
 
         self.num_restarts = num_restarts
+        self.acq_optimizer = acq_optimizer
         self.raw_samples = raw_samples
         self.n_reference = n_reference
 
@@ -308,9 +310,29 @@ class BOSS:
                 progress("init", i + 1, total)
 
     def _maximize_acquisition(self, acquisition: AcquisitionFunction) -> Tensor:
-        """Maximise the acquisition over the integer rank lattice with BoTorch's
-        discrete local search — it only *evaluates* the acquisition, so it works
-        with any (even non-differentiable) kernel."""
+        """Maximise the acquisition over the rank lattice and return one normalised
+        candidate in [0,1]^D.
+
+        'discrete' (default): BoTorch discrete local search over the lattice nodes —
+        it only *evaluates* the acquisition, so it works with any (even
+        non-differentiable) kernel/acquisition.
+
+        'continuous': gradient-based ``optimize_acqf`` over the [0,1]^D box, then snap
+        the result to the nearest lattice node. Needs a differentiable acquisition;
+        note the CR-based terms are piecewise-constant in x (``cr_of_normalized``
+        rounds), so their gradient is zero — the gradient signal comes from the
+        GP-posterior boundary term, and the CR terms still steer via the restart that
+        wins on value. BITE/FBITE here must use ``interp_normalize='minmax'`` or
+        ``'none'`` ('quantile' is non-differentiable)."""
+        if self.acq_optimizer == "continuous":
+            candidate, _ = optimize_acqf(
+                acq_function=acquisition,
+                bounds=self.space.bounds,
+                q=1,
+                num_restarts=self.num_restarts,
+                raw_samples=self.raw_samples,
+            )
+            return self.space.snap_to_lattice(candidate).detach()
         candidate, _ = optimize_acqf_discrete_local_search(
             acq_function=acquisition,
             discrete_choices=self.choices,

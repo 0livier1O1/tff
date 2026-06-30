@@ -45,6 +45,14 @@ class SearchSpace:
         """Normalised [0,1]^D -> integer bond ranks {1,...,max_rank}^D."""
         return to_int_ranks(x, self.max_rank)
 
+    def snap_to_lattice(self, x: Tensor) -> Tensor:
+        """Round a continuous [0,1]^D point to the nearest lattice node — the same
+        evenly-spaced levels as `choices`. Used after the continuous (gradient)
+        acquisition optimiser so its candidate is stored and evaluated exactly
+        on-lattice, identically to the discrete path. Preserves x's shape."""
+        ranks = to_int_ranks(x, self.max_rank).double()
+        return (ranks - 1.0) / max(self.max_rank - 1, 1)
+
     def to_adjacency(self, ranks: Tensor) -> Tensor:
         """Integer upper-triangular rank vector -> full N×N symmetric adjacency
         (diagonal = physical mode sizes)."""
