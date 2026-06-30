@@ -15,7 +15,7 @@ so the bulky per-step snapshots in `gp_states.pt` can be deleted later with no
 loss to any plot.
 
 Per-step columns: k, mu, sd, acq, y_obj, y_rse, feasible, infeasible_frac,
-pf_pred, pf_gen, noise, outputscale, ls0..lsD-1, and — for BITE/FBITE only —
+pf_pred, pf_gen, acq_gen, noise, outputscale, ls0..lsD-1, and — for BITE/FBITE only —
 interp_improve / interp_boundary / interp_ct, the acquisition's own
 (improvement, alpha_bullet, c_t) split at the chosen candidate (via its `terms`
 method), so the two interpolated terms are captured live, not reconstructed.
@@ -24,7 +24,8 @@ These feed: calibration
 outputscale), parity (y, mu), and — for the contour / feasibility family
 (SUR / gSUR / cUCB) — the acquisition-value trace (acq, pf_pred, infeasible_frac)
 and generating-structure feasibility (pf_gen, the P(feasible) the surrogate
-assigns the ground-truth structure each step).
+assigns the ground-truth structure each step) plus acq_gen (the acquisition value
+the run would assign that same structure — how attractive the optimum looks).
 
 It also stores (`curve_bands.json`) the BOS decomposition-curve continuation band:
 the diagnostics object is *handed* the curve GP BOS already fit for its stopping
@@ -122,7 +123,8 @@ class RunDiagnostics:
                      "acq": float("nan"), "y_obj": float(objective),
                      "y_rse": float(rse), "feasible": int(feasible),
                      "infeasible_frac": float(infeasible_frac),
-                     "pf_pred": float("nan"), "pf_gen": float("nan")}
+                     "pf_pred": float("nan"), "pf_gen": float("nan"),
+                     "acq_gen": float("nan")}
         x = candidate.detach().reshape(1, -1)
         try:
             post = acq_model.posterior(x)
@@ -146,9 +148,14 @@ class RunDiagnostics:
             row["pf_pred"] = float(feasibility_prob(acq_model, x).reshape(-1)[0])
         except Exception:
             pass
-        if self.gen_x is not None:                    # P(feasible) of the ground truth
+        if self.gen_x is not None:                    # surrogate belief + acquisition at the ground truth
+            g = self.gen_x.reshape(1, -1)
             try:
-                row["pf_gen"] = float(feasibility_prob(acq_model, self.gen_x.reshape(1, -1)).reshape(-1)[0])
+                row["pf_gen"] = float(feasibility_prob(acq_model, g).reshape(-1)[0])
+            except Exception:
+                pass
+            try:                                      # acqf value the run would assign the generating structure
+                row["acq_gen"] = float(acquisition(g.unsqueeze(0)).reshape(-1)[0])
             except Exception:
                 pass
         try:

@@ -479,10 +479,14 @@ def rse_distribution(rse, feasible_rse: float) -> go.Figure:
     return _base_layout(fig, barmode="overlay")
 
 
-def acqf_value_trace(steps, acqf_value, pf_pred, feasible, acqf_used, reset_steps=()) -> go.Figure:
+def acqf_value_trace(steps, acqf_value, pf_pred, feasible, acqf_used, reset_steps=(),
+                     acqf_gen=None, pf_gen=None) -> go.Figure:
     """Two stacked panels — acquisition value and feasibility belief at the chosen
     candidate vs BO step, points coloured by realized feasibility; the cold-start
-    seek-feasibility phase is shaded."""
+    seek-feasibility phase is shaded. When the generating (ground-truth) structure is
+    known, its acquisition value (`acqf_gen`) and feasibility belief (`pf_gen`) are
+    overlaid as marker-free lines — how attractive / feasible the true optimum looks to
+    the run each step, against what it actually picked."""
     steps = np.asarray(steps, float)
     feasible = np.asarray(feasible, int)
     acqf_value = np.asarray(acqf_value, float)
@@ -501,6 +505,14 @@ def acqf_value_trace(steps, acqf_value, pf_pred, feasible, acqf_used, reset_step
         fig.add_trace(go.Scatter(x=steps[m], y=pf_pred[m], mode="markers",
                                  marker=dict(color=COLOR[tf], size=6), name=nm,
                                  legendgroup=nm, showlegend=False), row=2, col=1)
+    if acqf_gen is not None:                    # acquisition value at the generating structure
+        fig.add_trace(go.Scatter(x=steps, y=np.asarray(acqf_gen, float), mode="lines",
+                                 line=dict(color="#009E73", width=1.5), name="generating",
+                                 legendgroup="gen"), row=1, col=1)
+    if pf_gen is not None:                       # P(feasible) the surrogate gives the generating structure
+        fig.add_trace(go.Scatter(x=steps, y=np.asarray(pf_gen, float), mode="lines",
+                                 line=dict(color="#009E73", width=1.5), name="generating",
+                                 legendgroup="gen", showlegend=False), row=2, col=1)
     fig.add_hline(y=0.5, line_dash="dash", line_color="#333", row=2, col=1)
     # shade seek-feasibility steps
     for s in steps[seek]:
@@ -539,9 +551,8 @@ def acqf_value_single(steps, acqf_value, feasible, acqf_used) -> go.Figure:
 def interpolated_terms(steps, improvement, boundary, improve_label: str,
                        boundary_label: str) -> go.Figure:
     """The two terms BITE/FBITE interpolate, at the chosen candidate per BO step, on dual
-    y-axes (their scales differ): the CR-improvement term (left) and the boundary
-    acquisition α• (right). Recovered algebraically from the saved acquisition total, the
-    interpolation weight and the deterministic CR — not a replay."""
+    y-axes (their *raw* scales differ): the CR-improvement term (left) and the boundary
+    acquisition α• (right). Captured live by the acquisition during the run."""
     steps = np.asarray(steps, float)
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Scatter(x=steps, y=np.asarray(improvement, float), mode="lines+markers",
@@ -551,6 +562,29 @@ def interpolated_terms(steps, improvement, boundary, improve_label: str,
     fig.update_xaxes(title_text="BO step")
     fig.update_yaxes(title_text=improve_label, color=COLOR[0], secondary_y=False)
     fig.update_yaxes(title_text=boundary_label, color=COLOR[1], secondary_y=True)
+    fig = _base_layout(fig)
+    fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+    return fig
+
+
+def interpolated_terms_weighted(steps, w_improvement, w_boundary, improve_label: str,
+                                boundary_label: str) -> go.Figure:
+    """The same two terms as `interpolated_terms`, each multiplied by its interpolation
+    weight — (1−cₙᵗ)·improvement and cₙᵗ·α• — so they share ONE axis and add up to the
+    acquisition total at the chosen candidate (grey line). Shows which term actually drove
+    the pick each step (the raw dual-axis view hides this because the weights differ)."""
+    steps = np.asarray(steps, float)
+    wi = np.asarray(w_improvement, float)
+    wb = np.asarray(w_boundary, float)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=steps, y=wi + wb, mode="lines", name="total (α)",
+                             line=dict(color="#bbb", width=1), hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=steps, y=wi, mode="lines+markers",
+                             name=f"(1−cₙᵗ)·{improve_label}", line=dict(color=COLOR[0])))
+    fig.add_trace(go.Scatter(x=steps, y=wb, mode="lines+markers",
+                             name=f"cₙᵗ·{boundary_label}", line=dict(color=COLOR[1])))
+    fig.update_xaxes(title_text="BO step")
+    fig.update_yaxes(title_text="weighted contribution to α")
     fig = _base_layout(fig)
     fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
     return fig
