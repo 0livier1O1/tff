@@ -54,8 +54,10 @@ class SyntheticProblemConfig(ProblemConfig):
 class RealProblemConfig(ProblemConfig):
     source: str                # "Images" | "Lightfield"
     target_path: str           # canonical path inside data/
-    shape: list[int]           # cached for sidebar preview
+    shape: list[int]           # cached for preview (post crop/downsample)
     dataset: str | None = None # lightfield subdir, if applicable
+    crop: list[int] | None = None   # lightfield spatial crop [h0,h1,w0,w1] (source px); None = full frame
+    downsample: int = 1        # lightfield spatial stride (1 = full resolution)
     kind: str = "real"
 
 

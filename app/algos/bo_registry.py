@@ -41,7 +41,8 @@ BO_FAMILIES = ("boss", "tnale", "random")   # FTBOSS et al. join here.
 _DEFAULTS = {
     "family": "boss",
     "surrogate": "classification", "acquisition": "gsur",
-    "kernel": "matern", "nu": 2.5, "mean": "constant", "var_strategy": "whitened",
+    "kernel": "matern", "nu": 2.5, "mean": "constant", "log_size_prior_sigma": None,
+    "var_strategy": "whitened",
     "input_warp": True, "round_inputs": False,
     "refit_every": 5, "full_epochs": 400, "refine_epochs": 60, "lr": 0.1,
     "tol": 1e-4, "patience": 10, "reset_every": 0, "fit_maxiter": 200,
@@ -78,12 +79,14 @@ def _build_surrogate(entry: dict, space: SearchSpace):
             space,
             target_fn=objective_target(_get(entry, "objective_weight")),
             nu=_get(entry, "nu"), mean=_get(entry, "mean"),
+            log_size_prior_sigma=_get(entry, "log_size_prior_sigma"),
             input_warp=_get(entry, "input_warp"), round_inputs=_get(entry, "round_inputs"),
             refit_every=_get(entry, "refit_every"), fit_maxiter=_get(entry, "fit_maxiter"),
         )
     return ClassificationGP(
         space,
         kernel=_get(entry, "kernel"), mean=_get(entry, "mean"),
+        log_size_prior_sigma=_get(entry, "log_size_prior_sigma"),
         var_strategy=_get(entry, "var_strategy"),
         input_warp=_get(entry, "input_warp"), round_inputs=_get(entry, "round_inputs"),
         full_epochs=_get(entry, "full_epochs"), refine_epochs=_get(entry, "refine_epochs"),

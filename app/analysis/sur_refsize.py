@@ -181,7 +181,9 @@ def generate_sur_refsize(config_dir) -> Path:
         return _reconstruct(clas, g["state_dict"], Xt, Zt, k), Xt[k:k + 1], k
 
     # --- View A: convergence vs M at representative steps -----------------------
-    a_idx = np.unique(np.linspace(0, budget - 1, min(_A_STEPS, budget)).round().astype(int))
+    # Always include snap 0 — the first surrogate (n_init, the post-init "starting point") —
+    # so the earliest step is visible, then space the rest across the run.
+    a_idx = np.union1d([0], np.linspace(0, budget - 1, min(_A_STEPS, budget)).round().astype(int)).astype(int)
     a_mean = np.zeros((len(a_idx), len(m_grid)))
     a_std = np.zeros_like(a_mean)
     a_designs = {(m, d): _ref_design(D, m, 1000 * m + d) for m in m_grid for d in range(_K_A)}

@@ -9,7 +9,8 @@ the whole fit policy — one converged fit at init, warm-started incremental ref
 periodic / error-triggered hard resets — exactly parallel to `RegressionGP` (a
 manager that returns a botorch model); there is no separate model subclass. The
 contour / feasibility-weighted acquisitions read the model's latent posterior via
-`model.posterior(X)`; `feasibility_prob` gives P(feasible).
+`model.posterior(X)`; the surrogate-agnostic `acquisitions._moments.feasibility_prob`
+gives P(feasible) (re-exported from this package).
 
 The weighted-shortest-path kernel option is dropped (unused).
 """
@@ -19,12 +20,16 @@ import torch
 from torch import Tensor
 
 from botorch.models import SingleTaskVariationalGP
-from botorch.models.model import Model
 from gpytorch.kernels import MaternKernel, RBFKernel, ScaleKernel
 from gpytorch.likelihoods import BernoulliLikelihood
 from gpytorch.mlls import VariationalELBO
 from gpytorch.variational import UnwhitenedVariationalStrategy, VariationalStrategy
-from linear_operator.utils.errors import NotPSDError
+from linear_operator.utils.errors import NanError, NotPSDError
+
+# Numerical fit failures the ELBO refit recovers from (frozen-hyper fallback → cold
+# reset → hold the previous model) rather than letting them abort the whole run: a
+# non-PSD covariance, or a variational distribution that has gone NaN.
+_FIT_ERRORS = (NotPSDError, NanError)
 
 from tnss.algo.bo.search_space import SearchSpace
 from tnss.algo.bo.surrogates.means import make_mean
@@ -62,16 +67,6 @@ def make_feasibility_kernel(name: str, D: int, *, max_rank: int,
     return ScaleKernel(maybe_round(maybe_warp(base, D, input_warp), max_rank, round_inputs))
 
 
-@torch.no_grad()
-def feasibility_prob(model: Model, X: Tensor) -> Tensor:
-    """Analytic P(feasible) = Phi(mu / sqrt(1 + var)) from the latent posterior of a
-    classification feasibility GP."""
-    model.eval()
-    post = model.posterior(X)
-    mu, var = post.mean.squeeze(-1), post.variance.squeeze(-1)
-    return torch.distributions.Normal(0.0, 1.0).cdf(mu / (1.0 + var).sqrt())
-
-
 class ClassificationGP:
     """`Surrogate` manager for the variational Bernoulli feasibility classifier.
     `.fit(...)` builds/refits a BoTorch `SingleTaskVariationalGP` and returns it.
@@ -89,6 +84,8 @@ class ClassificationGP:
     space : the SearchSpace (D, N, max_rank, mode sizes for the mean/kernel).
     kernel : 'matern'/'matern52'/'matern32'/'rbf'.
     mean : latent prior mean — 'constant'/'linear'/'log_size'.
+    log_size_prior_sigma : 'log_size' only — optional N(0, sigma) prior on the learned
+        slope (None = off); shrinks the capacity trend so it can't over-steepen.
     var_strategy : 'whitened' or 'unwhitened'.
     input_warp, round_inputs : kernel input transforms.
     full_epochs : max epochs for the converged init fit.
@@ -107,6 +104,7 @@ class ClassificationGP:
         *,
         kernel: str = "matern",
         mean: str = "constant",
+        log_size_prior_sigma: float | None = None,
         var_strategy: str = "whitened",
         input_warp: bool = False,
         round_inputs: bool = False,
@@ -123,6 +121,7 @@ class ClassificationGP:
         self.space = space
         self.kernel = kernel
         self.mean = mean
+        self.log_size_prior_sigma = log_size_prior_sigma
         self.var_strategy = var_strategy
         self.input_warp = input_warp
         self.round_inputs = round_inputs
@@ -183,7 +182,9 @@ class ClassificationGP:
         return SingleTaskVariationalGP(
             X, Z,
             likelihood=BernoulliLikelihood(),
-            mean_module=make_mean(self.mean, d_in, N=s.n_cores, max_rank=s.max_rank, t_shape=s.mode_sizes),
+            mean_module=make_mean(self.mean, d_in, N=s.n_cores, max_rank=s.max_rank, t_shape=s.mode_sizes,
+                                  log_size_prior_sigma=self.log_size_prior_sigma,
+                                  round_inputs=self.round_inputs),
             covar_module=make_feasibility_kernel(
                 self.kernel, d_in, max_rank=s.max_rank,
                 input_warp=self.input_warp, round_inputs=self.round_inputs),
@@ -243,12 +244,12 @@ class ClassificationGP:
         try:
             m = self._warm_start(self._build(X, Z), self._model)
             return self._fit(m, X, Z, epochs=self.refine_epochs, freeze_hypers=freeze_hypers), False
-        except NotPSDError:
+        except _FIT_ERRORS:
             if not freeze_hypers:
                 try:
                     m = self._warm_start(self._build(X, Z), self._model)
                     return self._fit(m, X, Z, epochs=self.refine_epochs, freeze_hypers=True), True
-                except NotPSDError:
+                except _FIT_ERRORS:
                     pass
             return None, True
 
@@ -257,6 +258,6 @@ class ClassificationGP:
         only if its ELBO beats `current` (a bad cold init can't regress)."""
         try:
             cold = self._fit(self._build(X, Z), X, Z, epochs=self.full_epochs, freeze_hypers=False)
-        except NotPSDError:
+        except _FIT_ERRORS:
             return current
         return cold if cold.final_elbo >= current.final_elbo else current

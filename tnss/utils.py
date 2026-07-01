@@ -68,6 +68,19 @@ def to_int_ranks(X_std: Tensor, max_rank: int) -> Tensor:
     return ranks.round().clamp(1, max_rank).to(torch.int)
 
 
+def snap_to_lattice(X_std: Tensor, max_rank: int, straight_through: bool = False) -> Tensor:
+    """Round normalized points in [0,1]^D to the nearest integer-rank lattice node,
+    returning them in the *same* normalized [0,1] coordinates (the inverse-normalise of
+    :func:`to_int_ranks`). The single lattice-snap used by ``SearchSpace`` (store the
+    continuous optimiser's pick on-lattice) and by ``RoundKernel`` / ``RoundMean``
+    (discretise inputs inside the covariance / mean forward). With ``straight_through``
+    the forward value snaps but the gradient flows as identity, so a gradient-based
+    acquisition optimiser can still move between cells; otherwise it is a hard snap."""
+    snapped = (to_int_ranks(X_std, max_rank).double() - 1.0) / max(float(max_rank) - 1.0, 1.0)
+    snapped = snapped.to(X_std.dtype)
+    return X_std + (snapped - X_std).detach() if straight_through else snapped
+
+
 def cr_of_normalized(X_std: Tensor, max_rank: int, t_shape: Tensor) -> Tensor:
     """Deterministic compression ratio for normalized rank vectors (full
     upper-triangular encoding): ``CR = (sum_i prod_j A_ij) / prod_i diag_i`` from the

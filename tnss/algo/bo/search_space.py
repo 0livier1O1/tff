@@ -14,7 +14,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from tnss.utils import cr_of_normalized, to_int_ranks, triu_to_adj_matrix
+from tnss.utils import cr_of_normalized, snap_to_lattice, to_int_ranks, triu_to_adj_matrix
 
 
 class SearchSpace:
@@ -49,9 +49,10 @@ class SearchSpace:
         """Round a continuous [0,1]^D point to the nearest lattice node — the same
         evenly-spaced levels as `choices`. Used after the continuous (gradient)
         acquisition optimiser so its candidate is stored and evaluated exactly
-        on-lattice, identically to the discrete path. Preserves x's shape."""
-        ranks = to_int_ranks(x, self.max_rank).double()
-        return (ranks - 1.0) / max(self.max_rank - 1, 1)
+        on-lattice, identically to the discrete path. Preserves x's shape. A hard snap
+        (the shared `tnss.utils.snap_to_lattice`); the kernel/mean use its
+        straight-through variant."""
+        return snap_to_lattice(x, self.max_rank)
 
     def to_adjacency(self, ranks: Tensor) -> Tensor:
         """Integer upper-triangular rank vector -> full N×N symmetric adjacency

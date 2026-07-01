@@ -50,14 +50,41 @@ import pandas as pd
 import torch
 from torch import Tensor
 
-from tnss.algo.bo.acquisitions._moments import feasibility_prob
+from tnss.algo.bo.acquisitions._moments import downdate_noise, feasibility_prob
+
+
+def _mean_params(sd: dict) -> dict:
+    """Prior-mean parameters from a GP state_dict, named by mean type so the plot
+    works regardless of the chosen mean: constant -> ``mean_const``; linear ->
+    ``mean_w0..`` + ``mean_bias``; log_size -> ``mean_slope`` + ``mean_bias``. The
+    RoundMean wrapper (round_inputs) nests these under ``base_mean.*`` — matched on
+    the leaf name, so the prefix is ignored. Buffers (t_shape), the slope prior, and
+    constraints are skipped. Stored untransformed (the mean params use an identity
+    link, unlike the softplus-raw kernel hypers)."""
+    out: dict = {}
+    for k, v in sd.items():
+        if "mean_module" not in k or any(s in k for s in ("prior", "constraint", "t_shape")):
+            continue
+        arr = v.detach().reshape(-1).cpu().numpy()
+        leaf = k.split(".")[-1]
+        if leaf == "raw_constant":
+            out["mean_const"] = float(arr[0])
+        elif leaf == "weights":                       # LinearMean: w·x + b
+            out.update({f"mean_w{i}": float(x) for i, x in enumerate(arr)})
+        elif leaf == "weight":                        # LogSizeMean: a·log(size) + b
+            out["mean_slope"] = float(arr[0])
+        elif leaf == "bias":
+            out["mean_bias"] = float(arr[0])
+    return out
 
 
 def _hypers(model) -> dict:
-    """ARD lengthscales (ls0..), observation noise and outputscale from a fitted
-    GP's state_dict — softplus of the raw params, matching how the run stores them.
-    Works across the regression GP and the variational classifier (both expose the
-    raw_lengthscale / raw_outputscale / raw_noise keys when present)."""
+    """ARD lengthscales (ls0..), observation noise, outputscale, and the prior-mean
+    parameters from a fitted GP's state_dict. Lengthscale/noise/outputscale are the
+    softplus of their raw params (matching how the run stores them); the mean params
+    are untransformed (see :func:`_mean_params`). Works across the regression GP and
+    the variational classifier (the classifier has no raw_noise -> NaN; use the live
+    ``eff_noise`` column for its effective observation noise instead)."""
     out: dict = {}
     try:
         sd = model.state_dict()
@@ -71,6 +98,7 @@ def _hypers(model) -> dict:
     for name, suffix in (("noise", "raw_noise"), ("outputscale", "raw_outputscale")):
         key = next((k for k in sd if k.endswith(suffix)), None)
         out[name] = float(sp(sd[key]).detach().reshape(-1)[0]) if key is not None else float("nan")
+    out.update(_mean_params(sd))
     return out
 
 
@@ -131,12 +159,22 @@ class RunDiagnostics:
                      "y_rse": float(rse), "feasible": int(feasible),
                      "infeasible_frac": float(infeasible_frac),
                      "pf_pred": float("nan"), "pf_gen": float("nan"),
-                     "acq_gen": float("nan")}
+                     "acq_gen": float("nan"), "eff_noise": float("nan")}
         x = candidate.detach().reshape(1, -1)
         try:
             post = acq_model.posterior(x)
-            row["mu"] = float(post.mean.reshape(-1)[0])
-            row["sd"] = float(post.variance.clamp_min(0).sqrt().reshape(-1)[0])
+            mu_x = post.mean.reshape(-1)
+            var_x = post.variance.clamp_min(0).reshape(-1)
+            row["mu"] = float(mu_x[0])
+            row["sd"] = float(var_x[0].sqrt())
+            # Effective observation noise tau^2 the SUR/gSUR downdate uses: the fitted
+            # Gaussian noise (regression) or the per-candidate probit look-ahead variance
+            # (classification, which has no noise hyperparameter). Gives the classifier a
+            # meaningful "noise" trace that the state_dict cannot.
+            try:
+                row["eff_noise"] = float(downdate_noise(acq_model, mu_x, var_x).reshape(-1)[0])
+            except Exception:
+                pass
         except Exception:
             pass
         try:                                          # acqf wants (b, q, d)

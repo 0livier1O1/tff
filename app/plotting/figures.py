@@ -236,6 +236,11 @@ def cr_runtime_scatter(
     # the fair comparison).
     finals["runtime"] = finals["inc_cum_time_s"]
 
+    # Configs with no incumbent (feasible_cr mode, no feasible eval ever found) have no
+    # CR point to place — their inc_cr / inc_rse are NaN, which would break the marker
+    # size. Drop them from the scatter (they simply have no feasible CR to compare).
+    finals = finals[finals[y_col].notna() & finals["inc_rse"].notna()]
+
     if threshold_mode == "hide":
         finals = finals[finals["inc_rse"] <= loss_threshold]
     if finals.empty:
@@ -396,25 +401,37 @@ def gp_calibration(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
     return fig
 
 
+# Scalar-hyper trajectories worth a line: outputscale, and the effective observation
+# noise (`eff_noise` — the Gaussian noise for regression, the probit look-ahead τ² for
+# the classifier, which has no noise hyperparameter). The raw Gaussian `noise` is kept
+# for regression. An all-NaN series (e.g. `noise` on a classifier run) is skipped, so
+# the trace never renders as an empty legend entry.
+_SCALAR_HYPERS = (("outputscale", "#9467bd"), ("eff_noise", "#d62728"), ("noise", "#1f77b4"))
+
+
+def _finite_hypers(d: pd.DataFrame) -> list[tuple[str, str]]:
+    return [(n, c) for n, c in _SCALAR_HYPERS
+            if n in d.columns and np.isfinite(pd.to_numeric(d[n], errors="coerce")).any()]
+
+
 def gp_hyperparameters(d: pd.DataFrame) -> go.Figure:
-    """GP hyperparameter trajectories — ARD lengthscales per bond (heatmap) and
-    noise / outputscale (log axis), across BO steps."""
+    """GP hyperparameter trajectories — ARD lengthscales per bond (heatmap) and the
+    scalar hypers (outputscale + effective noise, log axis), across BO steps."""
     k = d["k"].values
     ls = d[[c for c in d.columns if c.startswith("ls")]].values.T
     fig = make_subplots(rows=2, cols=1, vertical_spacing=0.09, row_heights=[0.6, 0.4])
     fig.add_trace(go.Heatmap(x=k, y=list(range(ls.shape[0])), z=ls, colorscale="Viridis",
                              colorbar=dict(len=0.5, y=0.78)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=k, y=d["noise"], mode="lines", name="noise",
-                             line=dict(color="#d62728")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=k, y=d["outputscale"], mode="lines", name="outputscale",
-                             line=dict(color="#9467bd")), row=2, col=1)
+    for name, color in _finite_hypers(d):
+        fig.add_trace(go.Scatter(x=k, y=d[name], mode="lines", name=name,
+                                 line=dict(color=color)), row=2, col=1)
     fig.update_yaxes(title_text="bond dim", row=1, col=1)
     fig.update_yaxes(title_text="value", type="log", row=2, col=1)
     fig.update_xaxes(title_text="BO step", row=2, col=1)
     fig.update_layout(
         template="plotly_white", height=480, margin=dict(l=0, r=0, t=20, b=0),
-        # Legend dropped to the lower (noise/outputscale) plot so it clears the
-        # heatmap's colorbar above.
+        # Legend dropped to the lower (scalar-hyper) plot so it clears the heatmap's
+        # colorbar above.
         legend=dict(orientation="v", x=1.01, xanchor="left", y=0.36,
                     yanchor="top", font=dict(size=10)),
     )
@@ -436,19 +453,31 @@ def gp_lengthscales(d: pd.DataFrame) -> go.Figure:
 
 
 def gp_fitted_scalars(d: pd.DataFrame) -> go.Figure:
-    """Scalar fitted GP parameters over BO steps (log axis): observation noise,
-    outputscale, and any further fitted scalars present as columns (e.g. input-warp
-    concentrations, once those are captured — they appear automatically)."""
+    """Scalar fitted GP parameters over BO steps (log axis): the outputscale and the
+    effective observation noise (plus the raw Gaussian noise for regression). Reads
+    the self-contained `diagnostics.csv`; an all-NaN series is skipped, so a classifier
+    run (no Gaussian noise) still shows its probit `eff_noise` rather than a blank line."""
     k = d["k"].values
-    extra = [c for c in d.columns if c not in ("k", "noise", "outputscale") and not c.startswith("ls")]
     fig = go.Figure()
-    for name, color in (("noise", "#d62728"), ("outputscale", "#9467bd")):
-        if name in d.columns:
-            fig.add_trace(go.Scatter(x=k, y=d[name], mode="lines", name=name,
-                                     line=dict(color=color)))
-    for c in extra:
-        fig.add_trace(go.Scatter(x=k, y=d[c], mode="lines", name=c))
+    for name, color in _finite_hypers(d):
+        fig.add_trace(go.Scatter(x=k, y=d[name], mode="lines", name=name, line=dict(color=color)))
     fig.update_yaxes(title_text="value", type="log")
+    fig.update_xaxes(title_text="BO step")
+    fig.update_layout(template="plotly_white", margin=dict(l=0, r=0, t=24, b=0),
+                      legend=dict(orientation="h", y=1.02, yanchor="bottom"))
+    return fig
+
+
+def gp_mean_params(d: pd.DataFrame) -> go.Figure:
+    """Prior-mean parameters over BO steps (linear axis — they can be negative),
+    whichever the chosen mean produced: the constant value, the log_size slope + bias,
+    or the linear weights + bias (columns prefixed `mean_`). Piecewise-constant between
+    refits. Empty of `mean_` columns for runs that predate the capture."""
+    k = d["k"].values
+    fig = go.Figure()
+    for c in [c for c in d.columns if c.startswith("mean_")]:
+        fig.add_trace(go.Scatter(x=k, y=d[c], mode="lines", name=c[len("mean_"):]))
+    fig.update_yaxes(title_text="value")
     fig.update_xaxes(title_text="BO step")
     fig.update_layout(template="plotly_white", margin=dict(l=0, r=0, t=24, b=0),
                       legend=dict(orientation="h", y=1.02, yanchor="bottom"))

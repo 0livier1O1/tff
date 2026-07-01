@@ -169,10 +169,22 @@ def _materialize_real(problem: RealProblemConfig, seed: int, sdir: Path) -> None
 
     _, target_cp = load_target_tensor(problem.target_path, dtype="float32")
 
-    # Images come in as 2D and need re-tensorizing to the problem's n_cores
-    if target_cp.ndim <= 2 and problem.n_cores != target_cp.ndim:
+    # Image sources are re-tensorized to the chosen n_cores: collapse to the 256x256
+    # image then re-factor (works whether the stored source is order-8 or raw 2D).
+    if problem.source == "Images" and problem.n_cores != target_cp.ndim:
         img_2d = reconstruct_image(target_cp)
         target_cp = cp.array(retensorize_image(img_2d, problem.n_cores)).astype(cp.float32)
+
+    # Lightfields keep their native order but honour the chosen spatial crop + stride,
+    # so the compressed target is exactly the region/resolution picked in the UI.
+    if problem.source == "Lightfield":
+        crop = getattr(problem, "crop", None)
+        if crop:
+            h0, h1, w0, w1 = crop
+            target_cp = target_cp[h0:h1, w0:w1]
+        step = getattr(problem, "downsample", 1) or 1
+        if step > 1:
+            target_cp = target_cp[::step, ::step]
 
     save_tensor(sdir / "target_tensor.npz", target_cp)
 

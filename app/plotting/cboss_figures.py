@@ -150,9 +150,12 @@ def multi_line(series, y_title: str, x_title: str = "BO step",
     ``legend=False`` to hide the per-algo legend (e.g. when a neighbouring plot already
     carries the shared one)."""
     fig = go.Figure()
-    for (label, x, y), color in zip(series, PALETTE):
+    # Cycle the palette — zip(series, PALETTE) would silently drop every algo past the
+    # 8th (len(PALETTE)); runs with >8 configs must still show every curve.
+    for i, (label, x, y) in enumerate(series):
         fig.add_trace(go.Scatter(x=np.asarray(x), y=np.asarray(y), mode="lines+markers",
-                                 name=label, legendgroup=label, line=dict(color=color),
+                                 name=label, legendgroup=label,
+                                 line=dict(color=PALETTE[i % len(PALETTE)]),
                                  marker=dict(size=marker_size)))
     if hline is not None:
         fig.add_hline(y=hline, line_dash="dot", line_color="#999")
@@ -178,7 +181,8 @@ def roc_curves_multi(algos) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", showlegend=False,
                              line=dict(color="black", dash="dot"), hoverinfo="skip"))
-    for (label, y, p_post, p_final), color in zip(algos, PALETTE):
+    for i, (label, y, p_post, p_final) in enumerate(algos):   # cycle palette (>8 configs)
+        color = PALETTE[i % len(PALETTE)]
         for p, dash, tag in ((p_post, "dash", "post-init"), (p_final, "solid", "final")):
             fpr, tpr, _ = roc_curve(y, p)
             fig.add_trace(go.Scatter(
@@ -248,7 +252,8 @@ def lengthscales_grouped(series, labels) -> go.Figure:
     edge. Bars within an edge touch (no gap); gaps separate edges. `series` is a list
     of ``(label, ls)``. Larger = that bond matters less to the feasibility prediction."""
     fig = go.Figure()
-    for (label, ls), color in zip(series, PALETTE):
+    for i, (label, ls) in enumerate(series):                  # cycle palette (>8 configs)
+        color = PALETTE[i % len(PALETTE)]
         fig.add_trace(go.Bar(x=list(labels), y=np.asarray(ls, float).reshape(-1),
                              name=label, marker_color=color))
     fig.update_xaxes(title_text="bond edge (i,j)")

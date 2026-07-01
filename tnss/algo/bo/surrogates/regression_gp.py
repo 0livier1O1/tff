@@ -54,6 +54,7 @@ class RegressionGP:
         target_fn: Callable[[Tensor, Tensor, Tensor], Tensor],
         nu: float = 2.5,
         mean: str = "constant",
+        log_size_prior_sigma: float | None = None,
         input_warp: bool = False,
         round_inputs: bool = False,
         refit_every: int = 5,
@@ -70,6 +71,8 @@ class RegressionGP:
             objective CR + lambda*RSE; an RSE-margin fn for regression contours.
         nu : Matérn smoothness parameter — one of 0.5, 1.5, 2.5.
         mean : GP prior mean — 'constant', 'linear', or 'log_size'.
+        log_size_prior_sigma : 'log_size' only — optional N(0, sigma) prior on the
+            learned slope (None = off); shrinks the trend so it can't over-steepen.
         input_warp : if True, wrap the kernel in a learned per-dimension
             Kumaraswamy-CDF input warp (lets a stationary kernel bend).
         round_inputs : if True, snap kernel inputs to the integer rank lattice
@@ -90,7 +93,8 @@ class RegressionGP:
         # n/N). The fidelity path assumes a constant mean (log_size/linear read the
         # rank vector) and round_inputs=False (the fidelity column is not a rank).
         self._mean = lambda d: make_mean(
-            mean, d, N=space.n_cores, max_rank=space.max_rank, t_shape=space.mode_sizes)
+            mean, d, N=space.n_cores, max_rank=space.max_rank, t_shape=space.mode_sizes,
+            log_size_prior_sigma=log_size_prior_sigma, round_inputs=round_inputs)
         self._kernel = lambda d: ScaleKernel(maybe_round(
             maybe_warp(MaternKernel(nu=nu, ard_num_dims=d), d, input_warp),
             space.max_rank, round_inputs))
