@@ -86,6 +86,13 @@ def main() -> None:
     t0 = time.time()
 
     if family == "boss":
+        def _progress(phase: str, completed: int, total: int) -> None:
+            tmp = progress_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(
+                {"phase": phase, "step": completed, "total": total, "started_at": t0}
+            ))
+            tmp.replace(progress_file)
+
         # Register the generating structure when available (synthetic problems): it
         # enables the per-step P(feasible) of the ground truth and the post-run
         # reference decomposition. Guarded — never blocks the run.
@@ -102,27 +109,25 @@ def main() -> None:
         # illustrate the surrogate plots on one seed instead of paying it on every seed.
         # GPU-sharded + cached per (problem, seed); the per-step scoring it enables runs
         # after each step's timings are recorded, so the measured algo time is unaffected.
+        # Report build progress (else the job looks idle for minutes while it decomposes).
         run_cfg = json.loads(Path(args.run_config).read_text())
         oos_seeds = run_cfg.get("oos_seeds")
         if oos_seeds is None or args.seed in oos_seeds:
+            _progress("building OOS test set", 0, _OOS_N)
             try:
                 from app.analysis.cboss_oos import load_or_build_oos, oos_method_for_config
                 repo_root = Path(args.run_config).resolve().parents[3]   # <webapp data root>
-                oos = load_or_build_oos(repo_root, run_cfg.get("problem_id"), args.seed, entry,
-                                        n=_OOS_N, oos_method=oos_method_for_config(entry))
+                oos = load_or_build_oos(
+                    repo_root, run_cfg.get("problem_id"), args.seed, entry,
+                    n=_OOS_N, oos_method=oos_method_for_config(entry),
+                    progress=lambda done, total: _progress("building OOS test set", done, total),
+                )
                 algo.set_oos(oos["X"], oos["cr"], oos["rse"])
             except Exception:
                 import traceback as _tb
                 print("OOS build failed (run kept):\n" + _tb.format_exc())
         else:
             print(f"OOS diagnostics skipped for seed {args.seed} (not in oos_seeds).")
-
-        def _progress(phase: str, completed: int, total: int) -> None:
-            tmp = progress_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(
-                {"phase": phase, "step": completed, "total": total, "started_at": t0}
-            ))
-            tmp.replace(progress_file)
 
         _progress("init", 0, algo.n_init + algo.budget)
         algo.run(progress=_progress)

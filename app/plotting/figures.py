@@ -716,3 +716,100 @@ def decomp_loss_curves(traces: list[dict],
     fig.update_layout(template="plotly_white", height=_HEIGHT,
                       margin=dict(l=0, r=0, t=20, b=0), showlegend=False)
     return fig
+
+
+# ---------------------------------------------------------------------------
+# SUR / gSUR reference-size sensitivity (app/analysis/sur_refsize.py)
+# ---------------------------------------------------------------------------
+
+def sur_refsize_convergence(d) -> go.Figure:
+    """View A — Monte-Carlo noise of the SUR score vs the reference-design size M. For a
+    few representative BO steps, the chosen candidate's SUR score is recomputed over K
+    independent scrambled-Sobol designs at each M; the curve is the across-draw
+    coefficient of variation (std / |mean|, in %) — i.e. how reproducible the score is at
+    that M. Every curve heads to 0 as M grows (QMC convergence). Read the noise at the
+    dashed operating-M line: if all curves are already near 0 there, M is large enough;
+    a curve still high at the line means that step's score is under-resolved. x is log."""
+    M, steps, mean, std = d["a_M"], d["a_steps"], d["a_mean"], d["a_std"]
+    op_M = int(d["op_M"])
+    cv = std / np.clip(np.abs(mean), 1e-12, None) * 100.0     # (n_steps, n_M)
+    fig = go.Figure()
+    n = len(steps)
+    palette = sample_colorscale("Viridis", [i / max(n - 1, 1) for i in range(n)])
+    for i, (s, c) in enumerate(zip(steps, palette)):
+        fig.add_trace(go.Scatter(x=M, y=cv[i], mode="lines+markers", name=f"step {int(s)}",
+                                 line=dict(color=c, width=2), marker=dict(size=5)))
+    fig.add_vline(x=op_M, line_color="#d62728", line_dash="dash", line_width=1.5,
+                  annotation_text=f"operating M = {op_M}", annotation_position="top left")
+    fig.update_xaxes(title_text="Reference points M (log scale)", type="log",
+                     tickmode="array", tickvals=list(M), ticktext=[str(int(m)) for m in M])
+    fig.update_yaxes(title_text="score noise — CV (%)", rangemode="tozero", showgrid=False)
+    fig.update_layout(template="plotly_white", height=330,
+                      margin=dict(l=0, r=0, t=20, b=0), hovermode="x unified", legend=_LEGEND)
+    return fig
+
+
+def sur_refsize_noise(d) -> go.Figure:
+    """View B — per-step Monte-Carlo noise at the operating reference size. For every BO
+    step, the chosen candidate's SUR score is recomputed over K independent reference
+    designs of the operating size; the line is the across-draw coefficient of variation
+    (std / |mean|, %). It is the ‘decision noise’ at the size you actually run: spikes mark
+    steps where the operating M left the SUR score (and so the pick) genuinely uncertain."""
+    steps, cv = d["tl_steps"], d["tl_cv"] * 100.0
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=steps, y=cv, mode="lines+markers",
+                             line=dict(color="#f58518", width=2), marker=dict(size=4),
+                             showlegend=False))
+    fig.update_xaxes(title_text="BO step", rangemode="tozero")
+    fig.update_yaxes(title_text="score noise — CV (%)", rangemode="tozero", showgrid=False)
+    fig.update_layout(template="plotly_white", height=330,
+                      margin=dict(l=0, r=0, t=20, b=0), hovermode="x unified")
+    return fig
+
+
+def sur_effpoints(df) -> go.Figure:
+    """View D — what fraction of the reference points actually do any work, per BO step (from
+    the live ``diagnostics.csv`` column ``sur_eff_frac``). The SUR sum is a weighted average
+    over the M reference points; most weight sits near the contour and the rest contribute ≈0.
+    The participation ratio (Σw)²/Σw² is the *effective* number of contributing points, shown
+    as a fraction of the operating M (1.0 = every point pulls its weight, → 0 = a handful
+    dominate). A persistently small fraction means the lever is *placement* — concentrate
+    points near the contour — not a larger M."""
+    d = df.dropna(subset=["sur_eff_frac"]) if "sur_eff_frac" in df else df.iloc[:0]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=d["k"], y=d["sur_eff_frac"], mode="lines+markers", name="effective",
+                             line=dict(color="#4c78a8", width=2), marker=dict(size=4),
+                             showlegend=False,
+                             hovertemplate="step %{x}<br>%{y:.1%} of M<extra></extra>"))
+    fig.update_xaxes(title_text="BO step", rangemode="tozero")
+    fig.update_yaxes(title_text="effective fraction of M", rangemode="tozero",
+                     tickformat=".0%", showgrid=False)
+    fig.update_layout(template="plotly_white", height=330,
+                      margin=dict(l=0, r=0, t=20, b=0), hovermode="x unified")
+    return fig
+
+
+def sur_gsur_fidelity(df) -> go.Figure:
+    """gSUR↔SUR fidelity, per BO step (from the live ``diagnostics.csv``) — does the cheap
+    pointwise gSUR rank candidates like the expensive integrated SUR? On each step's surrogate,
+    a shared pool of candidate structures is scored by both; the lines are the Spearman rank
+    correlation of the two score vectors and the overlap of their top-10 picks. Near 1.0 → gSUR
+    is a faithful, cheap proxy (you can skip SUR's reference-design cost); dipping low → the
+    integral genuinely matters at those steps."""
+    d = df.dropna(subset=["sur_gsur_spearman"]) if "sur_gsur_spearman" in df else df.iloc[:0]
+    steps, rho, top10 = d["k"], d["sur_gsur_spearman"], d["sur_gsur_top10"]
+    top1 = float(d["sur_gsur_top1"].mean()) if len(d) else float("nan")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=steps, y=rho, mode="lines+markers", name="Spearman ρ",
+                             line=dict(color="#54a24b", width=2), marker=dict(size=4)))
+    fig.add_trace(go.Scatter(x=steps, y=top10, mode="lines+markers", name="top-10 overlap",
+                             line=dict(color="#b279a2", width=2, dash="dot"), marker=dict(size=4)))
+    fig.add_hline(y=1.0, line_color="#bbb", line_width=1, line_dash="dot")
+    fig.update_xaxes(title_text="BO step", rangemode="tozero")
+    lo = min(0.0, float(np.nanmin(rho)) - 0.05) if len(d) else 0.0
+    fig.update_yaxes(title_text="gSUR vs SUR agreement", range=[lo, 1.03], showgrid=False)
+    fig.update_layout(template="plotly_white", height=330,
+                      margin=dict(l=0, r=0, t=24, b=0), hovermode="x unified", legend=_LEGEND,
+                      title=dict(text=f"argmax agree: {top1:.0%} of steps", x=0.5,
+                                 xanchor="center", font=dict(size=11), y=0.98))
+    return fig

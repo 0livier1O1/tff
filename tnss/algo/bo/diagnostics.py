@@ -20,7 +20,12 @@ interp_improve / interp_boundary / interp_ct, the acquisition's own
 (improvement, alpha_bullet, c_t) split at the chosen candidate (via its `terms`
 method), so the two interpolated terms are captured live, not reconstructed
 (plus interp_improve_raw / interp_boundary_raw when reference-normalisation is
-active, the pre-normalisation values that show the scale gap it closes).
+active, the pre-normalisation values that show the scale gap it closes). For a
+SUR-family run (sur / gsur, directly or as a BITE/FBITE inner term) two extra
+per-step signals land here (see `acquisitions/sur_sensitivity`): sur_eff_frac (SUR
+only — the effective fraction of reference points doing work at the chosen
+candidate) and sur_gsur_spearman / sur_gsur_top10 / sur_gsur_top1 (how well the
+cheap pointwise gSUR reproduces the integrated SUR on a shared pool).
 These feed: calibration
 (k, mu, sd, y), acquisition (k, acq, sd), hyperparameters (k, ls*, noise,
 outputscale), parity (y, mu), and — for the contour / feasibility family

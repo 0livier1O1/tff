@@ -34,6 +34,7 @@ from botorch.acquisition import AcquisitionFunction
 from botorch.optim import optimize_acqf, optimize_acqf_discrete_local_search
 
 from tnss.algo.bo.acquisitions import Acquisition, SearchState
+from tnss.algo.bo.acquisitions.sur_sensitivity import make_pool, sur_signals
 from tnss.algo.bo.diagnostics import RunDiagnostics
 from tnss.algo.bo.bos_stopping import BOSConfig, BOSStopper
 from tnss.algo.bo.fidelity import FidelityPinnedModel, fidelity_observations
@@ -224,6 +225,15 @@ class BOSS:
             # _evaluate recorded the step's perf_counter timings, so it can't affect
             # the measured algo time — only wall-clock.
             self.diagnostics.score_oos(step=step, acq_model=acq_model)
+        except Exception:
+            pass
+        try:                                              # cheap SUR-family signals -> this step's diag row
+            pool = getattr(self, "_sur_pool", None)
+            if pool is None:
+                pool = self._sur_pool = make_pool(self.space)
+            sig = sur_signals(acquisition, acq_model, candidate, self.reference, pool)
+            if sig and self.diagnostics.rows:
+                self.diagnostics.rows[-1].update(sig)
         except Exception:
             pass
 

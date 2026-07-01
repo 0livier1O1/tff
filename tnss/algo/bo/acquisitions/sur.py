@@ -77,6 +77,23 @@ class _ContourSURFunction(AcquisitionFunction):
         drop = self.E_pt.unsqueeze(1) - future_err          # (M, b)
         return (self.ref_w.unsqueeze(1) * drop).mean(dim=0)  # (b,) expected weighted error reduction
 
+    @torch.no_grad()
+    def pointwise(self, x: Tensor) -> Tensor:
+        """The w(u)-weighted per-reference-point error drop a single candidate ``x`` (1, D)
+        induces — the SUR integrand *before* the mean, ``w(u)·[E_n(u) - E_{n+1}(u;x)]`` over
+        the M reference points. Reuses the cached current moments; the participation ratio
+        ``(Σ·)²/Σ·²`` of this vector is the diagnostics' effective-reference-count signal."""
+        M = self.ref_X.shape[0]
+        post = self.model.posterior(torch.cat([self.ref_X, x], dim=0))
+        cov = post.mvn.covariance_matrix
+        k_rx = cov[:M, M:]                                   # (M, 1)
+        var_x = cov.diagonal()[M:].clamp_min(1e-12)          # (1,)
+        mu_x = post.mean.reshape(-1)[M:]                     # (1,)
+        tau2 = downdate_noise(self.model, mu_x, var_x)
+        var_new = (self.var_ref.unsqueeze(1) - k_rx.square() / (var_x + tau2).unsqueeze(0)).clamp_min(1e-12)
+        future_err = self._normal.cdf(-(self.mu_ref_abs.unsqueeze(1) / var_new.sqrt())).squeeze(1)
+        return self.ref_w * (self.E_pt - future_err).clamp_min(0.0)   # (M,)
+
 
 class ContourSUR:
     """`Acquisition` spec — builds the SUR look-ahead function each step.
