@@ -68,7 +68,7 @@ class BOSS:
         cr_pool_bias: float = 1.0,        # cr_stratified: pool bias toward low ranks (>=1)
         objective_weight: float = 10.0,   # lambda in the CR + lambda*RSE objective
         # --- acquisition optimiser ---
-        acq_optimizer: str = "discrete",  # 'discrete' (local search over the lattice) / 'continuous' (gradient optimize_acqf, snapped)
+        acq_optimizer: str = "continuous",  # 'continuous' (gradient optimize_acqf, snapped) / 'discrete' (local search over the lattice)
         num_restarts: int = 10,           # restarts (both optimisers)
         raw_samples: int = 256,           # initial random candidates per restart
         n_reference: int = 256,           # fixed reference-design size (SUR / adaptive cUCB gamma)

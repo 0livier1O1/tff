@@ -1,37 +1,23 @@
 """
-cboss_diagnostics.py — replay-based feasibility-classifier diagnostics for cBOSS.
+cboss_diagnostics.py — shared OOS-diagnostics cache helpers for the feasibility
+families (now FTBOSS; cBOSS/BESS retired).
 
-Unlike the old version (which trusted the per-step predictions saved during the
-run), this *replays* the run: it rebuilds the `FeasibilityGP` step by step from
-`cboss_results.npz` (see `cboss_replay`), and scores each refit on a shared,
-held-out 1000-structure CR-stratified out-of-sample (OOS) test set decomposed with the run's own
-settings (see `cboss_oos`). It then caches the computed data (CSV/npz under
-`<config_dir>/analysis/cboss/`) — mirroring how BOSS caches `gp_diag.csv` — and the
-dashboard builds plotly figures from it. No PNGs.
-
-OOS structures that coincide with the run's own training set are excluded from
-scoring; the kept/excluded counts are recorded in `meta.json`.
+The replay-based generator (which rebuilt a cBOSS/BESS ``FeasibilityGP`` step by
+step and scored each refit on a shared OOS set) went away with cBOSS/BESS. What
+remains is the family-agnostic cache layer — locating/reading the cached OOS
+metrics + the AUC / balanced-accuracy scorers — which the FTBOSS diagnostics
+(`ftboss_diagnostics.py`, its own generator) and the dashboard reuse, since every
+feasibility family writes the same cache format under
+`<config_dir>/analysis/<family>/<oos_method>/`.
 """
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
-from scipy.stats import spearmanr
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score
-
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from app.analysis.cboss_oos import load_or_build_oos, _load_target, _target_path
-from app.analysis.cboss_replay import replay, train_overlap_mask
-
-N_OOS = 1000
 
 
 def _algo_config(config_dir: Path) -> dict:
@@ -43,9 +29,8 @@ def _algo_config(config_dir: Path) -> dict:
 
 
 def _family(config_dir: Path) -> str:
-    """Algorithm family for this result dir ('cboss' | 'bess'). Both wrap the same
-    FeasibilityGP, so the replay diagnostics are shared; only the artifact filename
-    and cache subdir are family-specific."""
+    """Algorithm family for this result dir — names the cache subdir
+    (`analysis/<family>/…`) the feasibility diagnostics are read from/written to."""
     return _algo_config(config_dir).get("family", "cboss")
 
 
@@ -86,121 +71,3 @@ def _bacc(y, p) -> float:
     accuracy it isn't won by the majority 'everything-infeasible' predictor under the
     heavy class imbalance — chance is 0.5 regardless of the feasible fraction."""
     return float(balanced_accuracy_score(y, (np.asarray(p) >= 0.5).astype(int)))
-
-
-def generate_cboss_diagnostics(config_dir: Path, oos_method: str = "adam") -> Path:
-    """Replay the run's feasibility GP, score every refit on the shared OOS set
-    (decomposed with ``oos_method``'s preset), and cache the computed data. Returns
-    the diagnostics dir."""
-    config_dir = Path(config_dir)
-    algo = _algo_config(config_dir)
-    feasible_rse = float(algo["feasible_rse"])
-    max_rank = int(algo["max_rank"])
-    acqf = algo["policy"].split("-")[1]              # cboss-ficr -> ficr
-    ficr_t = float(algo.get("cboss_ficr_t", 1.0))
-    seed = int(config_dir.parent.name.split("_")[1])
-    problem_id = json.loads((config_dir.parents[1] / "config.json").read_text())["problem_id"]
-
-    # Shared OOS test set (decomposed with oos_method's canonical preset; builds on
-    # first use). Independent of the run's own decomposition settings.
-    oos = load_or_build_oos(ROOT, problem_id, seed, algo, n=N_OOS, oos_method=oos_method)
-    target = _load_target(_target_path(ROOT, problem_id, seed))
-
-    # Generating structure (synthetic problems only): the ground-truth adjacency's
-    # upper-triangular bond ranks. Used to track the surrogate's feasibility belief
-    # about the structure that produced the target (feasible by construction).
-    adj_path = ROOT / "artifacts" / "problems" / problem_id / f"seed_{seed}" / "adj_matrix.npy"
-    gen_X = None
-    if adj_path.exists():
-        adj = np.load(adj_path)
-        gen_X = np.clip(np.round(adj[np.triu_indices(adj.shape[0], 1)]).astype(int), 1, max_rank)
-
-    # Replay the feasibility GP step by step and score each refit on OOS.
-    rr = replay(config_dir, algo, target, oos["X"], gen_X=gen_X)
-    X_std_train = np.load(config_dir / f"{algo.get('family', 'cboss')}_results.npz")["X_std"]
-    keep, n_scored, n_excluded = train_overlap_mask(oos["X"], X_std_train, max_rank)
-
-    y = (oos["rse"] < feasible_rse).astype(int)
-    xnorm = np.linalg.norm(oos["X"].astype(float), axis=1)
-    yk = y[keep]
-    p_post, p_final = rr.post_init_proba_oos[keep], rr.final_proba_oos[keep]
-    sigma_final = rr.final_sigma_oos[keep]
-
-    # Start the per-refit curve at the *post-init* GP (step n_init-1) so every algo's
-    # curve begins from the shared initialization — otherwise the first plotted point is
-    # the first BO refit, by which each acqf has already added its own (different)
-    # candidate, making identically-initialised algos look like they start apart.
-    metrics = [dict(step=int(rr.n_init - 1),
-                    bal_accuracy=_bacc(yk, p_post), roc_auc=_auc(yk, p_post))]
-    metrics += [
-        dict(step=int(step),
-             bal_accuracy=_bacc(yk, p_all[keep]), roc_auc=_auc(yk, p_all[keep]))
-        for step, p_all in zip(rr.steps, rr.proba_oos)
-    ]
-
-    # GP-fit-error timeline — read from the run's own gp_states snapshots (ground
-    # truth, not the replay): per recorded step, the phase and whether that step's
-    # refit hit a NotPSDError. Old runs predate this and default to no errors.
-    gp = torch.load(config_dir / "gp_states.pt", map_location="cpu", weights_only=False)
-    gp_step = np.array([int(g["step"]) for g in gp])
-    gp_phase = np.array([str(g.get("phase", "")) for g in gp])
-    gp_fit_error = np.array([bool(g.get("fit_error", False)) for g in gp])
-    n_fit_errors = int(gp_fit_error.sum())
-    n_error_resets = int((gp_phase == "error-reset").sum())
-    n_periodic_resets = int((gp_phase == "reset").sum())
-
-    out = _diag_dir(config_dir, oos_method)
-    out.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(metrics).to_csv(out / "oos_metrics.csv", index=False)
-    np.savez(out / "oos_eval.npz",
-             y=yk, cr=oos["cr"][keep], xnorm=xnorm[keep], rse=oos["rse"][keep],
-             rse_all=oos["rse"], p_post=p_post, p_final=p_final, sigma_final=sigma_final,
-             ls=(rr.final_lengthscales if rr.final_lengthscales is not None
-                 else np.array([])),
-             ls_evol=rr.lengthscales, ls_steps=rr.steps, proba_gen=rr.proba_gen,
-             gp_step=gp_step, gp_phase=gp_phase, gp_fit_error=gp_fit_error)
-
-    # Acquisition trace — saved run data (the acqf the run actually used).
-    bo = pd.read_csv(config_dir / "traces.csv")
-    bo = bo[bo["phase"] == "bo"].reset_index(drop=True)
-
-    # Replay fidelity: the one-step-ahead pf the replay produces vs the run's saved
-    # pf_pred — flags (every generation) whether the replay still mirrors the run.
-    saved_pf = bo["pf_pred"].to_numpy(float)
-    fin = np.isfinite(saved_pf) & np.isfinite(rr.pf_replay)
-    pf_mae = float(np.abs(saved_pf[fin] - rr.pf_replay[fin]).mean())
-    pf_rho = float(spearmanr(saved_pf[fin], rr.pf_replay[fin]).statistic)
-
-    v = np.isfinite(saved_pf)
-    np.savez(out / "acqf_trace.npz",
-             steps=bo["step"].to_numpy(float)[v],
-             acqf_value=bo["acqf_value"].to_numpy(float)[v],
-             pf_pred=bo["pf_pred"].to_numpy(float)[v],
-             feasible=(bo["rse"].to_numpy(float)[v] < feasible_rse).astype(int),
-             acqf_used=bo["acqf_used"].astype(str).to_numpy()[v],
-             infeasible_frac=(bo["infeasible_frac"].to_numpy(float)[v]
-                              if "infeasible_frac" in bo else np.full(int(v.sum()), np.nan)))
-
-    n_cores = int(round((1 + (1 + 8 * oos["X"].shape[1]) ** 0.5) / 2))
-    (out / "meta.json").write_text(json.dumps(dict(
-        feasible_rse=feasible_rse, n_oos=int(len(oos["X"])), oos_method=oos_method,
-        n_scored=n_scored, n_excluded=n_excluded,
-        acqf=acqf, ficr_t=ficr_t, n_cores=n_cores,
-        pf_mae=pf_mae, pf_spearman=pf_rho,
-        n_fit_errors=n_fit_errors, n_error_resets=n_error_resets,
-        n_periodic_resets=n_periodic_resets)))
-
-    print(f"cBOSS OOS diagnostics → {out}  (scored on {n_scored}/{len(oos['X'])} "
-          f"OOS structures, {n_excluded} excluded as train overlap)")
-    return out
-
-
-if __name__ == "__main__":
-    import argparse
-    from app.analysis.cboss_oos import OOS_METHODS
-    ap = argparse.ArgumentParser()
-    ap.add_argument("config_dir", help="a cBOSS result dir (has cboss_results.npz, traces.csv)")
-    ap.add_argument("--oos-method", choices=OOS_METHODS, default="adam",
-                    help="Decomposition method used to label the OOS feasibility set.")
-    a = ap.parse_args()
-    generate_cboss_diagnostics(Path(a.config_dir), oos_method=a.oos_method)

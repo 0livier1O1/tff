@@ -49,7 +49,7 @@ _DEFAULTS = {
     "acq_inner": "sur", "acq_t": 1.0, "interp_normalize": "none",
     "init_design": "cr_stratified", "n_init": 20, "cr_warp_lambda": 0.0, "cr_pool_bias": 1.0,
     "budget": 200, "max_rank": 8, "threshold": 0.01, "objective_weight": 10.0,
-    "n_reference": 256, "raw_samples": 256, "num_restarts": 10, "acq_optimizer": "discrete",
+    "n_reference": 256, "raw_samples": 256, "num_restarts": 10, "acq_optimizer": "continuous",
     "decomp_method": "agd", "decomp_epochs": 250, "decomp_runs": 1,
     "decomp_init_lr": 0.01, "decomp_momentum": 0.9, "decomp_loss_patience": 500, "decomp_lr_patience": 50,
     "bos": False,   # BOS feasibility early-stopping off by default; bos_<field> keys override BOSConfig

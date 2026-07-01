@@ -22,18 +22,11 @@ import streamlit as st
 
 from app.config.sidebar_config import SidebarConfig
 from app.config.constants import (
-    SUR_REFSIZE_CONVERGENCE, SUR_REFSIZE_NOISE, SUR_REFSIZE_EFFPOINTS,
-    SUR_GSUR_FIDELITY, FT_CURVE_FORECAST, FT_CURVE_EVOLUTION,
-    FT_OOS_CURVES_UNAVAILABLE,
+    FT_CURVE_FORECAST, FT_CURVE_EVOLUTION, FT_OOS_CURVES_UNAVAILABLE,
 )
-from app.analysis.cboss_diagnostics import (
-    generate_cboss_diagnostics, has_cboss_diagnostics, load_cboss_diagnostics,
-)
+from app.analysis.cboss_diagnostics import has_cboss_diagnostics, load_cboss_diagnostics
 from app.analysis.cboss_oos import oos_method_for_config, load_or_build_oos
 from app.analysis.cboss_diagnostics import _algo_config
-from app.analysis.sur_refsize import (
-    generate_sur_refsize, has_sur_refsize, is_bess_lookahead, load_sur_refsize,
-)
 from app.plotting import cboss_figures as cf
 from app.analysis.debug_script import write_debug_script, SUPPORTED_FAMILIES
 from app.analysis.diagnostics import (
@@ -469,9 +462,9 @@ def _render_decomp_traces(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
 def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> list[tuple]:
     """Every selected config at this seed whose surrogate diagnostics aren't cached yet,
     as ``(kind, config_dir, label, oos_method)`` — ``kind`` is 'boss' (objective/RSE GP
-    refit), 'feas' (cBOSS/BESS replay + OOS scoring) or 'ftboss' (freeze-thaw asymptote
-    OOS scoring). The OOS scorings are cached in the cBOSS format, each keyed by the
-    config's **own** decomposition method (``oos_method``; ``None`` for BOSS, no OOS)."""
+    refit) or 'ftboss' (freeze-thaw asymptote OOS scoring). The OOS scorings are cached
+    in the shared diagnostics format, each keyed by the config's **own** decomposition
+    method (``oos_method``; ``None`` for BOSS, no OOS)."""
     out: list[tuple] = []
     boss = (sdf[sdf["family"] == "boss"][["run", "config_id", "label", "policy"]]
             .drop_duplicates())
@@ -480,39 +473,34 @@ def _pending_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> list[t
               / f"{r.config_id}_{r.policy.replace('-', '_')}")
         if not has_gp_diagnostics(cd):
             out.append(("boss", cd, r.label, None))
-    # cBOSS/BESS/FTBOSS are all feasibility families scored on the shared OOS set, into
-    # the same cache format — only the generator differs (replay vs reload). Each is
-    # scored against the OOS set decomposed with its own method.
-    feas = (sdf[sdf["family"].isin(["cboss", "bess", "ftboss"])]
+    # FTBOSS is scored on the shared OOS set into the common diagnostics cache format
+    # (its own asymptote-replay generator). Scored against the OOS set decomposed with
+    # its own method.
+    feas = (sdf[sdf["family"] == "ftboss"]
             [["run", "config_id", "label", "policy", "family"]].drop_duplicates())
     for r in feas.itertuples(index=False):
         cd = (runs_dir / r.run / f"seed_{seed}"
               / f"{r.config_id}_{r.policy.replace('-', '_')}")
         om = _cfg_oos_method(cd)
-        if (cd / f"{r.family}_results.npz").exists() and not has_cboss_diagnostics(cd, om):
-            out.append(("ftboss" if r.family == "ftboss" else "feas", cd, r.label, om))
-        # BESS look-ahead (sur/gsur): ref-size sensitivity + gSUR↔SUR fidelity, recomputed
-        # from the reloaded surrogates (no OOS / decomposition needed).
-        if ((cd / "gp_states.pt").exists() and is_bess_lookahead(cd)
-                and not has_sur_refsize(cd)):
-            out.append(("sur_refsize", cd, r.label, None))
+        if (cd / "ftboss_results.npz").exists() and not has_cboss_diagnostics(cd, om):
+            out.append(("ftboss", cd, r.label, om))
     return out
 
 
 def _render_diag_generate_all(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
     """One button that generates surrogate diagnostics for *every* not-yet-cached config
-    at this seed (BOSS objective/RSE refit + cBOSS/BESS/FTBOSS OOS scoring), in sequence,
-    behind a single progress bar. Each feasibility config is scored against the OOS set
-    decomposed with its own method."""
+    at this seed (BOSS objective/RSE refit + FTBOSS OOS scoring), in sequence, behind a
+    single progress bar. Each feasibility config is scored against the OOS set decomposed
+    with its own method."""
     pending = _pending_diagnostics(runs_dir, sdf, seed)
     if not pending:
         return
     n = len(pending)
     if not st.button(f":material/play_arrow: Generate diagnostics — {n} config(s)",
                      type="primary", key=f"gen_all_{seed}",
-                     help="One-step-ahead replay + OOS scoring for every BOSS / cBOSS / "
-                          "BESS / FTBOSS config at this seed that isn't cached yet. Runs "
-                          "once (decomposes each method's shared OOS set on first use), cached."):
+                     help="Objective/RSE refit + asymptote OOS scoring for every BOSS / "
+                          "FTBOSS config at this seed that isn't cached yet. Runs once "
+                          "(decomposes each method's shared OOS set on first use), cached."):
         st.caption(f"{n} config(s) not generated yet — click to build them all.")
         return
     bar = st.progress(0.0, text="Generating diagnostics…")
@@ -524,14 +512,6 @@ def _render_diag_generate_all(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> N
             bar.progress(i / n, text=f"Asymptote OOS [{om}] — {lab}  "
                                      f"(decomposes OOS on first use)")
             generate_ftboss_diagnostics(cd, om)
-        elif kind == "sur_refsize":
-            bar.progress(i / n, text=f"SUR ref-size sensitivity — {lab}  "
-                                     f"(reloads surrogates, no decomposition)")
-            generate_sur_refsize(cd)
-        else:
-            bar.progress(i / n, text=f"Replay + OOS [{om}] — {lab}  "
-                                     f"(decomposes OOS on first use)")
-            generate_cboss_diagnostics(cd, om)
     bar.empty()
     st.rerun()
 
@@ -716,20 +696,20 @@ def _render_debug_instance(repo_root: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # Feasibility-model diagnostics — scored on a shared OOS set (see
-# app/analysis/cboss_diagnostics.py). cBOSS/BESS wrap the same FeasibilityGP (replayed);
-# FTBOSS scores its freeze-thaw asymptote posterior (reloaded). All three write the same
-# cache format and are compared here on the same plots. Compact side-by-side plotly.
+# app/analysis/cboss_diagnostics.py). FTBOSS scores its freeze-thaw asymptote posterior
+# (reloaded) into the shared OOS cache format, compared here on the same plots.
+# Compact side-by-side plotly. (cBOSS/BESS retired into tnss/algo/bo.)
 # ---------------------------------------------------------------------------
 
 def _render_cboss_diagnostics(runs_dir: Path, sdf: pd.DataFrame, seed: int) -> None:
-    """Single merged feasibility-model diagnostics page for *all* cBOSS/BESS/FTBOSS
-    configs at one seed. Each config's expensive OOS scoring runs once behind the
-    Generate button (cached under analysis/<family>/<oos_method>/); once generated, the
-    configs are compared on shared plots (one colour per algo), with per-algo surrogate
-    detail in expanders below. FTBOSS's 'P(feasible)' is its asymptote posterior. Each
-    config is scored against the OOS set decomposed with its **own** decomposition
-    method, so the label shown per algo carries that method."""
-    configs = (sdf[sdf["family"].isin(["cboss", "bess", "ftboss"])]
+    """Feasibility-model diagnostics page for the FTBOSS configs at one seed. Each
+    config's expensive OOS scoring runs once behind the Generate button (cached under
+    analysis/<family>/<oos_method>/); once generated, the configs are compared on shared
+    plots (one colour per algo), with per-algo surrogate detail in expanders below.
+    FTBOSS's 'P(feasible)' is its asymptote posterior. Each config is scored against the
+    OOS set decomposed with its **own** decomposition method, so the label shown per algo
+    carries that method."""
+    configs = (sdf[sdf["family"] == "ftboss"]
                [["run", "config_id", "label", "policy", "family"]].drop_duplicates())
     if configs.empty:
         return
@@ -797,8 +777,8 @@ def _reset_steps(ev) -> np.ndarray:
 
 
 def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], seed: int) -> None:
-    """Compare every generated cBOSS/BESS config on shared plots (one colour per algo),
-    then drop to per-algo surrogate detail (tabs). Half-width plots throughout."""
+    """Compare every generated feasibility (FTBOSS) config on shared plots (one colour
+    per algo), then drop to per-algo surrogate detail (tabs). Half-width plots throughout."""
     # Per-algo summary table: OOS method + scored count, hard resets, fit errors.
     _render_resets_table(algos)
 
@@ -917,36 +897,6 @@ def _render_feasibility_merged(runs_dir: Path, algos: list[SimpleNamespace], see
                     _render_ftboss_curves(a, seed, i, runs_dir)
                 else:
                     st.caption("Curve prediction needs gp_states.pt (cleansed — re-run to enable).")
-            # BESS look-ahead (sur/gsur): SUR reference-size sensitivity + gSUR↔SUR
-            # fidelity, recomputed offline from the reloaded surrogates. 2×2 grid; each
-            # plot's title carries the native help (?) bubble explaining how to read it.
-            if is_bess_lookahead(a.cd) and has_sur_refsize(a.cd):
-                st.divider()
-                st.caption("SUR reference-size sensitivity & gSUR↔SUR fidelity — recomputed offline")
-                rd = load_sur_refsize(a.cd)
-
-                def _plot(fig, key, title, how):
-                    st.markdown(f"**{title}**", help=how)
-                    st.plotly_chart(fig, width="stretch", key=key)
-
-                r1 = st.columns(2)
-                with r1[0]:
-                    _plot(figures.sur_refsize_convergence(rd), f"sur_conv_{seed}_{i}",
-                          "Score noise vs reference size M", SUR_REFSIZE_CONVERGENCE)
-                with r1[1]:
-                    _plot(figures.sur_refsize_noise(rd), f"sur_noise_{seed}_{i}",
-                          "Per-step decision noise (operating M)", SUR_REFSIZE_NOISE)
-                r2 = st.columns(2)
-                with r2[0]:
-                    _plot(figures.sur_refsize_effpoints(rd), f"sur_eff_{seed}_{i}",
-                          "Effective fraction of reference points", SUR_REFSIZE_EFFPOINTS)
-                with r2[1]:
-                    if "fid_steps" in rd.files:
-                        _plot(figures.sur_gsur_fidelity(rd), f"sur_fid_{seed}_{i}",
-                              "gSUR ↔ SUR fidelity", SUR_GSUR_FIDELITY)
-                    else:
-                        st.caption("gSUR↔SUR fidelity unavailable — this cache predates it. "
-                                   "Regenerate the SUR reference-size diagnostics to enable.")
 
     # Algorithm-specific plots — half-width each. These apply only to a particular
     # acquisition function (e.g. cBOSS's ficr), so they live in their own section.
