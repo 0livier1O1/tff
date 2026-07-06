@@ -150,6 +150,10 @@ class BOSResult:
     stop_time: float | None = None  # perf_counter at the would-be stop (for exact time accounting)
     curve_gp: object | None = None  # the fitted BOS learning-curve GP — handed to the diagnostics band
     gp_origin: int = 0              # epoch the curve GP was fit at; the band predicts gp_origin+1..budget
+    # BOS wall-clock, summed over every table (re)build this decomposition (the price stopping
+    # adds on top of the decomposition itself). Split into the two costly pieces:
+    curve_gp_fit_s: float = 0.0     # fitting the learning-curve GP to the observed prefix
+    table_gen_s: float = 0.0        # forward simulation + backward induction (the decision table)
 
 
 # =========================================================== summary statistic
@@ -241,9 +245,12 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     # *post-warm-up* epochs only, and feasibility is decided by the endpoint ell(N). The
     # kernel ('picheny' / 'expdecay', optionally input-warped) and value transform (raw /
     # log) come from cfg.
+    _t = time.perf_counter()
     gp = LearningCurveGP(noise=cfg.noise, kernel=cfg.curve_kernel,
                          input_warp=cfg.curve_input_warp, budget=budget,
                          fit_maxiter=cfg.fit_maxiter).fit(np.arange(1, n0 + 1), prefix)
+    gp_fit_s = time.perf_counter() - _t                   # learning-curve GP fit cost
+    _t = time.perf_counter()                              # forward-sim + backward-induction cost
     future = gp.sample_paths(np.arange(n0 + 1, budget + 1), cfg.n_samples, rng)
     keep = np.all((future > lo) & (future < hi), axis=1)
     if keep.any():                                        # never let the filter empty the set
@@ -289,9 +296,11 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     actions[:-1] = decode[np.argmin(losses[:-1], axis=2)]            # argmin over [d1, d2, cont]
     actions[-1] = np.where(losses[-1, :, 0] <= losses[-1, :, 1],     # last epoch: terminals only
                            STOP_FEASIBLE, STOP_INFEASIBLE)
+    table_gen_s = time.perf_counter() - _t
     if debug:
         return actions, grid, {"p_inf": p_inf, "counts": counts, "losses": losses,
-                               "gp": gp, "n0": n0}
+                               "gp": gp, "n0": n0,
+                               "gp_fit_s": gp_fit_s, "table_gen_s": table_gen_s}
     return actions, grid
 
 
@@ -327,6 +336,8 @@ class BOSStopper:
         self._origin = 0                                  # epoch the live table was built at
         self._n_cells = cfg.grid_size - 1
         self._gp = None                                   # fitted curve GP from the last table build (for diagnostics)
+        self._gp_fit_s = 0.0                              # accumulated learning-curve GP fit time
+        self._table_gen_s = 0.0                           # accumulated decision-table generation time
         self._decision: BOSResult | None = None
         self._sigma_fn = sigma_fn                         # sigma([x, fid]) from the surrogate (C2)
         self._converging = False                          # in the post-feasibility plateau phase
@@ -377,6 +388,8 @@ class BOSStopper:
             self._decision = BOSResult(z, n, "completed", stopped_early=False)
         self._decision.curve_gp = self._gp                # hand the fitted curve GP to diagnostics
         self._decision.gp_origin = self._origin
+        self._decision.curve_gp_fit_s = self._gp_fit_s    # BOS time split (curve-GP fit vs table gen)
+        self._decision.table_gen_s = self._table_gen_s
         return self._decision
 
     @property
@@ -396,6 +409,8 @@ class BOSStopper:
             curve, self.rho, self.budget, cfg, self._rng, debug=True)
         self._origin = n
         self._gp = dbg.get("gp")
+        self._gp_fit_s += float(dbg.get("gp_fit_s", 0.0))       # sum across (re)builds
+        self._table_gen_s += float(dbg.get("table_gen_s", 0.0))
         return False
 
     def _converge_step(self, loss: float, n: int) -> bool:

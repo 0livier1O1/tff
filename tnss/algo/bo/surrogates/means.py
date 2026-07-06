@@ -63,7 +63,12 @@ class LogSizeMean(Mean):
                  weight_prior_sigma: float | None = None,
                  batch_shape: torch.Size = torch.Size()):
         super().__init__()
-        self.dim = D
+        # Structure (bond-rank) width = the upper-triangular length of an N-core
+        # adjacency. Derived from N rather than the passed D so that under BOS
+        # fidelity augmentation — where the surrogate input is [ranks(D), n/N] and
+        # D arrives as D+1 — forward() still reads exactly the D rank columns and
+        # slices the trailing epoch-fraction column off (see forward()).
+        self.dim = N * (N - 1) // 2
         self.max_rank = float(max_rank)
         self.register_buffer("t_shape", t_shape.detach().clone().double())
         self.register_parameter("weight", torch.nn.Parameter(torch.ones(*batch_shape, 1)))
@@ -75,11 +80,31 @@ class LogSizeMean(Mean):
 
     def forward(self, x: Tensor) -> Tensor:
         lead = x.shape[:-1]
-        ranks = 1.0 + x.reshape(-1, self.dim).double() * (self.max_rank - 1.0)  # (M, D)
+        # Keep only the D structure columns; drops the trailing BOS fidelity
+        # column (n/N) when the surrogate is fidelity-augmented (D+1-wide input).
+        cols = x.reshape(-1, x.shape[-1])[:, :self.dim].double()
+        ranks = 1.0 + cols * (self.max_rank - 1.0)                              # (M, D)
         A = triu_to_adj_matrix(ranks, diag=self.t_shape).squeeze(1)             # (M, N, N)
         size = A.prod(dim=-1).sum(dim=-1).clamp_min(1.0)                        # (M,)
         out = self.weight * size.log() + self.bias                             # (M,)
         return out.reshape(*lead).to(x.dtype)
+
+
+class SliceMean(Mean):
+    """Feed only the first ``dim`` columns of the input to a base mean, dropping any
+    trailing columns. Used to make the structure-reading ``linear`` mean ignore the
+    BOS fidelity column (the epoch fraction ``n/N``) that widens the surrogate input
+    from ``D`` to ``D+1`` under fidelity augmentation — the analogue of the column
+    slice :class:`LogSizeMean` does internally. A no-op slice when ``dim`` already
+    equals the input width (the plain, non-fidelity surrogate)."""
+
+    def __init__(self, base_mean: Mean, dim: int):
+        super().__init__()
+        self.base_mean = base_mean
+        self.dim = int(dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.base_mean(x[..., :self.dim])
 
 
 class RoundMean(Mean):
@@ -130,7 +155,11 @@ def make_mean(name: str, D: int, *, N: int | None = None,
     if name == "constant":
         return ConstantMean()             # x-independent, so rounding is a no-op
     if name == "linear":
-        base: Mean = LinearMean(input_size=D)
+        # Build over the true structure width (N(N-1)/2) and slice the input to it,
+        # so a trailing BOS fidelity column (input width D+1) is dropped rather than
+        # given its own learned weight. Falls back to D when N isn't supplied.
+        struct_D = N * (N - 1) // 2 if N is not None else D
+        base: Mean = SliceMean(LinearMean(input_size=struct_D), struct_D)
     elif name == "log_size":
         if N is None or max_rank is None or t_shape is None:
             raise ValueError("mean='log_size' requires N, max_rank, and t_shape")

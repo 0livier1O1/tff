@@ -21,6 +21,9 @@ interp_improve / interp_boundary / interp_ct, the acquisition's own
 method), so the two interpolated terms are captured live, not reconstructed
 (plus interp_improve_raw / interp_boundary_raw when reference-normalisation is
 active, the pre-normalisation values that show the scale gap it closes). For a
+cUCB run one more column lands here: gamma, the straddle exploration weight
+gamma_n = IQR(mu) / (3 * mean sigma) the acquisition used that step — read live off
+the built acquisition (already computed in its build), never recomputed. For a
 SUR-family run (sur / gsur, directly or as a BITE/FBITE inner term) two extra
 per-step signals land here (see `acquisitions/sur_sensitivity`): sur_eff_frac (SUR
 only — the effective fraction of reference points doing work at the chosen
@@ -181,6 +184,16 @@ class RunDiagnostics:
             row["acq"] = float(acquisition(x.unsqueeze(0)).reshape(-1)[0])
         except Exception:
             pass
+        # cUCB straddle weight gamma_n — the adaptive exploration coefficient the
+        # acquisition already computed in build() (part of the timed suggest step); we
+        # only read the stored buffer here, never recompute it, so this cannot affect
+        # the measured algo time. Absent (-> no column) for acquisitions without a gamma.
+        g = getattr(acquisition, "gamma", None)
+        if g is not None:
+            try:
+                row["gamma"] = float(g)
+            except Exception:
+                pass
         if hasattr(acquisition, "terms"):             # BITE/FBITE: the two blended terms, recorded directly
             try:
                 t = acquisition.terms(x.unsqueeze(0))

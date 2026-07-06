@@ -196,9 +196,8 @@ class BOSS:
             suggest_time = time.perf_counter() - t0
 
             step = self.n_init + b
-            self._snapshot_gp(
-                model, step=step, phase="bo"        # snapshot the base (un-pinned) model
-            )
+            if SAVE_GP_STATES:                      # snapshot the base (un-pinned) model —
+                self._snapshot_gp(model, step=step, phase="bo")   # only when we'll save it
             self._evaluate(
                 candidate, step=step, phase="bo", gp_fit_time=gp_fit_time,
                 suggest_time=suggest_time, model=model,        # model -> C2 sigma_fn
@@ -368,9 +367,13 @@ class BOSS:
         # ground-truth diagnostics, but in production BOS would have stopped at n*. Charge the
         # EXACT measured wall-clock to that epoch — the stopper timestamps the would-be-stop
         # callback on the same perf_counter clock as t0 (not a per-epoch approximation). Normal
-        # mode already breaks at n*, so eval_time stays the real measured time.
+        # mode already breaks at n*, so eval_time stays the real measured time. The pre-correction
+        # value is the full-budget wall clock, kept (eval mode only) as the no-BOS baseline for
+        # the time-saved accounting — time saved = full - charged.
+        full_eval_time = None
         if (self.bos is not None and self.bos.eval_mode
                 and self._last_bos is not None and self._last_bos.stop_time is not None):
+            full_eval_time = eval_time
             eval_time = self._last_bos.stop_time - t0
 
         cr = float(self.compression_ratio(x))
@@ -396,6 +399,13 @@ class BOSS:
             row["bos_stop_epoch"] = self._last_bos.n_star
             row["bos_reason"] = self._last_bos.reason
             row["bos_epochs_saved"] = self.decomp_epochs - self._last_bos.n_star
+            # Time accounting: the full-budget decomposition (no-BOS baseline, eval mode only)
+            # and the two pieces of BOS's own cost — fitting the curve GP and generating the
+            # decision table. eval_time_s already includes both, up to n*.
+            if full_eval_time is not None:
+                row["bos_full_eval_time_s"] = full_eval_time
+            row["bos_curve_gp_fit_s"] = self._last_bos.curve_gp_fit_s
+            row["bos_table_gen_s"] = self._last_bos.table_gen_s
         self.rows.append(row)
         # The full loss curve (in eval mode, the ground-truth continuation past n*) plus, for
         # BOS runs, the would-be stop and the curve-GP predicted continuation band — diagnostics
