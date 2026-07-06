@@ -10,10 +10,10 @@ Returned columns:
     run, config_id, label, policy, family, seed, phase, n_evals, objective,
     cr, rse, efficiency, inc_cr, inc_rse, inc_efficiency, inc_cum_time_s,
     target_cr, step_time_s, cum_time_s, lambda_fitness
-`lambda_fitness` is the objective weight λ in CR + λ·RSE (NaN for MABSS).
+`lambda_fitness` is the objective weight λ in CR + λ·RSE.
 `n_evals` is the 1-based function-evaluation count (one trace row = one
-decomposition). `objective` is each algorithm's search objective — RSE for
-MABSS, CR + λ·RSE for non-MABSS methods (running best for the latter). `cr`/`rse` are
+decomposition). `objective` is each algorithm's search objective —
+CR + λ·RSE (running best). `cr`/`rse` are
 per-evaluation; `inc_cr`/`inc_rse`/`inc_cum_time_s` describe the incumbent (the
 running-best-objective structure): its CR, RSE, and the runtime at which it was
 found. `target_cr` is the generating structure's `cr`; `efficiency` /
@@ -55,18 +55,17 @@ def _read_trace_csv(path: str) -> pd.DataFrame:
     decomposition for every family, comparable across algorithms (unlike the raw
     `step` column, 0-based for BOSS, 1-based for TnALE).
 
-    `objective` is the algorithm's search objective (RSE for MABSS, CR + λ·RSE
-    for BOSS/TnALE — RSE alone is minimised trivially by any high-rank structure).
-    For BOSS/TnALE it is taken as the running best (cumulative minimum), since
-    their per-step objective is the evaluated candidate's, not monotone.
+    `objective` is the algorithm's search objective (CR + λ·RSE — RSE alone is
+    minimised trivially by any high-rank structure). It is taken as the running
+    best (cumulative minimum), since the per-step objective is the evaluated
+    candidate's, not monotone.
 
     `inc_cr` / `inc_rse` are the CR and RSE of the incumbent — the structure
     achieving the running-best objective so far — and `inc_cum_time_s` is the
     cumulative runtime at which that incumbent was found.
 
     `derive_trace_metrics` recomputes best-so-far and incumbent fields after any
-    dashboard phase filtering. MABSS traces without a phase column are tagged
-    `main`.
+    dashboard phase filtering. Traces without a phase column are tagged `main`.
 
     Cached — a completed seed's traces.csv is immutable.
     """
@@ -117,8 +116,7 @@ def derive_trace_metrics(
         g["inc_rse"] = g["rse"].where(is_incumbent).ffill()
         g["inc_cum_time_s"] = g["cum_time_s"].where(is_incumbent).ffill()
 
-        if (g["family"] != "mabss").all():
-            g["objective"] = running_best_obj
+        g["objective"] = running_best_obj
 
         tcr = g["target_cr"]
         has_tcr = tcr.notna() & (tcr != 0)
@@ -337,7 +335,7 @@ def load_traces(
             df["label"] = ac["label"]
             df["policy"] = ac["policy"]
             df["family"] = ac["family"]
-            # Objective weight of CR + λ·RSE — shared field; MABSS has no λ.
+            # Objective weight of CR + λ·RSE — shared field (NaN if absent).
             df["lambda_fitness"] = ac.get("lambda_fitness", float("nan"))
             # Feasibility cutoff the run used (RSE < this) — the dashboard's
             # default loss threshold.

@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -144,20 +145,28 @@ def _run_worker(shard_path, out_path, target_path, decomp) -> None:
     cr = np.empty(len(X))
     losses: list[list[float]] = []     # full decomposition RSE trajectory per structure
     tag = os.environ.get("CUDA_VISIBLE_DEVICES", "?")
+    count_path = Path(out_path).with_suffix(".count")   # live per-shard count the parent polls
     for i, row in enumerate(X):
         A = _triu_to_full(torch.tensor(row, dtype=torch.double), t_shape)
         c, r, _et, _recon, ls, _ctn, _status, _cores = _eval_tn(target, A, **decomp)
         rse[i], cr[i] = r, c
         losses.append([float(x) for x in ls])
+        count_path.write_text(str(i + 1))
         print(f"\r[gpu {tag}] {i + 1}/{len(X)}", end="", flush=True)
     print(f"\r[gpu {tag}] {len(X)}/{len(X)} done")
     np.savez(out_path, X=X, rse=rse, cr=cr, losses=np.array(losses, dtype=object))
 
 
-def _build(missing: np.ndarray, target_path: Path, decomp: dict, cache_dir: Path) -> dict:
+def _build(missing: np.ndarray, target_path: Path, decomp: dict, cache_dir: Path,
+           progress=None) -> dict:
     """Decompose `missing` structures, GPU-sharded across all GPUs. Returns
     {rank-tuple: (rse, cr, losses)} where `losses` is the full decomposition
-    RSE trajectory (so its last value equals `rse`)."""
+    RSE trajectory (so its last value equals `rse`).
+
+    `progress(done, total)`, if given, is called ~2×/s with the number of
+    structures decomposed so far (summed across shards) — the workers write a live
+    per-shard `.count` file that the parent polls, so a caller (the run's job) can
+    surface OOS build progress instead of the job looking idle for minutes."""
     from app.utils import all_gpus
 
     gpus = all_gpus()
@@ -168,19 +177,39 @@ def _build(missing: np.ndarray, target_path: Path, decomp: dict, cache_dir: Path
     procs = []
     for dev, shard in zip(gpus, shards):
         sin, sout = tmp / f"shard_gpu{dev}.npy", tmp / f"out_gpu{dev}.npz"
+        cfile = sout.with_suffix(".count")
+        cfile.unlink(missing_ok=True)   # drop any stale count from a previous build
         np.save(sin, shard)
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(dev), "PYTHONPATH": str(ROOT)}
-        procs.append((dev, sout, subprocess.Popen(
+        procs.append((dev, sout, cfile, subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "--worker",
              "--shard", str(sin), "--out", str(sout), "--target", str(target_path),
              "--decomp", json.dumps(decomp)], env=env)))
 
-    for dev, _sout, p in procs:
-        if p.wait() != 0:
+    # Poll the shards' live counts (rather than blocking on wait()) so the parent can
+    # report OOS build progress; the decomposition itself runs in the subprocesses.
+    total = len(missing)
+    while True:
+        done, alive = 0, False
+        for _dev, _sout, cfile, p in procs:
+            try:
+                done += int(cfile.read_text())
+            except Exception:
+                pass   # not written yet, or a torn read mid-write — next poll picks it up
+            if p.poll() is None:
+                alive = True
+        if progress is not None:
+            progress(min(done, total), total)
+        if not alive:
+            break
+        time.sleep(0.5)
+
+    for dev, _sout, _cfile, p in procs:
+        if p.returncode != 0:
             raise RuntimeError(f"OOS decompose worker on gpu {dev} failed (exit {p.returncode})")
 
     out: dict = {}
-    for _dev, sout, _p in procs:
+    for _dev, sout, _cfile, _p in procs:
         o = np.load(sout, allow_pickle=True)
         for x, r, c, l in zip(o["X"], o["rse"], o["cr"], o["losses"]):
             out[tuple(int(v) for v in x)] = (float(r), float(c), [float(v) for v in l])
@@ -188,7 +217,7 @@ def _build(missing: np.ndarray, target_path: Path, decomp: dict, cache_dir: Path
 
 
 def load_or_build_oos(repo_root, problem_id: str, seed: int, algo: dict,
-                      n: int = 1000, oos_method: str = "adam") -> dict:
+                      n: int = 1000, oos_method: str = "adam", progress=None) -> dict:
     """Return ``{X (n,D int), rse (n,), cr (n,), losses (n, object)}`` for the OOS
     set, building + caching on first call.
 
@@ -231,7 +260,7 @@ def load_or_build_oos(repo_root, problem_id: str, seed: int, algo: dict,
     if len(missing):
         print(f"[cboss_oos] decomposing {len(missing)}/{len(X)} OOS structures "
               f"({problem_id} seed {seed})…")
-        have.update(_build(missing, target_path, decomp, cache.parent))
+        have.update(_build(missing, target_path, decomp, cache.parent, progress=progress))
         cache.parent.mkdir(parents=True, exist_ok=True)
         keys = list(have.keys())
         np.savez(cache, X=np.array(keys, dtype=int),

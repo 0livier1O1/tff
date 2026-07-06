@@ -7,8 +7,7 @@ It now lives here once: `build_algo` constructs the algorithm from a config, and
 `save_results` writes the family-specific output artifacts. The runner, the
 unified `run_experiment.py`, and the debug-script generator all go through this.
 
-Covers the four single-`.run()` families (boss / cboss / tnale / random). MABSS
-is an env+policy loop with no single object and keeps its own runner/script.
+Covers the single-`.run()` families (boss / cboss / bess / ftboss / tnale / random).
 """
 from __future__ import annotations
 
@@ -18,15 +17,13 @@ from typing import Callable
 import numpy as np
 import torch
 
-from tnss.algo.boss.boss import BOSS
-from tnss.algo.cboss import CBOSS
-from tnss.algo.bess import BESS
+from tnss.utils import SAVE_GP_STATES
 from tnss.algo.ftboss.ftboss import FTBOSS
 from tnss.algo.tnale import TnALE
 from tnss.algo.random_search import RandomSearch
 
 
-SINGLE_OBJECT_FAMILIES = ("boss", "cboss", "bess", "ftboss", "tnale", "random")
+SINGLE_OBJECT_FAMILIES = ("ftboss", "tnale", "random")
 
 
 # ---------------------------------------------------------------------------
@@ -57,59 +54,6 @@ def _target_torch(target_np) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Builders — (acfg, adj_np, target_np, seed) -> constructed algorithm
 # ---------------------------------------------------------------------------
-
-def _build_boss(acfg, adj_np, target_np, seed):
-    return BOSS(
-        _target_torch(target_np),
-        budget=acfg.budget, n_init=acfg.n_init, init_design=acfg.init_method,
-        cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
-        max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
-        freq_update=acfg.freq_update, lamda=acfg.lambda_fitness, n_runs=acfg.n_runs,
-        acqf=_acqf(acfg), ucb_beta=acfg.ucb_beta, kernel=acfg.kernel, mean=acfg.mean,
-        input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,
-        seed=seed, verbose=True, **_decomp_kwargs(acfg),
-    )
-
-
-def _build_cboss(acfg, adj_np, target_np, seed):
-    return CBOSS(
-        _target_torch(target_np),
-        budget=acfg.budget, n_init=acfg.n_init, init_design=acfg.init_method,
-        cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
-        max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
-        n_runs=acfg.n_runs, acqf=_acqf(acfg), ficr_t=acfg.cboss_ficr_t,
-        lamda=acfg.lambda_fitness, seek_feasible_first=acfg.cboss_seek_feasible_first,
-        kernel=acfg.kernel, mean=acfg.mean, var_strategy=acfg.var_strategy,
-        wsp_mode=acfg.wsp_mode, input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,
-        gp_epochs=acfg.gp_epochs, freq_update=acfg.freq_update,
-        gp_refine_epochs=acfg.gp_refine_epochs, gp_tol=acfg.gp_tol,
-        gp_patience=acfg.gp_patience, gp_reset_every=acfg.gp_reset_every,
-        mc_samples=acfg.cboss_mc_samples,
-        raw_samples=acfg.raw_samples, num_restarts=acfg.num_restarts,
-        seed=seed, verbose=True, **_decomp_kwargs(acfg),
-    )
-
-
-def _build_bess(acfg, adj_np, target_np, seed):
-    return BESS(
-        _target_torch(target_np),
-        budget=acfg.budget, n_init=acfg.n_init, init_design=acfg.init_method,
-        cr_warp_lambda=acfg.cr_warp_lambda, cr_pool_bias=acfg.cr_pool_bias,
-        max_rank=acfg.max_rank, feasible_rse=acfg.feasible_rse, min_rse=acfg.feasible_rse,
-        n_runs=acfg.n_runs, lamda=acfg.lambda_fitness, acqf=_acqf(acfg),
-        surrogate=acfg.bess_surrogate, rse_transform=acfg.bess_rse_transform,
-        cucb_gamma_mode=acfg.bess_cucb_gamma_mode, cucb_gamma=acfg.bess_cucb_gamma,
-        tmse_eps=acfg.bess_tmse_eps, sur_obs_noise=acfg.bess_sur_obs_noise,
-        sur_ref_size=acfg.bess_sur_ref_size, n_ref=acfg.bess_n_ref,
-        kernel=acfg.kernel, mean=acfg.mean, var_strategy=acfg.var_strategy,
-        wsp_mode=acfg.wsp_mode, input_warp=acfg.input_warp, round_inputs=acfg.round_inputs,
-        gp_epochs=acfg.gp_epochs, freq_update=acfg.freq_update,
-        gp_refine_epochs=acfg.gp_refine_epochs, gp_tol=acfg.gp_tol,
-        gp_patience=acfg.gp_patience, gp_reset_every=acfg.gp_reset_every,
-        raw_samples=acfg.raw_samples, num_restarts=acfg.num_restarts,
-        seed=seed, verbose=True, **_decomp_kwargs(acfg),
-    )
-
 
 def _build_ftboss(acfg, adj_np, target_np, seed):
     # 0 = "auto" for the fidelity knobs -> let FTBOSS derive them from maxiter_tn.
@@ -178,27 +122,11 @@ def _build_random(acfg, adj_np, target_np, seed):
 # decomp_traces.json, contraction_traces.json, .done) which run_experiment writes.
 # ---------------------------------------------------------------------------
 
-def _save_bo(npz_name: str):
-    """Saver for the BO families: gp_states.pt + <name>.npz with the GP train set."""
-    def _save(algo, out_dir: Path, acfg):
-        torch.save(algo.gp_states, out_dir / "gp_states.pt")
-        r = algo.get_results()
-        np.savez(
-            out_dir / npz_name,
-            X_std=r["X_std"].numpy(),
-            Y_rse=r["Y_rse"].numpy(),
-            Y_cr=r["Y_cr"].numpy(),
-            Y_feasible=r["Y_feasible"].numpy(),
-            Y_objective=(r["Y_cr"] + acfg.lambda_fitness * r["Y_rse"]).numpy(),
-            t=r["t"].numpy(),
-        )
-    return _save
-
-
 def _save_ftboss(algo, out_dir: Path, acfg):
     """FTBOSS writes a per-structure basket summary (variable-length curves), not the
     per-eval (X_std, Y_*) tensors of the single-fidelity BO families, plus the
-    per-refit freeze-thaw GP snapshots (``gp_states.pt``) so the offline diagnostics can
+    per-refit freeze-thaw GP snapshots (``gp_states.pt``, only when
+    ``tnss.utils.SAVE_GP_STATES`` is on) so the offline diagnostics can
     reconstruct each surrogate and query the asymptote extrapolation with no refit."""
     r = algo.get_results()
     x_std = r["x_std"]
@@ -212,7 +140,10 @@ def _save_ftboss(algo, out_dir: Path, acfg):
         epochs_done=np.array(r["epochs_done"], dtype=int),
         curves=np.array([np.asarray(c, dtype=float) for c in r["curves"]], dtype=object),
     )
-    torch.save(algo.gp_states, out_dir / "gp_states.pt")
+    # Freeze-thaw GP snapshots are large and only feed the offline curve/asymptote
+    # diagnostics; off by default — see tnss.utils.SAVE_GP_STATES.
+    if SAVE_GP_STATES:
+        torch.save(algo.gp_states, out_dir / "gp_states.pt")
 
 
 def _save_random(algo, out_dir: Path, acfg):
@@ -233,12 +164,10 @@ def _save_none(algo, out_dir: Path, acfg):
 # ---------------------------------------------------------------------------
 
 _BUILDERS: dict[str, Callable] = {
-    "boss": _build_boss, "cboss": _build_cboss, "bess": _build_bess,
     "ftboss": _build_ftboss, "tnale": _build_tnale, "random": _build_random,
 }
 _SAVERS: dict[str, Callable] = {
-    "boss": _save_bo("boss_results.npz"), "cboss": _save_bo("cboss_results.npz"),
-    "bess": _save_bo("bess_results.npz"), "ftboss": _save_ftboss,
+    "ftboss": _save_ftboss,
     "tnale": _save_none, "random": _save_random,
 }
 

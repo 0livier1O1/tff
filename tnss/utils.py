@@ -5,6 +5,14 @@ import torch
 from torch import Tensor
 
 
+# The per-step GP surrogate snapshots (``gp_states.pt``) are the bulk of a run's
+# on-disk size and back no webapp plot — the diagnostics read the self-contained
+# ``diagnostics.csv`` / OOS arrays. Off by default; flip to True to write them again
+# for the offline SUR reference-size sweep or deep GP debugging. Single switch, read
+# by both save sites (tnss/algo/bo/boss.py and the FTBOSS saver in app/algos/registry.py).
+SAVE_GP_STATES = False
+
+
 def atomic_write_json(path: Path | None, data: dict) -> None:
     """Atomically write `data` as JSON to `path` (tmp file + replace); no-op if
     `path` is None. A previously-written `started_at` is preserved when `data`
@@ -66,6 +74,19 @@ def to_int_ranks(X_std: Tensor, max_rank: int) -> Tensor:
     Shared by the full-upper-triangular families (BOSS/cBOSS/random)."""
     ranks = 1.0 + X_std.double() * (float(max_rank) - 1.0)
     return ranks.round().clamp(1, max_rank).to(torch.int)
+
+
+def snap_to_lattice(X_std: Tensor, max_rank: int, straight_through: bool = False) -> Tensor:
+    """Round normalized points in [0,1]^D to the nearest integer-rank lattice node,
+    returning them in the *same* normalized [0,1] coordinates (the inverse-normalise of
+    :func:`to_int_ranks`). The single lattice-snap used by ``SearchSpace`` (store the
+    continuous optimiser's pick on-lattice) and by ``RoundKernel`` / ``RoundMean``
+    (discretise inputs inside the covariance / mean forward). With ``straight_through``
+    the forward value snaps but the gradient flows as identity, so a gradient-based
+    acquisition optimiser can still move between cells; otherwise it is a hard snap."""
+    snapped = (to_int_ranks(X_std, max_rank).double() - 1.0) / max(float(max_rank) - 1.0, 1.0)
+    snapped = snapped.to(X_std.dtype)
+    return X_std + (snapped - X_std).detach() if straight_through else snapped
 
 
 def cr_of_normalized(X_std: Tensor, max_rank: int, t_shape: Tensor) -> Tensor:

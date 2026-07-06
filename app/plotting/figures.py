@@ -231,11 +231,15 @@ def cr_runtime_scatter(
     finals = (df.sort_values("n_evals")
                 .groupby(["run", "config_id", "seed"], as_index=False).last())
 
-    # Runtime for the point: time to *find* the incumbent for BOSS/TnALE (they
-    # keep evaluating worse candidates afterwards); MABSS builds incrementally,
-    # so its total runtime is the time-to-result.
-    finals["runtime"] = finals["inc_cum_time_s"].where(
-        finals["family"] != "mabss", finals["cum_time_s"])
+    # Runtime for the point: time to *find* the incumbent (the search keeps
+    # evaluating worse candidates afterwards, so incumbent time — not total — is
+    # the fair comparison).
+    finals["runtime"] = finals["inc_cum_time_s"]
+
+    # Configs with no incumbent (feasible_cr mode, no feasible eval ever found) have no
+    # CR point to place — their inc_cr / inc_rse are NaN, which would break the marker
+    # size. Drop them from the scatter (they simply have no feasible CR to compare).
+    finals = finals[finals[y_col].notna() & finals["inc_rse"].notna()]
 
     if threshold_mode == "hide":
         finals = finals[finals["inc_rse"] <= loss_threshold]
@@ -397,28 +401,86 @@ def gp_calibration(d: pd.DataFrame, lab: str = "objective") -> go.Figure:
     return fig
 
 
+# Scalar-hyper trajectories worth a line: outputscale, and the effective observation
+# noise (`eff_noise` — the Gaussian noise for regression, the probit look-ahead τ² for
+# the classifier, which has no noise hyperparameter). The raw Gaussian `noise` is kept
+# for regression. An all-NaN series (e.g. `noise` on a classifier run) is skipped, so
+# the trace never renders as an empty legend entry.
+_SCALAR_HYPERS = (("outputscale", "#9467bd"), ("eff_noise", "#d62728"), ("noise", "#1f77b4"))
+
+
+def _finite_hypers(d: pd.DataFrame) -> list[tuple[str, str]]:
+    return [(n, c) for n, c in _SCALAR_HYPERS
+            if n in d.columns and np.isfinite(pd.to_numeric(d[n], errors="coerce")).any()]
+
+
 def gp_hyperparameters(d: pd.DataFrame) -> go.Figure:
-    """GP hyperparameter trajectories — ARD lengthscales per bond (heatmap) and
-    noise / outputscale (log axis), across BO steps."""
+    """GP hyperparameter trajectories — ARD lengthscales per bond (heatmap) and the
+    scalar hypers (outputscale + effective noise, log axis), across BO steps."""
     k = d["k"].values
     ls = d[[c for c in d.columns if c.startswith("ls")]].values.T
     fig = make_subplots(rows=2, cols=1, vertical_spacing=0.09, row_heights=[0.6, 0.4])
     fig.add_trace(go.Heatmap(x=k, y=list(range(ls.shape[0])), z=ls, colorscale="Viridis",
                              colorbar=dict(len=0.5, y=0.78)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=k, y=d["noise"], mode="lines", name="noise",
-                             line=dict(color="#d62728")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=k, y=d["outputscale"], mode="lines", name="outputscale",
-                             line=dict(color="#9467bd")), row=2, col=1)
+    for name, color in _finite_hypers(d):
+        fig.add_trace(go.Scatter(x=k, y=d[name], mode="lines", name=name,
+                                 line=dict(color=color)), row=2, col=1)
     fig.update_yaxes(title_text="bond dim", row=1, col=1)
     fig.update_yaxes(title_text="value", type="log", row=2, col=1)
     fig.update_xaxes(title_text="BO step", row=2, col=1)
     fig.update_layout(
         template="plotly_white", height=480, margin=dict(l=0, r=0, t=20, b=0),
-        # Legend dropped to the lower (noise/outputscale) plot so it clears the
-        # heatmap's colorbar above.
+        # Legend dropped to the lower (scalar-hyper) plot so it clears the heatmap's
+        # colorbar above.
         legend=dict(orientation="v", x=1.01, xanchor="left", y=0.36,
                     yanchor="top", font=dict(size=10)),
     )
+    return fig
+
+
+def gp_lengthscales(d: pd.DataFrame) -> go.Figure:
+    """ARD lengthscale trajectory — one row per bond, value over BO steps (heatmap).
+    The lengthscale half of `gp_hyperparameters`, split out so it sits beside the
+    scalar params."""
+    k = d["k"].values
+    ls = d[[c for c in d.columns if c.startswith("ls")]].values.T
+    fig = go.Figure(go.Heatmap(x=k, y=list(range(ls.shape[0])), z=ls, colorscale="Viridis",
+                               colorbar=dict(title="ls")))
+    fig.update_yaxes(title_text="bond dim")
+    fig.update_xaxes(title_text="BO step")
+    fig.update_layout(template="plotly_white", margin=dict(l=0, r=0, t=20, b=0))
+    return fig
+
+
+def gp_fitted_scalars(d: pd.DataFrame) -> go.Figure:
+    """Scalar fitted GP parameters over BO steps (log axis): the outputscale and the
+    effective observation noise (plus the raw Gaussian noise for regression). Reads
+    the self-contained `diagnostics.csv`; an all-NaN series is skipped, so a classifier
+    run (no Gaussian noise) still shows its probit `eff_noise` rather than a blank line."""
+    k = d["k"].values
+    fig = go.Figure()
+    for name, color in _finite_hypers(d):
+        fig.add_trace(go.Scatter(x=k, y=d[name], mode="lines", name=name, line=dict(color=color)))
+    fig.update_yaxes(title_text="value", type="log")
+    fig.update_xaxes(title_text="BO step")
+    fig.update_layout(template="plotly_white", margin=dict(l=0, r=0, t=24, b=0),
+                      legend=dict(orientation="h", y=1.02, yanchor="bottom"))
+    return fig
+
+
+def gp_mean_params(d: pd.DataFrame) -> go.Figure:
+    """Prior-mean parameters over BO steps (linear axis — they can be negative),
+    whichever the chosen mean produced: the constant value, the log_size slope + bias,
+    or the linear weights + bias (columns prefixed `mean_`). Piecewise-constant between
+    refits. Empty of `mean_` columns for runs that predate the capture."""
+    k = d["k"].values
+    fig = go.Figure()
+    for c in [c for c in d.columns if c.startswith("mean_")]:
+        fig.add_trace(go.Scatter(x=k, y=d[c], mode="lines", name=c[len("mean_"):]))
+    fig.update_yaxes(title_text="value")
+    fig.update_xaxes(title_text="BO step")
+    fig.update_layout(template="plotly_white", margin=dict(l=0, r=0, t=24, b=0),
+                      legend=dict(orientation="h", y=1.02, yanchor="bottom"))
     return fig
 
 
@@ -686,7 +748,7 @@ def decomp_loss_curves(traces: list[dict],
 
 
 # ---------------------------------------------------------------------------
-# BESS SUR reference-size sensitivity (app/analysis/sur_refsize.py)
+# SUR / gSUR reference-size sensitivity (app/analysis/sur_refsize.py)
 # ---------------------------------------------------------------------------
 
 def sur_refsize_convergence(d) -> go.Figure:
@@ -734,21 +796,20 @@ def sur_refsize_noise(d) -> go.Figure:
     return fig
 
 
-def sur_refsize_effpoints(d) -> go.Figure:
-    """View D — what fraction of the reference points actually do any work. The SUR sum is
-    a weighted average over the M reference points; most weight sits near the contour and
-    the rest contribute ≈0. The participation ratio (Σw)²/Σw² is the *effective* number of
-    contributing points; here it is shown as a fraction of the operating M (1.0 = every
-    point pulls its weight, → 0 = a handful dominate). A persistently small fraction means
-    the lever is *placement* — concentrate points near the contour — not a larger M."""
-    steps, frac = d["tl_steps"], d["tl_peff"] / max(int(d["op_M"]), 1)
+def sur_effpoints(df) -> go.Figure:
+    """View D — what fraction of the reference points actually do any work, per BO step (from
+    the live ``diagnostics.csv`` column ``sur_eff_frac``). The SUR sum is a weighted average
+    over the M reference points; most weight sits near the contour and the rest contribute ≈0.
+    The participation ratio (Σw)²/Σw² is the *effective* number of contributing points, shown
+    as a fraction of the operating M (1.0 = every point pulls its weight, → 0 = a handful
+    dominate). A persistently small fraction means the lever is *placement* — concentrate
+    points near the contour — not a larger M."""
+    d = df.dropna(subset=["sur_eff_frac"]) if "sur_eff_frac" in df else df.iloc[:0]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=steps, y=frac, mode="lines+markers",
+    fig.add_trace(go.Scatter(x=d["k"], y=d["sur_eff_frac"], mode="lines+markers", name="effective",
                              line=dict(color="#4c78a8", width=2), marker=dict(size=4),
                              showlegend=False,
-                             customdata=d["tl_peff"],
-                             hovertemplate="step %{x}<br>%{y:.1%} of M<br>"
-                                           "(%{customdata:.0f} effective points)<extra></extra>"))
+                             hovertemplate="step %{x}<br>%{y:.1%} of M<extra></extra>"))
     fig.update_xaxes(title_text="BO step", rangemode="tozero")
     fig.update_yaxes(title_text="effective fraction of M", rangemode="tozero",
                      tickformat=".0%", showgrid=False)
@@ -757,15 +818,16 @@ def sur_refsize_effpoints(d) -> go.Figure:
     return fig
 
 
-def sur_gsur_fidelity(d) -> go.Figure:
-    """gSUR↔SUR fidelity — does the cheap pointwise gSUR rank candidates like the expensive
-    integrated SUR? On each step's surrogate, a shared pool of candidate structures is
-    scored by both; the lines are the Spearman rank correlation of the two score vectors
-    and the overlap of their top-10 picks, per BO step. Near 1.0 → gSUR is a faithful,
-    cheap proxy (you can skip SUR's reference-design cost); dipping low → the integral
-    genuinely matters at those steps. (Independent of any reference-size choice.)"""
-    steps, rho, top10 = d["fid_steps"], d["fid_spearman"], d["fid_top10"]
-    top1 = float(np.mean(d["fid_top1"])) if len(d["fid_top1"]) else float("nan")
+def sur_gsur_fidelity(df) -> go.Figure:
+    """gSUR↔SUR fidelity, per BO step (from the live ``diagnostics.csv``) — does the cheap
+    pointwise gSUR rank candidates like the expensive integrated SUR? On each step's surrogate,
+    a shared pool of candidate structures is scored by both; the lines are the Spearman rank
+    correlation of the two score vectors and the overlap of their top-10 picks. Near 1.0 → gSUR
+    is a faithful, cheap proxy (you can skip SUR's reference-design cost); dipping low → the
+    integral genuinely matters at those steps."""
+    d = df.dropna(subset=["sur_gsur_spearman"]) if "sur_gsur_spearman" in df else df.iloc[:0]
+    steps, rho, top10 = d["k"], d["sur_gsur_spearman"], d["sur_gsur_top10"]
+    top1 = float(d["sur_gsur_top1"].mean()) if len(d) else float("nan")
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=steps, y=rho, mode="lines+markers", name="Spearman ρ",
                              line=dict(color="#54a24b", width=2), marker=dict(size=4)))
@@ -773,8 +835,8 @@ def sur_gsur_fidelity(d) -> go.Figure:
                              line=dict(color="#b279a2", width=2, dash="dot"), marker=dict(size=4)))
     fig.add_hline(y=1.0, line_color="#bbb", line_width=1, line_dash="dot")
     fig.update_xaxes(title_text="BO step", rangemode="tozero")
-    fig.update_yaxes(title_text="gSUR vs SUR agreement", range=[min(0.0, float(np.nanmin(rho)) - 0.05), 1.03],
-                     showgrid=False)
+    lo = min(0.0, float(np.nanmin(rho)) - 0.05) if len(d) else 0.0
+    fig.update_yaxes(title_text="gSUR vs SUR agreement", range=[lo, 1.03], showgrid=False)
     fig.update_layout(template="plotly_white", height=330,
                       margin=dict(l=0, r=0, t=24, b=0), hovermode="x unified", legend=_LEGEND,
                       title=dict(text=f"argmax agree: {top1:.0%} of steps", x=0.5,

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import plotly.colors as pc
 
-FAMILY_SCALE = {"mabss": "Blues", "boss": "Oranges", "tnale": "Greens",
+FAMILY_SCALE = {"boss": "Oranges", "tnale": "Greens",
                 "random": "Purples", "cboss": "Reds", "bess": "Teal",
                 "ftboss": "Magenta"}
 _FALLBACK_SCALE = "Greys"

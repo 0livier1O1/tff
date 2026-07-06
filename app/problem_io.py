@@ -159,20 +159,26 @@ def _materialize_synthetic(problem: SyntheticProblemConfig, seed: int, sdir: Pat
 
 
 def _materialize_real(problem: RealProblemConfig, seed: int, sdir: Path) -> None:
-    """Load the canonical source file, retensorize images if needed, then
-    save a uniform target_tensor.npz (key='data') + a synthesized init adj."""
-    from scripts.utils import (
-        load_target_tensor, reconstruct_image, retensorize_image,
-        random_adj_matrix, save_tensor,
-    )
+    """Build the real target tensor and save a uniform target_tensor.npz (key='data')
+    + a synthesized init adjacency. Images: load the .npz + retensorize to n_cores.
+    Lightfields: build order-5 from the raw PNG grid at the chosen crop / angular count
+    / output resolution (the .npy is not used)."""
+    from scripts.utils import random_adj_matrix, save_tensor
+    from app import real_data
     import cupy as cp
 
-    _, target_cp = load_target_tensor(problem.target_path, dtype="float32")
-
-    # Images come in as 2D and need re-tensorizing to the problem's n_cores
-    if target_cp.ndim <= 2 and problem.n_cores != target_cp.ndim:
-        img_2d = reconstruct_image(target_cp)
-        target_cp = cp.array(retensorize_image(img_2d, problem.n_cores)).astype(cp.float32)
+    if problem.source == "Lightfield":
+        # Cropped / resized / angle-selected directly from the original PNGs.
+        X = real_data.build_lightfield(
+            problem.target_path, problem.crop, problem.n_ang, problem.out_h, problem.out_w)
+        target_cp = cp.asarray(X)
+    else:
+        from scripts.utils import load_target_tensor, reconstruct_image, retensorize_image
+        _, target_cp = load_target_tensor(problem.target_path, dtype="float32")
+        # Re-tensorize the 256x256 image to the chosen n_cores.
+        if problem.n_cores != target_cp.ndim:
+            img_2d = reconstruct_image(target_cp)
+            target_cp = cp.array(retensorize_image(img_2d, problem.n_cores)).astype(cp.float32)
 
     save_tensor(sdir / "target_tensor.npz", target_cp)
 

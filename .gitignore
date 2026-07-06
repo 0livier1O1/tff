@@ -20,9 +20,10 @@ CLAUDE.md
 playground/
 
 # Context-only reference dirs (not real submodules; kept on disk for the agent)
-context/TnALE/
-context/TNLS/
-context/tensor_networks/
+context/*
 overleaf/
 *.pt
 *.tar.gz
+
+# webapp is its own separate git repository — not tracked by boss
+/webapp/

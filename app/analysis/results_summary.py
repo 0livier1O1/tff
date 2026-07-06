@@ -189,20 +189,7 @@ def render_summary_plots(
     inc_word = "best feasible-CR" if controls.best_by == "feasible_cr" else "best-objective"
     rse_word = "λ·RSE" if controls.weight_rse else "RSE"
 
-    # MABSS and global/local search baselines optimise different objectives — RSE vs. CR + λ·RSE —
-    # so each family group gets its own chart.
-    mabss_df = df[df["family"] == "mabss"]
-    search_df = df[df["family"] != "mabss"]
-
-    if not mabss_df.empty:
-        st.caption(f"**MABSS** — objective (RSE), with {cr_word} dashed on the right axis.")
-        st.plotly_chart(
-            figures.objective_curves(
-                mabss_df, y_title="Objective (RSE)", show_cr=True,
-                use_efficiency=controls.use_efficiency,
-            ),
-            width="stretch", key=f"{key_prefix}_mabss_obj",
-        )
+    search_df = df
 
     if not search_df.empty:
         st.caption("**BOSS / TnALE / Random** — best objective (CR + λ·RSE) so far. "
@@ -236,7 +223,7 @@ def render_summary_plots(
         threshold_mode=controls.threshold_mode,
     )
 
-    # The generating-CR plot needs the ground-truth CR — synthetic, non-MABSS methods only.
+    # The generating-CR plot needs the ground-truth CR — synthetic targets only.
     show_gen = not search_df.empty and bool(search_df["target_cr"].notna().all())
     if show_gen:
         col_a, col_b = st.columns(2)

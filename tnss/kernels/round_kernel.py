@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 from gpytorch.kernels import Kernel
 
+from tnss.utils import snap_to_lattice
+
 
 class RoundKernel(Kernel):
     r"""Snap inputs to the integer rank lattice before a base kernel.
@@ -42,11 +44,7 @@ class RoundKernel(Kernel):
         self.max_rank = int(max_rank)
 
     def _snap(self, x: torch.Tensor) -> torch.Tensor:
-        """Round each coordinate to the nearest integer-rank lattice point in
-        [0, 1], with a straight-through (identity-gradient) estimator."""
-        m = max(self.max_rank - 1, 1)
-        snapped = (x * m).round().div(m).clamp(0.0, 1.0)
-        return x + (snapped - x).detach()
+        return snap_to_lattice(x, self.max_rank, straight_through=True)
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor, diag: bool = False,
                 **params) -> torch.Tensor:

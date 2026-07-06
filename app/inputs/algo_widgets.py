@@ -5,9 +5,9 @@ algo_widgets.py — Sidebar widgets for the per-AlgoConfig sections.
 config expanders (one per algorithm config), the Add button, and persists
 the list to `cfg.algo_configs` + `st.session_state["algo_configs"]`.
 
-The per-family helpers (_render_mabss / _render_boss / _render_tnale /
-_render_random) are typed against their concrete subclass — IDE catches
-accidental cross-family field access.
+The per-family helpers (_render_boss / _render_tnale / _render_random)
+are typed against their concrete subclass — IDE catches accidental
+cross-family field access.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from app.analysis.debug_script import write_debug_script_for_config, SUPPORTED_F
 from app.orchestration.runner import _resolve_problem, parse_seeds
 from app.config.sidebar_config import SidebarConfig
 from app.config.algo_config import (
-    AlgoConfig, MABSSConfig, BOSSConfig, CBOSSConfig, BESSConfig, FTBOSSConfig,
+    AlgoConfig, BOSSConfig, CBOSSConfig, BESSConfig, FTBOSSConfig,
     TnALEConfig, RandomSearchConfig,
     POLICY_OPTIONS, new_algo_config, replace_policy, duplicate_algo_config,
 )
@@ -31,15 +31,8 @@ from app.config.param_groups import copy_all_groups
 from app.config.constants import (
     DECOMP_EPOCHS, DECOMP_ENGINE, DECOMP_INIT_LR, DECOMP_MOMENTUM,
     DECOMP_LOSS_PATIENCE, DECOMP_LR_PATIENCE,
-    MABSS_WARM_START, MABSS_WARM_ITERS,
     BOSS_N_RUNS, BOSS_MIN_RSE_DECOMP,
     TNALE_N_RUNS, TNALE_MIN_RSE_DECOMP,
-    MABSS_BUDGET, MABSS_MAX_RANK,
-    MABSS_GP_KERNEL, MABSS_GP_BETA, MABSS_LEARN_NOISE, MABSS_FIXED_NOISE,
-    MABSS_EXP3_GAMMA, MABSS_EXP3_DECAY,
-    MABSS_EXP4_GAMMA, MABSS_EXP4_ETA, MABSS_LOSS_BINS, MABSS_CR_BINS,
-    MABSS_STOPPING_THRESHOLD, MABSS_EXP3_REWARD_SCALE,
-    MABSS_EXP3_LOSS_CAP, MABSS_EXP3_LOG_CR_CAP, MABSS_DTYPE,
     BOSS_BUDGET, BOSS_MAX_BOND, BOSS_N_INIT, BOSS_LAMBDA_FITNESS, BOSS_UCB_BETA,
     RANDOM_BUDGET, RANDOM_MAX_BOND, RANDOM_N_RUNS, RANDOM_MIN_RSE_DECOMP,
     RANDOM_LAMBDA_FITNESS, RANDOM_N_INIT,
@@ -302,9 +295,7 @@ def _render_one_config(acfg: AlgoConfig) -> None:
         # Rerun so the label field re-renders under its new policy-keyed id.
         st.rerun()
 
-    if isinstance(acfg, MABSSConfig):
-        _render_mabss(acfg)
-    elif isinstance(acfg, BOSSConfig):
+    if isinstance(acfg, BOSSConfig):
         _render_boss(acfg)
     elif isinstance(acfg, CBOSSConfig):
         _render_cboss(acfg)
@@ -349,126 +340,6 @@ def _render_decomp(acfg: AlgoConfig) -> None:
          min_value=10, max_value=50000, step=100, help=DECOMP_LOSS_PATIENCE)
     _num(c6, acfg, "decomp_lr_patience", "LR Pat.", f"decomp_lr_patience_{cid}",
          min_value=10, max_value=10000, step=50, help=DECOMP_LR_PATIENCE)
-
-
-def _render_mabss(acfg: MABSSConfig) -> None:
-    cid = acfg.config_id
-    if acfg.policy in ("mabss-ucb", "mabss-exp4"):
-        with _group("GP-UCB surrogate", _algo_badge(acfg), expanded=True):
-            u1, u2 = st.columns(2)
-            _ko = ["matern", "rbf"]
-            acfg.kernel = u1.selectbox(
-                "Kernel", _ko, index=_ko.index(acfg.kernel) if acfg.kernel in _ko else 0,
-                key=f"kernel_{cid}", help=MABSS_GP_KERNEL,
-            )
-            acfg.ucb_beta = u2.slider(
-                "Exploration β", 1.0, 10.0, float(acfg.ucb_beta), 0.5,
-                key=f"beta_{cid}", help=MABSS_GP_BETA,
-            )
-            n1, n2 = st.columns(2)
-            acfg.learn_noise = n1.checkbox(
-                "Learn Noise", value=acfg.learn_noise, key=f"learn_noise_{cid}",
-                help=MABSS_LEARN_NOISE,
-            )
-            _fn_str = n2.text_input(
-                "Fixed Noise", value=str(acfg.fixed_noise),
-                key=f"fixed_noise_{cid}", help=MABSS_FIXED_NOISE,
-            )
-            if not acfg.learn_noise:
-                try:
-                    acfg.fixed_noise = float(_fn_str)
-                except ValueError:
-                    pass
-
-    if acfg.policy == "mabss-exp3":
-        with _group("EXP3", _algo_badge(acfg), expanded=True):
-            e1, e2 = st.columns(2)
-            acfg.exp3_gamma = e1.slider(
-                "γ", 0.0, 1.0, float(acfg.exp3_gamma),
-                key=f"exp3_gamma_{cid}", help=MABSS_EXP3_GAMMA,
-            )
-            acfg.exp3_decay = e2.number_input(
-                "Decay", value=acfg.exp3_decay, step=0.01,
-                key=f"exp3_decay_{cid}", help=MABSS_EXP3_DECAY,
-            )
-
-    if acfg.policy == "mabss-exp4":
-        with _group("EXP4", _algo_badge(acfg), expanded=True):
-            e3, e4 = st.columns(2)
-            acfg.exp4_gamma = e3.slider(
-                "γ", 0.0, 1.0, float(acfg.exp4_gamma),
-                key=f"exp4_gamma_{cid}", help=MABSS_EXP4_GAMMA,
-            )
-            acfg.exp4_eta = e4.number_input(
-                "η", value=acfg.exp4_eta, step=0.1,
-                key=f"exp4_eta_{cid}", help=MABSS_EXP4_ETA,
-            )
-            e5, e6 = st.columns(2)
-            acfg.exp3_decay = e5.number_input(
-                "EXP4 Decay", value=acfg.exp3_decay, step=0.01,
-                key=f"exp4_decay_{cid}", help=MABSS_EXP3_DECAY,
-            )
-            st.markdown("*Context bins*")
-            b1, b2 = st.columns(2)
-            acfg.exp3_loss_bins = b1.number_input(
-                "Loss Bins", value=acfg.exp3_loss_bins, min_value=1,
-                key=f"loss_bins_{cid}", help=MABSS_LOSS_BINS,
-            )
-            acfg.exp3_cr_bins = b2.number_input(
-                "CR Bins", value=acfg.exp3_cr_bins, min_value=1,
-                key=f"cr_bins_{cid}", help=MABSS_CR_BINS,
-            )
-
-    with _group("Runtime constants", _algo_badge(acfg)):
-        r1, r2 = st.columns(2)
-        acfg.mabss_stopping_threshold = r1.number_input(
-            "Stop Threshold", value=acfg.mabss_stopping_threshold, format="%e",
-            key=f"mabss_stop_{cid}", help=MABSS_STOPPING_THRESHOLD,
-        )
-        acfg.mabss_exp3_reward_scale = r2.number_input(
-            "Reward Scale", value=acfg.mabss_exp3_reward_scale, step=0.01, format="%f",
-            key=f"mabss_reward_scale_{cid}", help=MABSS_EXP3_REWARD_SCALE,
-        )
-        r3, r4 = st.columns(2)
-        acfg.mabss_exp3_loss_cap = r3.number_input(
-            "Loss Cap", value=acfg.mabss_exp3_loss_cap, step=0.1, format="%f",
-            key=f"mabss_loss_cap_{cid}", help=MABSS_EXP3_LOSS_CAP,
-        )
-        acfg.mabss_exp3_log_cr_cap = r4.number_input(
-            "Log-CR Cap", value=acfg.mabss_exp3_log_cr_cap, step=0.5, format="%f",
-            key=f"mabss_log_cr_cap_{cid}", help=MABSS_EXP3_LOG_CR_CAP,
-        )
-        _dtopts = ["float32", "float64"]
-        acfg.dtype = st.selectbox(
-            "Dtype", _dtopts, index=_dtopts.index(acfg.dtype),
-            key=f"dtype_{cid}", help=MABSS_DTYPE,
-        )
-
-    _render_decomp_group(acfg)
-
-    with _group("Search & budget"):
-        c1, c2 = st.columns(2)
-        acfg.budget = c1.number_input(
-            "Budget", min_value=1, max_value=10000, value=acfg.budget,
-            key=_wkey(acfg, f"mabss_budget_{cid}"), help=MABSS_BUDGET,
-        )
-        acfg.max_rank = c2.number_input(
-            "Max Search Rank", min_value=2, max_value=100, value=acfg.max_rank,
-            key=_wkey(acfg, f"mabss_max_rank_{cid}"), help=MABSS_MAX_RANK,
-        )
-
-        ws_opts = ["None", "pam", "als"]
-        _ws_cur = acfg.mabss_warm_start_method or "None"
-        c3, c4 = st.columns(2)
-        _ws = c3.selectbox(
-            "Warm Start", ws_opts, index=ws_opts.index(_ws_cur) if _ws_cur in ws_opts else 0,
-            key=f"mabss_warm_start_{cid}", help=MABSS_WARM_START,
-        )
-        acfg.mabss_warm_start_method = None if _ws == "None" else _ws
-        acfg.mabss_warm_start_epochs = c4.number_input(
-            "Warm Iters", value=acfg.mabss_warm_start_epochs, min_value=0, step=10,
-            key=f"mabss_warm_iters_{cid}", help=MABSS_WARM_ITERS,
-        )
 
 
 # Init designs shared by the BO families (boss/cboss both use BOSSBase._init_points,
@@ -703,6 +574,15 @@ def _render_bess(acfg: BESSConfig) -> None:
                 st.caption("gSUR is the pointwise form of SUR (no reference design). "
                            "Classifier look-ahead noise is derived per-candidate from the "
                            "probit Hessian (Lyu et al. Supp. Result 2) — no τ² to set.")
+        if acfg.policy in ("bess-cucb", "bess-sur", "bess-gsur"):
+            _sel(st, acfg, "bess_sur_weight", "Objective weight w(u)",
+                 ["none", "incumbent", "improvement"], f"bess_sur_weight_{cid}",
+                 help="Make the boundary acquisition objective-aware. 'none' = plain "
+                      "cucb/sur/gsur. 'incumbent' = restrict to the cheaper-than-incumbent "
+                      "region (hard mask → mcUCB / mSUR / mgSUR). 'improvement' = weight by the "
+                      "CR gap (ψ*−ψ)⁺, i.e. expected opportunity cost (→ wSUR / wgSUR; cUCB "
+                      "only masks, so it gives mcUCB). For 'sur' the reference design is drawn "
+                      "CR-stratified when weighted.")
         _num(st, acfg, "bess_n_ref", "Boundary-error ref points", f"bess_n_ref_{cid}",
              min_value=64, max_value=16384, step=64,
              help="Fixed reference design over which the integrated boundary error E (the "
