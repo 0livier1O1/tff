@@ -265,10 +265,18 @@ class BOSS:
             mr = self.space.max_rank
             ranks = np.clip(np.rint(np.asarray(oos_ranks)).astype(int), 1, mr)
             rse = np.asarray(oos_rse, dtype=float).reshape(-1)
+            cr = np.asarray(oos_cr, dtype=float).reshape(-1)
             x = torch.as_tensor((ranks - 1.0) / max(mr - 1, 1), dtype=torch.double)
             y = (rse <= self.threshold).astype(int)
-            self.diagnostics.set_oos(
-                x=x, ranks=ranks, cr=np.asarray(oos_cr, dtype=float).reshape(-1), rse=rse, y=y)
+            # For a regression surrogate, the true value it regresses at each OOS point
+            # (e.g. CR+λ·RSE) — the ground truth for the true-vs-predicted plot. A
+            # classifier has no such target_fn, so this stays None.
+            target = None
+            tf = getattr(self.surrogate, "target_fn", None)
+            if tf is not None:
+                target = np.asarray(tf(torch.as_tensor(rse), torch.as_tensor(cr),
+                                       torch.as_tensor(y, dtype=torch.double))).reshape(-1)
+            self.diagnostics.set_oos(x=x, ranks=ranks, cr=cr, rse=rse, y=y, target=target)
         except Exception:
             pass
 

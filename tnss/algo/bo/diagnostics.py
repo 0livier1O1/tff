@@ -101,6 +101,14 @@ def _hypers(model) -> dict:
     for name, suffix in (("noise", "raw_noise"), ("outputscale", "raw_outputscale")):
         key = next((k for k in sd if k.endswith(suffix)), None)
         out[name] = float(sp(sd[key]).detach().reshape(-1)[0]) if key is not None else float("nan")
+    # Input-warp Kumaraswamy concentrations (a_d, b_d) per warped dim, if the kernel is
+    # wrapped in an InputWarpKernel. Positive-constrained (softplus) like the other hypers;
+    # a = b = 1 is the identity warp. Absent when input warping is off.
+    for name, suffix in (("warp_a", "raw_a"), ("warp_b", "raw_b")):
+        key = next((k for k in sd if k.endswith(suffix)), None)
+        if key is not None:
+            vals = sp(sd[key]).detach().reshape(-1).cpu().numpy()
+            out.update({f"{name}{i}": float(v) for i, v in enumerate(vals)})
     out.update(_mean_params(sd))
     return out
 
@@ -122,6 +130,7 @@ class RunDiagnostics:
         self.oos_steps: list[int] = []
         self.oos_proba: list[np.ndarray] = []      # per-step P(feasible) over the OOS set
         self.oos_sigma: list[np.ndarray] = []      # per-step latent sd over the OOS set
+        self.oos_mu: list[np.ndarray] = []         # per-step latent posterior mean (regression prediction)
         self.oos_metrics: list[dict] | None = None    # finalized per-refit bal-acc / ROC-AUC
         self.oos_eval: dict | None = None             # finalized snapshot arrays for the curves
 
@@ -227,13 +236,18 @@ class RunDiagnostics:
 
     # ----------------------------------------------------------------- fixed OOS
     def set_oos(self, *, x: Tensor, ranks: np.ndarray, cr: np.ndarray,
-                rse: np.ndarray, y: np.ndarray) -> None:
+                rse: np.ndarray, y: np.ndarray, target: np.ndarray | None = None) -> None:
         """Register the fixed OOS test set: normalised inputs `x` (M, D) for surrogate
         scoring, the integer `ranks` (for the after-run train-overlap exclusion), and
-        the decomposed `cr` / `rse` / feasibility `y` labels. Built once, off the BO
-        loop; the per-step scoring it enables (`score_oos`) never affects algo time."""
+        the decomposed `cr` / `rse` / feasibility `y` labels. `target` is the true
+        regression target (what the surrogate regresses, e.g. CR+λ·RSE) at each OOS point,
+        supplied only for a regression surrogate so the true-vs-predicted plot has a
+        ground-truth; None for a classifier. Built once, off the BO loop; the per-step
+        scoring it enables (`score_oos`) never affects algo time."""
         self.oos = {"x": x, "ranks": np.asarray(ranks), "cr": np.asarray(cr, float),
                     "rse": np.asarray(rse, float), "y": np.asarray(y).astype(int)}
+        if target is not None:
+            self.oos["target"] = np.asarray(target, float).reshape(-1)
 
     def score_oos(self, *, step: int, acq_model) -> None:
         """Score the *current* surrogate on the fixed OOS set: P(feasible) and the
@@ -246,10 +260,12 @@ class RunDiagnostics:
             x = self.oos["x"]
             pf = feasibility_prob(acq_model, x).detach().reshape(-1).cpu().numpy()
             post = acq_model.posterior(x)
+            mu = post.mean.detach().reshape(-1).cpu().numpy()      # regression prediction (target units)
             sd = post.variance.clamp_min(0).sqrt().detach().reshape(-1).cpu().numpy()
             self.oos_steps.append(int(step))
             self.oos_proba.append(pf)
             self.oos_sigma.append(sd)
+            self.oos_mu.append(mu)
         except Exception:
             pass
 
@@ -290,6 +306,11 @@ class RunDiagnostics:
             "steps": np.asarray(self.oos_steps),
             "n_scored": int(keep.sum()), "n_excluded": int((~keep).sum()),
         }
+        if self.oos_mu:                                   # regression prediction (post-init / final)
+            self.oos_eval["mu_post"] = self.oos_mu[0][keep]
+            self.oos_eval["mu_final"] = self.oos_mu[-1][keep]
+        if "target" in self.oos:                          # true regression target (regression only)
+            self.oos_eval["target"] = self.oos["target"][keep]
 
     def frame(self) -> pd.DataFrame:
         return pd.DataFrame(self.rows)
