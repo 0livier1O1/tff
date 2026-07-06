@@ -53,11 +53,14 @@ class SyntheticProblemConfig(ProblemConfig):
 @dataclass(kw_only=True)
 class RealProblemConfig(ProblemConfig):
     source: str                # "Images" | "Lightfield"
-    target_path: str           # canonical path inside data/
-    shape: list[int]           # cached for preview (post crop/downsample)
+    target_path: str           # canonical path inside data/ (Images: .npz; Lightfield: original/ PNG dir)
+    shape: list[int]           # the built target's shape
     dataset: str | None = None # lightfield subdir, if applicable
-    crop: list[int] | None = None   # lightfield spatial crop [h0,h1,w0,w1] (source px); None = full frame
-    downsample: int = 1        # lightfield spatial stride (1 = full resolution)
+    # Lightfield build knobs — the target is constructed from the raw PNGs at these:
+    crop: list[int] | None = None   # spatial crop [y0,y1,x0,x1] in original px; None = full view
+    n_ang: int = 9             # central n_ang×n_ang angular block of the view grid
+    out_h: int = 64            # output spatial height (mode size)
+    out_w: int = 64            # output spatial width  (mode size)
     kind: str = "real"
 
 

@@ -5,6 +5,14 @@ import torch
 from torch import Tensor
 
 
+# The per-step GP surrogate snapshots (``gp_states.pt``) are the bulk of a run's
+# on-disk size and back no webapp plot — the diagnostics read the self-contained
+# ``diagnostics.csv`` / OOS arrays. Off by default; flip to True to write them again
+# for the offline SUR reference-size sweep or deep GP debugging. Single switch, read
+# by both save sites (tnss/algo/bo/boss.py and the FTBOSS saver in app/algos/registry.py).
+SAVE_GP_STATES = False
+
+
 def atomic_write_json(path: Path | None, data: dict) -> None:
     """Atomically write `data` as JSON to `path` (tmp file + replace); no-op if
     `path` is None. A previously-written `started_at` is preserved when `data`

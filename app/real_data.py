@@ -15,8 +15,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image
 
 from scripts.utils import _distribute_bits
+
+# A lightfield source is the raw Stanford-style `original/` PNG folder — a G×G grid of
+# full-res views named `out_{row}_{col}_..._.png`. The tensor is built from these at
+# create time (crop each view, resize to out_h×out_w, keep the central n_ang×n_ang block),
+# so resolution/crop/angles are the knobs, not a pre-baked downsampled .npy.
+_LF_RE = re.compile(r"out_(\d+)_(\d+)_")
+_IMG_EXT = {".png", ".jpg", ".jpeg"}
 
 
 def image_shape(n_cores: int) -> list[int]:
@@ -27,38 +35,83 @@ def image_shape(n_cores: int) -> list[int]:
     return _distribute_bits(8, n_h) + _distribute_bits(8, n_cores - n_h)
 
 
-def lightfield_shape(target_path: Path | str) -> list[int]:
-    """The source lightfield's full array shape (H, W, C, U, V), from the filename hint
-    like `..._40x60x3x9x9.npy`, else the array header."""
-    p = Path(target_path)
-    m = re.search(r"(\d+(?:x\d+)+)\.npy$", p.name)
-    return [int(d) for d in m.group(1).split("x")] if m else [int(s) for s in np.load(p, mmap_mode="r").shape]
-
-
-def cropped_shape(base: list[int], crop: list[int] | None, downsample: int) -> list[int]:
-    """Apply a spatial crop [h0,h1,w0,w1] and stride to a lightfield's (H,W,...) shape."""
-    h, w = base[0], base[1]
-    h0, h1, w0, w1 = crop or [0, h, 0, w]
-    s = max(1, int(downsample or 1))
-    return [len(range(h0, h1, s)), len(range(w0, w1, s)), *base[2:]]
-
-
-def real_geometry(source: str, target_path: Path | str, n_cores: int | None,
-                  crop: list[int] | None = None, downsample: int = 1) -> tuple[int, int, list[int]]:
-    """(n_cores, max_rank, shape) for a real source. Images: caller-chosen n_cores,
-    max_rank 1, analytic power-of-2 shape. Lightfield: order/ranks from the .npy shape
-    after the (optional) spatial crop + downsample."""
-    if source == "Lightfield":
-        shape = cropped_shape(lightfield_shape(target_path), crop, downsample)
-        return len(shape), max(shape), shape
+def real_geometry(source: str, target_path: Path | str, n_cores: int | None) -> tuple[int, int, list[int]]:
+    """(n_cores, max_rank, shape) for an IMAGE source: caller-chosen n_cores, max_rank 1,
+    analytic power-of-2 shape. (Lightfields use lightfield_geometry — their geometry is
+    set by the chosen angular count + output resolution, not the source file.)"""
     n = int(n_cores or 8)
     return n, 1, image_shape(n)
 
 
+# ---------------------------------------------------------------------------
+# Lightfield: built from the raw original/ PNG grid
+# ---------------------------------------------------------------------------
+
+def _lf_index_map(orig_dir: Path) -> dict[tuple[int, int], Path]:
+    """(row, col) -> PNG path for every parseable view in a lightfield original/ dir."""
+    out: dict[tuple[int, int], Path] = {}
+    for f in sorted(orig_dir.iterdir()):
+        if f.suffix.lower() not in _IMG_EXT:
+            continue
+        m = _LF_RE.match(f.name)
+        if m:
+            out[(int(m.group(1)), int(m.group(2)))] = f
+    return out
+
+
+def lightfield_source_info(orig_dir: Path | str) -> tuple[int, int, int]:
+    """(grid, orig_h, orig_w) for a lightfield original/ dir: the angular grid size and
+    each raw view's native pixel resolution."""
+    orig_dir = Path(orig_dir)
+    idx = _lf_index_map(orig_dir)
+    if not idx:
+        raise FileNotFoundError(f"No lightfield PNGs in {orig_dir}")
+    grid = max(max(r, c) for r, c in idx) + 1
+    with Image.open(next(iter(idx.values()))) as im:
+        ow, oh = im.size   # PIL size is (width, height)
+    return grid, oh, ow
+
+
+def lightfield_geometry(n_ang: int, out_h: int, out_w: int) -> tuple[int, int, list[int]]:
+    """(n_cores, max_rank, shape) for a lightfield built at the chosen angular count +
+    output spatial resolution: shape = [out_h, out_w, 3, n_ang, n_ang]."""
+    shape = [int(out_h), int(out_w), 3, int(n_ang), int(n_ang)]
+    return len(shape), max(shape), shape
+
+
+def build_lightfield(orig_dir: Path | str, crop: list[int] | None, n_ang: int,
+                     out_h: int, out_w: int) -> np.ndarray:
+    """Construct the order-5 lightfield target from the raw PNGs: the central n_ang×n_ang
+    angular block, each view cropped to `crop` [y0,y1,x0,x1] (original px; None = full)
+    then resized to out_h×out_w. Returns float32 in [0,1], shape (out_h,out_w,3,n_ang,n_ang).
+    A missing view is left as zeros (the grid occasionally drops one)."""
+    orig_dir = Path(orig_dir)
+    idx = _lf_index_map(orig_dir)
+    if not idx:
+        raise FileNotFoundError(f"No lightfield PNGs in {orig_dir}")
+    grid = max(max(r, c) for r, c in idx) + 1
+    n_ang = max(1, min(int(n_ang), grid))
+    start = (grid - n_ang) // 2
+    X = np.zeros((int(out_h), int(out_w), 3, n_ang, n_ang), dtype=np.float32)
+    for i, row in enumerate(range(start, start + n_ang)):
+        for j, col in enumerate(range(start, start + n_ang)):
+            path = idx.get((row, col))
+            if path is None:
+                continue
+            with Image.open(path) as im:
+                im = im.convert("RGB")
+                if crop:
+                    y0, y1, x0, x1 = crop
+                    im = im.crop((x0, y0, x1, y1))   # PIL box = (left, upper, right, lower)
+                im = im.resize((int(out_w), int(out_h)), Image.LANCZOS)
+            X[:, :, :, i, j] = np.asarray(im, dtype=np.float32) / 255.0
+    return X
+
+
 def list_sources(data_dir: Path | str) -> list[dict[str, Any]]:
     """Browsable real-data sources under data_dir: natural-image .npz (excluding the
-    *_recon previews) and lightfield .npy. Each entry: {source, label, path (absolute
-    Path), dataset}."""
+    *_recon previews), and lightfield datasets (their original/ PNG folder). Each entry:
+    {source, label, path (absolute), dataset, grid, resolution}."""
     data = Path(data_dir)
     out: list[dict[str, Any]] = []
     img_dir = data / "natural_images"
@@ -66,11 +119,18 @@ def list_sources(data_dir: Path | str) -> list[dict[str, Any]]:
         for f in sorted(img_dir.glob("*.npz")):
             if f.stem.endswith("_recon"):
                 continue
-            out.append({"source": "Images", "label": f.name, "path": f, "dataset": None, "shape": None})
+            out.append({"source": "Images", "label": f.name, "path": f, "dataset": None,
+                        "grid": None, "resolution": None})
     lf_dir = data / "lightfield"
     if lf_dir.exists():
         for ds in sorted(d for d in lf_dir.iterdir() if d.is_dir()):
-            for f in sorted(ds.glob("*.npy")):
-                out.append({"source": "Lightfield", "label": f"{ds.name} / {f.name}",
-                            "path": f, "dataset": ds.name, "shape": lightfield_shape(f)})
+            orig = ds / "original"
+            if not orig.exists():
+                continue
+            try:
+                grid, oh, ow = lightfield_source_info(orig)
+            except Exception:
+                continue
+            out.append({"source": "Lightfield", "label": ds.name, "path": orig, "dataset": ds.name,
+                        "grid": grid, "resolution": [oh, ow]})
     return out

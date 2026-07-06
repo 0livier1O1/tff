@@ -159,32 +159,26 @@ def _materialize_synthetic(problem: SyntheticProblemConfig, seed: int, sdir: Pat
 
 
 def _materialize_real(problem: RealProblemConfig, seed: int, sdir: Path) -> None:
-    """Load the canonical source file, retensorize images if needed, then
-    save a uniform target_tensor.npz (key='data') + a synthesized init adj."""
-    from scripts.utils import (
-        load_target_tensor, reconstruct_image, retensorize_image,
-        random_adj_matrix, save_tensor,
-    )
+    """Build the real target tensor and save a uniform target_tensor.npz (key='data')
+    + a synthesized init adjacency. Images: load the .npz + retensorize to n_cores.
+    Lightfields: build order-5 from the raw PNG grid at the chosen crop / angular count
+    / output resolution (the .npy is not used)."""
+    from scripts.utils import random_adj_matrix, save_tensor
+    from app import real_data
     import cupy as cp
 
-    _, target_cp = load_target_tensor(problem.target_path, dtype="float32")
-
-    # Image sources are re-tensorized to the chosen n_cores: collapse to the 256x256
-    # image then re-factor (works whether the stored source is order-8 or raw 2D).
-    if problem.source == "Images" and problem.n_cores != target_cp.ndim:
-        img_2d = reconstruct_image(target_cp)
-        target_cp = cp.array(retensorize_image(img_2d, problem.n_cores)).astype(cp.float32)
-
-    # Lightfields keep their native order but honour the chosen spatial crop + stride,
-    # so the compressed target is exactly the region/resolution picked in the UI.
     if problem.source == "Lightfield":
-        crop = getattr(problem, "crop", None)
-        if crop:
-            h0, h1, w0, w1 = crop
-            target_cp = target_cp[h0:h1, w0:w1]
-        step = getattr(problem, "downsample", 1) or 1
-        if step > 1:
-            target_cp = target_cp[::step, ::step]
+        # Cropped / resized / angle-selected directly from the original PNGs.
+        X = real_data.build_lightfield(
+            problem.target_path, problem.crop, problem.n_ang, problem.out_h, problem.out_w)
+        target_cp = cp.asarray(X)
+    else:
+        from scripts.utils import load_target_tensor, reconstruct_image, retensorize_image
+        _, target_cp = load_target_tensor(problem.target_path, dtype="float32")
+        # Re-tensorize the 256x256 image to the chosen n_cores.
+        if problem.n_cores != target_cp.ndim:
+            img_2d = reconstruct_image(target_cp)
+            target_cp = cp.array(retensorize_image(img_2d, problem.n_cores)).astype(cp.float32)
 
     save_tensor(sdir / "target_tensor.npz", target_cp)
 

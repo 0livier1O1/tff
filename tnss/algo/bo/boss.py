@@ -33,6 +33,7 @@ from torch.quasirandom import SobolEngine
 from botorch.acquisition import AcquisitionFunction
 from botorch.optim import optimize_acqf, optimize_acqf_discrete_local_search
 
+from tnss.utils import SAVE_GP_STATES
 from tnss.algo.bo.acquisitions import Acquisition, SearchState
 from tnss.algo.bo.acquisitions.sur_sensitivity import make_pool, sur_signals
 from tnss.algo.bo.diagnostics import RunDiagnostics
@@ -570,7 +571,8 @@ class BOSS:
 
         - ``traces.csv``        one row per evaluated structure (metrics + timings)
         - ``boss_results.npz``  raw arrays X_std, Y_rse, Y_cr, Y_objective, Y_feasible
-        - ``gp_states.pt``      the per-BO-step surrogate snapshots
+        - ``gp_states.pt``      the per-BO-step surrogate snapshots (only when
+                                ``tnss.utils.SAVE_GP_STATES`` is on; off by default)
         - ``decomp_traces.json`` per-structure decomposition loss curves
         - ``diagnostics.csv``   per-step out-of-sample surrogate/acquisition diagnostics
         - ``oos_metrics.csv`` / ``oos_eval.npz``  fixed-OOS per-refit feasibility scores (when an OOS set was set)
@@ -594,7 +596,10 @@ class BOSS:
             Y_feasible=self._feasible().double().reshape(-1, 1).numpy(),
         )
 
-        torch.save(self.gp_states, out_dir / "gp_states.pt")
+        # GP snapshots are large and back no webapp plot (the diagnostics read the
+        # self-contained diagnostics.csv); off by default — see tnss.utils.SAVE_GP_STATES.
+        if SAVE_GP_STATES:
+            torch.save(self.gp_states, out_dir / "gp_states.pt")
         (out_dir / "decomp_traces.json").write_text(json.dumps(self.decomp_traces))
 
         # Self-contained surrogate/acquisition diagnostics (tiny). Guarded so a

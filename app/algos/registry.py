@@ -17,6 +17,7 @@ from typing import Callable
 import numpy as np
 import torch
 
+from tnss.utils import SAVE_GP_STATES
 from tnss.algo.ftboss.ftboss import FTBOSS
 from tnss.algo.tnale import TnALE
 from tnss.algo.random_search import RandomSearch
@@ -124,7 +125,8 @@ def _build_random(acfg, adj_np, target_np, seed):
 def _save_ftboss(algo, out_dir: Path, acfg):
     """FTBOSS writes a per-structure basket summary (variable-length curves), not the
     per-eval (X_std, Y_*) tensors of the single-fidelity BO families, plus the
-    per-refit freeze-thaw GP snapshots (``gp_states.pt``) so the offline diagnostics can
+    per-refit freeze-thaw GP snapshots (``gp_states.pt``, only when
+    ``tnss.utils.SAVE_GP_STATES`` is on) so the offline diagnostics can
     reconstruct each surrogate and query the asymptote extrapolation with no refit."""
     r = algo.get_results()
     x_std = r["x_std"]
@@ -138,7 +140,10 @@ def _save_ftboss(algo, out_dir: Path, acfg):
         epochs_done=np.array(r["epochs_done"], dtype=int),
         curves=np.array([np.asarray(c, dtype=float) for c in r["curves"]], dtype=object),
     )
-    torch.save(algo.gp_states, out_dir / "gp_states.pt")
+    # Freeze-thaw GP snapshots are large and only feed the offline curve/asymptote
+    # diagnostics; off by default — see tnss.utils.SAVE_GP_STATES.
+    if SAVE_GP_STATES:
+        torch.save(algo.gp_states, out_dir / "gp_states.pt")
 
 
 def _save_random(algo, out_dir: Path, acfg):
