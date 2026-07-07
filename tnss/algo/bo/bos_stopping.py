@@ -114,12 +114,8 @@ class BOSConfig:
     converge_rel_tol: float = 0.01
     converge_patience: int = 20
     # Curve-model (forward simulator), defaulted to the winning config from the curve-model
-    # study. curve_kernel: 'picheny' (Picheny-Ginsbourger asymptote + warped-time, the best),
-    # 'expdecay' (Swersky, simpler few-points-worse fallback), or 'joint' (Stage 5: sample
-    # completions from the shared censored space-time surrogate, conditioned on this
-    # structure's prefix + cross-structure neighbours — needs surrogate='censored'; falls
-    # back to per-run 'picheny' during the initial design or for other surrogates).
-    # curve_input_warp: compose a
+    # study. curve_kernel: 'picheny' (Picheny-Ginsbourger asymptote + warped-time, the best)
+    # or 'expdecay' (Swersky, simpler few-points-worse fallback). curve_input_warp: compose a
     # learned Kumaraswamy input warp on the epoch axis (off by default — it is redundant for
     # picheny and hurts exp-decay). log_rse: fit / decide on log(RSE) — RSE spans orders of
     # magnitude, so log separates feasible (~1e-6) from infeasible (~1) far more (the dominant choice).
@@ -255,10 +251,7 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     # *post-warm-up* epochs only, and feasibility is decided by the endpoint ell(N). The
     # kernel ('picheny' / 'expdecay', optionally input-warped) and value transform (raw /
     # log) come from cfg.
-    # Curve model (a CurveCompleter): the shared censored surrogate when passed in (Stage 5,
-    # curve_kernel='joint'), else a throwaway per-run GP fit to this prefix. Both expose
-    # fit/sample_paths, so this is uniform; the joint model's fit() only stores the prefix
-    # (its cross-structure fit was paid at the BO step), so its gp_fit_s is ~0.
+    # Curve model (a CurveCompleter): a throwaway per-run GP fit to this prefix.
     _t = time.perf_counter()
     if curve_model is None:
         kernel = cfg.curve_kernel if cfg.curve_kernel in ("picheny", "expdecay") else "picheny"

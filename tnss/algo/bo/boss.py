@@ -153,7 +153,7 @@ class BOSS:
             raise ValueError(
                 f"BOS feasibility stopping currently supports only decomp_method='agd' "
                 f"(got {self.decomp_method!r}); the curve model assumes the monotone AGD RSE curve.")
-        self._fidelity = bos is not None and getattr(surrogate, "kind", None) in ("clas", "reg", "cens")
+        self._fidelity = bos is not None and getattr(surrogate, "kind", None) in ("clas", "reg")
         self._last_bos = None
         # Two-tier history: the verdict rows above drive best()/incumbents/artifacts;
         # these fidelity-augmented rows ([x, n/N], rse@n, cr, z@n) train the surrogate.
@@ -190,12 +190,7 @@ class BOSS:
             t0 = time.perf_counter()
             # In fidelity mode the surrogate lives in [0,1]^(D+1); the acquisitions
             # search structure space at full fidelity n/N = 1 (paper: argmax_x acqf([x,N])).
-            # The censored surrogate returns its own asymptote-margin model (already read at
-            # t -> inf in structure space), so it is used directly, not fidelity-pinned.
-            if getattr(self.surrogate, "kind", None) == "cens":
-                acq_model = model
-            else:
-                acq_model = FidelityPinnedModel(model) if self._fidelity else model
+            acq_model = FidelityPinnedModel(model) if self._fidelity else model
             state = self._search_state()
             acquisition = self.acquisition.build(acq_model, state)
             candidate = self._maximize_acquisition(acquisition)
@@ -491,7 +486,7 @@ class BOSS:
             # single curve, so restarts would corrupt it -> n_runs = 1)
             stopper = BOSStopper(self.bos, rho=self.threshold, budget=self.decomp_epochs,
                                  sigma_fn=self._c2_sigma_fn(x, model),
-                                 curve_model=self._curve_model(x))
+                                 curve_model=None)   # BOS uses its own per-run curve GP
             n_runs = 1
         rse, losses = reconstruction_error(
             self.target, adjacency, method=self.decomp_method,
@@ -501,17 +496,6 @@ class BOSS:
             callback=stopper)
         self._last_bos = stopper.result() if stopper is not None else None
         return rse, losses
-
-    def _curve_model(self, x: Tensor):
-        """The BOS curve model for structure ``x``: the shared censored surrogate (Stage 5)
-        when ``bos.curve_kernel == 'joint'`` and it is the fitted censored surrogate, else
-        ``None`` so ``build_decision_table`` builds the per-run curve GP (also the fallback
-        during the initial design, before any surrogate fit)."""
-        if (self.bos is not None and self.bos.curve_kernel == "joint"
-                and getattr(self.surrogate, "kind", None) == "cens"
-                and getattr(self.surrogate, "model", None) is not None):
-            return self.surrogate.curve_completer(x.detach().reshape(-1), self.decomp_epochs)
-        return None
 
     def _c2_sigma_fn(self, x: Tensor, model):
         """Build ``sigma([x, fid])`` from the fidelity surrogate for BOS C2 — the

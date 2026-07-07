@@ -302,7 +302,7 @@ def resolve_adj_spec(adj_spec: list[list[str]], r_min: int, r_max: int, seed: in
 def load_problem_artifacts(target_path: Union[str, Path], adj_path: Union[str, Path]):
     """Load a materialized (target, adjacency) pair for a CLI run.
 
-    Both files are produced by `app.problem_io.ensure_seed_materialized`:
+    Both files are produced by `webapp.api.lib.problem_io.ensure_materialized`:
         target_tensor.npz    key="data"   → np.ndarray (any ndim, float32)
         adj_matrix.npy                    → np.ndarray (N×N, int32)
 

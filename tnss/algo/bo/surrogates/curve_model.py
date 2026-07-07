@@ -2,15 +2,10 @@
 curve_model.py — the BOS curve-completion interface.
 
 BOS needs exactly one thing from a curve model: given a single decomposition's
-observed prefix, sample and predict its tail out to the epoch budget. Two very
-different models provide it, and this ABC lets ``build_decision_table`` use them
-interchangeably (selected by ``BOSConfig.curve_kernel``):
-
-- :class:`~tnss.algo.bo.surrogates.learning_curve_gp.LearningCurveGP` — a throwaway
-  per-run GP fit to the single prefix ('picheny' / 'expdecay').
-- :class:`~tnss.algo.bo.surrogates.censored_curve_gp.JointCurveCompleter` — adapts the
-  shared censored space-time surrogate, conditioning the joint cross-structure fit on
-  the prefix ('joint', Stage 5).
+observed prefix, sample and predict its tail out to the epoch budget.
+:class:`~tnss.algo.bo.surrogates.learning_curve_gp.LearningCurveGP` — a throwaway
+per-run GP fit to the single prefix ('picheny' / 'expdecay') — provides it, and this
+ABC lets ``build_decision_table`` swap implementations behind ``BOSConfig.curve_kernel``.
 """
 from __future__ import annotations
 

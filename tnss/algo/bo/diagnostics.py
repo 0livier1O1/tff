@@ -301,6 +301,7 @@ class RunDiagnostics:
             "y": yk, "cr": self.oos["cr"][keep], "rse": self.oos["rse"][keep],
             "rse_all": self.oos["rse"],
             "xnorm": np.linalg.norm(oos_ranks.astype(float), axis=1)[keep],
+            "l0": (oos_ranks.astype(int) > 1).sum(axis=1)[keep],   # active bonds (rank>1) — the rank 0-norm
             "p_post": self.oos_proba[0][keep], "p_final": self.oos_proba[-1][keep],
             "sigma_final": self.oos_sigma[-1][keep],
             "steps": np.asarray(self.oos_steps),
