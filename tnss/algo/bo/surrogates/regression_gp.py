@@ -2,8 +2,9 @@
 regression_gp.py — exact-GP regression surrogate (BoTorch `SingleTaskGP`).
 
 Models a scalar regression target over the normalised rank vector with a
-Matérn-2.5 ARD kernel, a `Standardize` outcome transform, and an exact
-marginal-likelihood fit. The target is supplied
+Matérn-2.5 ARD kernel, a `Standardize` outcome transform (optionally preceded by
+a `Log` when `log_transform` is on — the objective spans orders of magnitude), and
+an exact marginal-likelihood fit. The target is supplied
 by `target_fn(rse, cr, feasible) -> Y`, so the same surrogate serves the naive
 objective h = CR + lambda*RSE (paired with EI / LCB) and the RSE margin used by
 the regression-mode contour acquisitions (boundary at the posterior zero).
@@ -23,7 +24,7 @@ from torch import Tensor
 import gpytorch.settings as gpsettings
 from botorch.fit import fit_gpytorch_mll
 from botorch.models import SingleTaskGP
-from botorch.models.transforms import Standardize
+from botorch.models.transforms import ChainedOutcomeTransform, Log, Standardize
 from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
@@ -56,6 +57,7 @@ class RegressionGP:
         mean: str = "constant",
         log_size_prior_sigma: float | None = None,
         input_warp: bool = False,
+        log_transform: bool = False,
         round_inputs: bool = False,
         refit_every: int = 5,
         fit_maxiter: int = 200,
@@ -75,6 +77,11 @@ class RegressionGP:
             learned slope (None = off); shrinks the trend so it can't over-steepen.
         input_warp : if True, wrap the kernel in a learned per-dimension
             Kumaraswamy-CDF input warp (lets a stationary kernel bend).
+        log_transform : if True, model log(Y) instead of Y (a `Log` outcome
+            transform applied before `Standardize`), so the GP sees the objective
+            on a log scale where its orders-of-magnitude range is compressed.
+            Assumes a strictly positive target — true of the naive objective
+            CR + lambda*RSE (CR >= 1), so it composes with `input_warp` freely.
         round_inputs : if True, snap kernel inputs to the integer rank lattice
             (Garrido-Merchán & Hernández-Lobato 2020 integer transform).
         refit_every : re-optimise the GP hyperparameters every N fit() calls (and
@@ -84,6 +91,7 @@ class RegressionGP:
         assert nu in (0.5, 1.5, 2.5), f"Matérn nu must be 0.5, 1.5, or 2.5, got {nu!r}"
         self.space = space
         self.target_fn = target_fn
+        self.log_transform = log_transform
         self.refit_every = refit_every
         self.fit_maxiter = fit_maxiter
 
@@ -110,11 +118,19 @@ class RegressionGP:
         return self._condition(X, Y)         # frozen-hyper conditioning on all data
 
     # --------------------------------------------------------------- internals
+    def _outcome_transform(self):
+        """The outcome transform: `Standardize`, optionally preceded by `Log` so the
+        GP models log(Y) — the strictly-positive objective on a log scale."""
+        std = Standardize(m=1)
+        if self.log_transform:
+            return ChainedOutcomeTransform(log=Log(), standardize=std)
+        return std
+
     def _fit(self, X: Tensor, Y: Tensor) -> SingleTaskGP:
         """Full marginal-likelihood fit on deduplicated data; checkpoints the
         hypers and falls back to the last good ones if the fit fails."""
         Xd, Yd = self._dedup(X, Y)
-        gp = SingleTaskGP(Xd, Yd, outcome_transform=Standardize(m=1),
+        gp = SingleTaskGP(Xd, Yd, outcome_transform=self._outcome_transform(),
                           mean_module=self._mean(Xd.shape[-1]), covar_module=self._kernel(Xd.shape[-1]))
         mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
         with warnings.catch_warnings():
@@ -133,9 +149,9 @@ class RegressionGP:
 
     def _condition(self, X: Tensor, Y: Tensor) -> SingleTaskGP:
         """Exact GP on all of (X, Y) with the kernel/likelihood hypers frozen at
-        their last fit — no MLL optimisation. The outcome Standardize is
+        their last fit — no MLL optimisation. The outcome transform is
         recomputed from the current Y (a data normalisation, not a hyper)."""
-        gp = SingleTaskGP(X, Y, outcome_transform=Standardize(m=1),
+        gp = SingleTaskGP(X, Y, outcome_transform=self._outcome_transform(),
                           mean_module=self._mean(X.shape[-1]), covar_module=self._kernel(X.shape[-1]))
         if self._state is not None:
             dst = gp.state_dict()
