@@ -1,60 +1,84 @@
 """
-censored_likelihood.py — one-sided (lower-censored) Gaussian likelihood, closed form.
+censored_likelihood.py — one-sided (lower-censored) Gaussian likelihood, two objectives.
 
-A gpytorch :class:`Likelihood` whose ``expected_log_prob`` is the paper's analytic
-censored-Gaussian ELBO data term (Karlova et al. 2024, Eq. (39)-(41)), specialised to a
-single *lower* censoring threshold — the upper bound ``u -> +inf`` (which drops the entire
-upper-boundary term and collapses the observation-window CDF difference to one ``Phi``). This
-is the exact, quadrature-free expected log-likelihood ``E_{q(f)}[log p(y | f)]`` under the
-variational marginal ``q(f) = N(f_hat, a^2)``.
+A gpytorch :class:`Likelihood` for the censored-regression surrogate, with a selectable
+``objective`` for the ELBO data term ``E_{q(f)}[log p(y | f)]`` under the variational marginal
+``q(f) = N(m, a^2)``:
 
-Model (our orientation): the latent ``f(x)`` is the (log-)RSE and the feasible region is
-``f <= rho``. We keep the loss *magnitude* where it is informative — above ``rho`` a plain
-Gaussian factor ``N(y | f, sigma^2)`` — and only the *sign* below it: an observation ``y <= rho``
-is left-censored, recorded at the boundary (``y := rho``) with factor ``Phi((rho - f)/sigma)``.
-Everything the term needs is ``(y, rho, sigma)`` plus the posterior moments — no per-point
-metadata, no Gauss-Hermite quadrature.
+- ``"analytic"`` — Karlova et al. (2024)'s *mixed-measure* cross-entropy (Eq. (39)-(41),
+  specialised to a single lower threshold ``u -> inf``). Quadrature-free, but a softer,
+  feasibility-oriented objective: it down-weights the magnitude fit by the posterior mass above
+  ``rho`` and is NOT the literal expected log-likelihood.
+- ``"gh"`` — the literal ELBO data term (the exact Jensen bound with the true censored
+  likelihood), regime-split: a plain Gaussian for uncensored observations (``y > rho``) and a
+  Gauss-Hermite estimate of ``E_q[log Phi((rho - f)/sigma)]`` for censored ones (``y <= rho``).
+  Regression-faithful; the two objectives differ by up to a few nats near the boundary.
 
-(The interval-censored *band* above ``rho`` and the Tobit->classifier interpolation live in
-the hybrid variant, :mod:`tnss.algo.bo.surrogates.banded_censored_gp`, which subclasses this
-likelihood; the base here is deliberately the pure one-sided case.)
+Model (our orientation): the latent ``f(x)`` is the (log-)RSE, feasible region ``f <= rho``.
+Above ``rho`` a Gaussian factor keeps the magnitude; ``y <= rho`` is left-censored, recorded at
+the boundary (``y := rho``) with factor ``Phi((rho - f)/sigma)``.
+
+(The interval-censored *band* above ``rho`` — the hybrid regression/classification variant — lives
+in :mod:`tnss.algo.bo.surrogates.banded_censored_gp`, which subclasses this likelihood.)
 """
 from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 from torch import Tensor
 
-from gpytorch.constraints import GreaterThan
+from gpytorch.constraints import GreaterThan, Interval
 from gpytorch.distributions import base_distributions
 from gpytorch.likelihoods import Likelihood
 
 _LOG_SQRT_2PI = 0.5 * math.log(2.0 * math.pi)      # log sqrt(2 pi)
+_LOG_2PI = math.log(2.0 * math.pi)                 # log(2 pi)
 _INV_SQRT_2PI = 1.0 / math.sqrt(2.0 * math.pi)     # standard-normal density normaliser
+_INV_SQRT_PI = 1.0 / math.sqrt(math.pi)            # Gauss-Hermite expectation normaliser
+
+OBJECTIVES = ("analytic", "gh")
 
 
 class CensoredGaussianLikelihood(Likelihood):
-    r"""Left-censored (one-sided Tobit) Gaussian likelihood, closed-form ELBO term.
+    r"""Left-censored (one-sided Tobit) Gaussian likelihood — see module docstring.
 
     Parameters
     ----------
     threshold : censoring level ``rho`` in the modelled (log-)value space; feasible ``= f <= rho``.
+    objective : ``"analytic"`` (mixed-measure cross-entropy) or ``"gh"`` (literal ELBO via
+        Gauss-Hermite). The two agree only when the posterior is confidently feasible.
     noise : initial observation-noise *variance* ``sigma^2`` (modelled-value units), learned.
-    noise_floor : lower bound on the learned variance.
+    noise_floor : lower bound on the learned variance (used only when ``noise_cap`` is None).
+    noise_cap : if set, bound the learned variance to ``[0, noise_cap]`` instead of the open floor.
+    n_quad : Gauss-Hermite nodes (``objective="gh"`` only).
     learn_noise : if False, hold ``sigma^2`` fixed at ``noise``.
     """
 
-    def __init__(self, *, threshold: float, noise: float = 0.01,
-                 noise_floor: float = 1e-4, learn_noise: bool = True):
+    def __init__(self, *, threshold: float, objective: str = "analytic", noise: float = 0.01,
+                 noise_floor: float = 1e-4, noise_cap: float | None = None,
+                 n_quad: int = 20, learn_noise: bool = True):
         super().__init__()
+        if objective not in OBJECTIVES:
+            raise ValueError(f"objective must be one of {OBJECTIVES}, got {objective!r}")
+        self.objective = objective
         self.register_buffer("threshold", torch.as_tensor(float(threshold), dtype=torch.double))
         self.register_parameter("raw_noise", torch.nn.Parameter(torch.zeros((), dtype=torch.double)))
-        self.register_constraint("raw_noise", GreaterThan(noise_floor))
+        if noise_cap is not None:
+            cap = float(noise_cap)
+            self.register_constraint("raw_noise", Interval(0.0, cap))
+            noise = min(max(float(noise), cap * 1e-3), cap * (1.0 - 1e-3))
+        else:
+            self.register_constraint("raw_noise", GreaterThan(noise_floor))
         self.initialize(raw_noise=self.raw_noise_constraint.inverse_transform(
             torch.as_tensor(float(noise), dtype=torch.double)))
         if not learn_noise:
             self.raw_noise.requires_grad_(False)
+        if objective == "gh":
+            nodes, weights = np.polynomial.hermite.hermgauss(int(n_quad))
+            self.register_buffer("gh_nodes", torch.as_tensor(nodes, dtype=torch.double))
+            self.register_buffer("gh_weights", torch.as_tensor(weights, dtype=torch.double))
 
     @property
     def noise(self) -> Tensor:
@@ -63,42 +87,53 @@ class CensoredGaussianLikelihood(Likelihood):
 
     # ------------------------------------------------------------------ ELBO term
     def expected_log_prob(self, observations: Tensor, function_dist, *args, **kwargs) -> Tensor:
-        r"""Closed-form per-point ``E_{q(f)}[log p(y | f)]`` for the one-sided censored model.
+        if self.objective == "gh":
+            return self._elp_gh(observations, function_dist)
+        return self._elp_analytic(observations, function_dist)
 
-        With ``rho`` the threshold, ``sigma^2`` the noise, and the latent marginal
-        ``q(f) = N(f_hat, a^2)`` at the observed points, the paper's ELBO data term
-        (Eq. (39)-(41), ``u -> inf``) is the sum of
-
-        - a Gaussian cross-entropy weighted by the posterior mass *above* ``rho``,
-          ``-[log(sqrt(2 pi) sigma) + ((y - f_hat)^2 + a^2)/(2 sigma^2)] * (1 - Phi((rho - f_hat)/a))``,
-        - a single lower-boundary correction at ``rho``,
-          ``[log Phi((rho - y)/sigma) - (rho + f_hat - 2 y) a /(2 sigma^2)] * N((rho - f_hat)/a)``,
-
-        where censored observations enter recorded at the boundary (``y := max(y, rho)``).
-        """
-        rho = self.threshold
-        var = self.noise                              # sigma^2
+    # --- analytic (mixed-measure cross-entropy) -----------------------------------
+    def _onesided_analytic(self, m: Tensor, a: Tensor, mu: Tensor, thr) -> Tensor:
+        r"""Paper one-sided closed form at threshold ``thr``: the Gaussian cross-entropy over the
+        window ``(thr, inf)`` (weighted by the posterior mass above ``thr``) plus the lower-boundary
+        atom at ``thr``. ``mu`` is the censored-normal's underlying mean (the recorded observation)."""
+        var = self.noise
         sigma = var.sqrt()
-        m = function_dist.mean                        # f_hat (posterior mean)
-        a = function_dist.variance.clamp_min(1e-12).sqrt()   # a (posterior std)
+        z = (thr - m) / a
+        Phi_z = torch.special.ndtr(z)
+        phi_z = _INV_SQRT_2PI * (-0.5 * z.square()).exp()
+        gauss_ce = _LOG_SQRT_2PI + 0.5 * var.log() + ((mu - m).square() + a.square()) / (2.0 * var)
+        window = -gauss_ce * (1.0 - Phi_z) - (thr + m - 2.0 * mu) * a / (2.0 * var) * phi_z
+        atom = phi_z * torch.special.log_ndtr((thr - mu) / sigma)
+        return window + atom
 
-        y = torch.maximum(observations, rho)          # censored obs recorded at the boundary
+    def _elp_analytic(self, observations: Tensor, function_dist) -> Tensor:
+        m = function_dist.mean
+        a = function_dist.variance.clamp_min(1e-12).sqrt()
+        rho = self.threshold
+        mu = torch.maximum(observations, rho)       # censored obs recorded at the boundary
+        return self._onesided_analytic(m, a, mu, rho)
 
-        za = (rho - m) / a                            # (rho - f_hat)/a
-        Phi_a = torch.special.ndtr(za)                # posterior mass below rho
-        phi_a = _INV_SQRT_2PI * (-0.5 * za.square()).exp()   # N((rho - f_hat)/a)
+    # --- gh (literal ELBO) --------------------------------------------------------
+    def _gh_samples(self, m: Tensor, a: Tensor) -> Tensor:
+        """Gauss-Hermite samples of ``f ~ N(m, a^2)``: ``f_r = m + sqrt(2) a z_r``."""
+        return m.unsqueeze(-1) + math.sqrt(2.0) * a.unsqueeze(-1) * self.gh_nodes
 
-        # (39), u -> inf: Gaussian cross-entropy weighted by the mass above rho.
-        gauss_ce = _LOG_SQRT_2PI + 0.5 * var.log() + ((y - m).square() + a.square()) / (2.0 * var)
-        term_gauss = -gauss_ce * (1.0 - Phi_a)
-
-        # (41): lower-boundary contribution at rho.
-        log_Phi_ly = torch.special.log_ndtr((rho - y) / sigma)   # log Phi((rho - y)/sigma)
-        term_bound = (log_Phi_ly - (rho + m - 2.0 * y) * a / (2.0 * var)) * phi_a
-
-        return term_gauss + term_bound
+    def _elp_gh(self, observations: Tensor, function_dist) -> Tensor:
+        """Literal ``E_q[log p(y|f)]``: a plain Gaussian for ``y > rho`` (closed form) and a
+        Gauss-Hermite estimate of ``E_q[log Phi((rho - f)/sigma)]`` for ``y <= rho``."""
+        y = observations
+        m = function_dist.mean
+        var_q = function_dist.variance
+        a = var_q.clamp_min(1e-12).sqrt()
+        var = self.noise
+        sigma = var.sqrt()
+        rho = self.threshold
+        gauss = -0.5 * _LOG_2PI - 0.5 * var.log() - ((y - m).square() + var_q) / (2.0 * var)
+        fs = self._gh_samples(m, a)
+        left = (self.gh_weights * torch.special.log_ndtr((rho - fs) / sigma)).sum(-1) * _INV_SQRT_PI
+        return torch.where(y > rho, gauss, left)
 
     def forward(self, function_samples: Tensor, *args, **kwargs):
-        """Observation distribution given latent samples (base API / sampling only; the
-        ELBO uses :meth:`expected_log_prob`)."""
+        """Observation distribution given latent samples (base API / sampling only; the ELBO uses
+        :meth:`expected_log_prob`)."""
         return base_distributions.Normal(function_samples, self.noise.sqrt())

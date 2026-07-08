@@ -113,6 +113,8 @@ class CensoredGP:
     ----------
     space : the SearchSpace (D, N, max_rank, mode sizes for the mean/kernel).
     threshold : feasibility threshold rho in raw RSE units; feasible iff RSE <= rho.
+    objective : ELBO data term — 'analytic' (mixed-measure cross-entropy) or 'gh' (literal
+        expected log-likelihood via Gauss-Hermite; regression-faithful). See the likelihood.
     kernel : plug-in ARD kernel — 'matern'/'matern52'/'matern32'/'rbf'.
     mean : latent prior mean — 'constant'/'linear'/'log_size'.
     log_size_prior_sigma : 'log_size' only — optional N(0, sigma) prior on the slope.
@@ -122,6 +124,9 @@ class CensoredGP:
         threshold moves into that space.
     log_floor : clamp applied before the log transform.
     noise : initial observation-noise *variance* (modelled-value units), learned.
+    noise_cap : if set, bound the learned noise variance to ``[0, noise_cap]`` (a ceiling on
+        ``sigma^2``); None = the open lower floor only. Guards against the censored ELBO
+        inflating the noise as the acquisition concentrates the data.
     full_epochs : max epochs for the converged init fit.
     refine_epochs : max epochs per warm-started refresh.
     lr, tol, patience : Adam LR and ELBO early-stop (stop when the ELBO improves by
@@ -137,6 +142,7 @@ class CensoredGP:
         space: SearchSpace,
         *,
         threshold: float,
+        objective: str = "analytic",
         kernel: str = "matern",
         mean: str = "constant",
         log_size_prior_sigma: float | None = None,
@@ -146,6 +152,8 @@ class CensoredGP:
         log_rse: bool = True,
         log_floor: float = 1e-8,
         noise: float = 0.01,
+        noise_cap: float | None = None,
+        n_quad: int = 20,
         full_epochs: int = 400,
         refine_epochs: int = 60,
         lr: float = 0.1,
@@ -157,6 +165,8 @@ class CensoredGP:
         if var_strategy not in STRATEGIES:
             raise ValueError(f"var_strategy must be one of {list(STRATEGIES)}")
         self.space = space
+        self.objective = objective
+        self.n_quad = int(n_quad)
         self.kernel = kernel
         self.mean = mean
         self.log_size_prior_sigma = log_size_prior_sigma
@@ -166,6 +176,7 @@ class CensoredGP:
         self.log_rse = bool(log_rse)
         self.log_floor = float(log_floor)
         self.noise0 = float(noise)
+        self.noise_cap = None if noise_cap is None else float(noise_cap)
         self.full_epochs = full_epochs
         self.refine_epochs = refine_epochs
         self.lr, self.tol, self.patience = lr, tol, patience
@@ -224,8 +235,10 @@ class CensoredGP:
     # ----------------------------------------------------- model + fit steps
     def _make_likelihood(self):
         """The observation likelihood. Override to swap in a variant (e.g. the banded
-        hybrid); the base is the one-sided closed-form censored Gaussian."""
-        return CensoredGaussianLikelihood(threshold=self.threshold_t, noise=self.noise0)
+        hybrid); the base is the one-sided censored Gaussian with the chosen ``objective``."""
+        return CensoredGaussianLikelihood(threshold=self.threshold_t, objective=self.objective,
+                                          noise=self.noise0, noise_cap=self.noise_cap,
+                                          n_quad=self.n_quad)
 
     def _build(self, X: Tensor, Y: Tensor) -> SingleTaskVariationalGP:
         s = self.space
