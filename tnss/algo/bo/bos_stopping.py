@@ -54,6 +54,7 @@ from typing import Callable
 
 import numpy as np
 
+from tnss.algo.bo.surrogates.curve_model import CurveCompleter
 from tnss.algo.bo.surrogates.learning_curve_gp import LearningCurveGP
 
 # Decision codes used in the table and returned by the stopper.
@@ -89,10 +90,15 @@ class BOSConfig:
                                     # worst-case fits) with no change to the stopping decision.
     seed: int = 0                   # forward-simulation RNG seed
     # Extra fidelities (0-indexed epochs) recorded as fidelity-augmented surrogate
-    # inputs per evaluation, alongside the stop epoch n_t (paper default). Each is
-    # only added when it is below the run's stop epoch. Consumed by the BOSS
-    # recording path, and only when the surrogate is fidelity-aware.
-    interim_fid_epochs: tuple[int, ...] = (0, 9, 19, 29, 39)
+    # inputs per evaluation, alongside the stop epoch n_t. Each is only added when it is
+    # below the run's stop epoch. Consumed by the BOSS recording path, and only when the
+    # surrogate is fidelity-aware. Epoch 0 (the initial RSE) is dropped by default — it
+    # carries almost no signal. If interim_fid_random > 0, these fixed epochs are ignored
+    # and that many epochs are drawn uniformly at random from (0, n_star) per evaluation
+    # instead (spreading coverage toward the stop epoch, which anchors the asymptote far
+    # better than a fixed early set — see the curve-model study).
+    interim_fid_epochs: tuple[int, ...] = (9, 19, 29, 39)
+    interim_fid_random: int = 0
     # C2 (paper, Algorithm 1): gate the infeasible-kill on the surrogate's full-fidelity
     # confidence — only kill if sigma([x,N]) <= c2_kappa * sigma([x,n]) (kappa >= 1).
     # If the surrogate is too unsure about the converged outcome, keep decomposing. None
@@ -150,6 +156,10 @@ class BOSResult:
     stop_time: float | None = None  # perf_counter at the would-be stop (for exact time accounting)
     curve_gp: object | None = None  # the fitted BOS learning-curve GP — handed to the diagnostics band
     gp_origin: int = 0              # epoch the curve GP was fit at; the band predicts gp_origin+1..budget
+    # BOS wall-clock, summed over every table (re)build this decomposition (the price stopping
+    # adds on top of the decomposition itself). Split into the two costly pieces:
+    curve_gp_fit_s: float = 0.0     # fitting the learning-curve GP to the observed prefix
+    table_gen_s: float = 0.0        # forward simulation + backward induction (the decision table)
 
 
 # =========================================================== summary statistic
@@ -210,7 +220,7 @@ def _value_range(log_rse: bool) -> tuple[float, float]:
 # ======================================================= decision-table builder
 def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
                          cfg: BOSConfig, rng: np.random.Generator,
-                         debug: bool = False
+                         debug: bool = False, curve_model: "CurveCompleter | None" = None
                          ) -> tuple[np.ndarray, np.ndarray]:
     """Forward-simulate from the observed ``prefix`` and run backward induction to
     a per-(future-epoch, summary-cell) decision table.
@@ -241,10 +251,17 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     # *post-warm-up* epochs only, and feasibility is decided by the endpoint ell(N). The
     # kernel ('picheny' / 'expdecay', optionally input-warped) and value transform (raw /
     # log) come from cfg.
-    gp = LearningCurveGP(noise=cfg.noise, kernel=cfg.curve_kernel,
-                         input_warp=cfg.curve_input_warp, budget=budget,
-                         fit_maxiter=cfg.fit_maxiter).fit(np.arange(1, n0 + 1), prefix)
-    future = gp.sample_paths(np.arange(n0 + 1, budget + 1), cfg.n_samples, rng)
+    # Curve model (a CurveCompleter): a throwaway per-run GP fit to this prefix.
+    _t = time.perf_counter()
+    if curve_model is None:
+        kernel = cfg.curve_kernel if cfg.curve_kernel in ("picheny", "expdecay") else "picheny"
+        curve_model = LearningCurveGP(noise=cfg.noise, kernel=kernel,
+                                      input_warp=cfg.curve_input_warp, budget=budget,
+                                      fit_maxiter=cfg.fit_maxiter)
+    curve_model.fit(np.arange(1, n0 + 1), prefix)
+    gp_fit_s = time.perf_counter() - _t                   # curve-model fit / conditioning cost
+    _t = time.perf_counter()                              # forward-sim + backward-induction cost
+    future = curve_model.sample_paths(np.arange(n0 + 1, budget + 1), cfg.n_samples, rng)
     keep = np.all((future > lo) & (future < hi), axis=1)
     if keep.any():                                        # never let the filter empty the set
         future = future[keep]
@@ -289,9 +306,11 @@ def build_decision_table(prefix: np.ndarray, rho: float, budget: int,
     actions[:-1] = decode[np.argmin(losses[:-1], axis=2)]            # argmin over [d1, d2, cont]
     actions[-1] = np.where(losses[-1, :, 0] <= losses[-1, :, 1],     # last epoch: terminals only
                            STOP_FEASIBLE, STOP_INFEASIBLE)
+    table_gen_s = time.perf_counter() - _t
     if debug:
         return actions, grid, {"p_inf": p_inf, "counts": counts, "losses": losses,
-                               "gp": gp, "n0": n0}
+                               "gp": curve_model, "n0": n0,
+                               "gp_fit_s": gp_fit_s, "table_gen_s": table_gen_s}
     return actions, grid
 
 
@@ -313,6 +332,7 @@ class BOSStopper:
 
     def __init__(self, cfg: BOSConfig, *, rho: float, budget: int,
                  sigma_fn: "Callable[[float], float] | None" = None,
+                 curve_model: "CurveCompleter | None" = None,
                  bo_iteration: int = 0):
         self.cfg = cfg
         self.rho = float(rho)
@@ -327,8 +347,11 @@ class BOSStopper:
         self._origin = 0                                  # epoch the live table was built at
         self._n_cells = cfg.grid_size - 1
         self._gp = None                                   # fitted curve GP from the last table build (for diagnostics)
+        self._gp_fit_s = 0.0                              # accumulated learning-curve GP fit time
+        self._table_gen_s = 0.0                           # accumulated decision-table generation time
         self._decision: BOSResult | None = None
         self._sigma_fn = sigma_fn                         # sigma([x, fid]) from the surrogate (C2)
+        self._curve_model = curve_model                   # Stage 5: joint-surrogate completer (else per-run GP)
         self._converging = False                          # in the post-feasibility plateau phase
         self._best_loss = float("inf")
         self._wait = 0
@@ -377,6 +400,8 @@ class BOSStopper:
             self._decision = BOSResult(z, n, "completed", stopped_early=False)
         self._decision.curve_gp = self._gp                # hand the fitted curve GP to diagnostics
         self._decision.gp_origin = self._origin
+        self._decision.curve_gp_fit_s = self._gp_fit_s    # BOS time split (curve-GP fit vs table gen)
+        self._decision.table_gen_s = self._table_gen_s
         return self._decision
 
     @property
@@ -393,9 +418,12 @@ class BOSStopper:
         if cfg.k1_gamma is not None:                       # paper's time-varying K1,t = K1/gamma^t
             cfg = replace(cfg, K1=min(cfg.K1 / cfg.k1_gamma ** self._bo_iteration, 1e6))
         self._table, self._grid, dbg = build_decision_table(
-            curve, self.rho, self.budget, cfg, self._rng, debug=True)
+            curve, self.rho, self.budget, cfg, self._rng, debug=True,
+            curve_model=self._curve_model)
         self._origin = n
         self._gp = dbg.get("gp")
+        self._gp_fit_s += float(dbg.get("gp_fit_s", 0.0))       # sum across (re)builds
+        self._table_gen_s += float(dbg.get("table_gen_s", 0.0))
         return False
 
     def _converge_step(self, loss: float, n: int) -> bool:

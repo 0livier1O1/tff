@@ -161,6 +161,7 @@ class BOSS:
         self._frse: list[float] = []
         self._fcr: list[float] = []
         self._ffeasible: list[float] = []
+        self._fid_rng = np.random.default_rng(seed)   # random interim-fidelity epoch draws (BOS)
 
         # Per-step records for save_results -> the dashboard artifacts: one trace
         # row per evaluated structure, its decomposition loss curve, and a CPU
@@ -196,9 +197,8 @@ class BOSS:
             suggest_time = time.perf_counter() - t0
 
             step = self.n_init + b
-            self._snapshot_gp(
-                model, step=step, phase="bo"        # snapshot the base (un-pinned) model
-            )
+            if SAVE_GP_STATES:                      # snapshot the base (un-pinned) model —
+                self._snapshot_gp(model, step=step, phase="bo")   # only when we'll save it
             self._evaluate(
                 candidate, step=step, phase="bo", gp_fit_time=gp_fit_time,
                 suggest_time=suggest_time, model=model,        # model -> C2 sigma_fn
@@ -266,10 +266,18 @@ class BOSS:
             mr = self.space.max_rank
             ranks = np.clip(np.rint(np.asarray(oos_ranks)).astype(int), 1, mr)
             rse = np.asarray(oos_rse, dtype=float).reshape(-1)
+            cr = np.asarray(oos_cr, dtype=float).reshape(-1)
             x = torch.as_tensor((ranks - 1.0) / max(mr - 1, 1), dtype=torch.double)
             y = (rse <= self.threshold).astype(int)
-            self.diagnostics.set_oos(
-                x=x, ranks=ranks, cr=np.asarray(oos_cr, dtype=float).reshape(-1), rse=rse, y=y)
+            # For a regression surrogate, the true value it regresses at each OOS point
+            # (e.g. CR+λ·RSE) — the ground truth for the true-vs-predicted plot. A
+            # classifier has no such target_fn, so this stays None.
+            target = None
+            tf = getattr(self.surrogate, "target_fn", None)
+            if tf is not None:
+                target = np.asarray(tf(torch.as_tensor(rse), torch.as_tensor(cr),
+                                       torch.as_tensor(y, dtype=torch.double))).reshape(-1)
+            self.diagnostics.set_oos(x=x, ranks=ranks, cr=cr, rse=rse, y=y, target=target)
         except Exception:
             pass
 
@@ -368,9 +376,13 @@ class BOSS:
         # ground-truth diagnostics, but in production BOS would have stopped at n*. Charge the
         # EXACT measured wall-clock to that epoch — the stopper timestamps the would-be-stop
         # callback on the same perf_counter clock as t0 (not a per-epoch approximation). Normal
-        # mode already breaks at n*, so eval_time stays the real measured time.
+        # mode already breaks at n*, so eval_time stays the real measured time. The pre-correction
+        # value is the full-budget wall clock, kept (eval mode only) as the no-BOS baseline for
+        # the time-saved accounting — time saved = full - charged.
+        full_eval_time = None
         if (self.bos is not None and self.bos.eval_mode
                 and self._last_bos is not None and self._last_bos.stop_time is not None):
+            full_eval_time = eval_time
             eval_time = self._last_bos.stop_time - t0
 
         cr = float(self.compression_ratio(x))
@@ -396,6 +408,13 @@ class BOSS:
             row["bos_stop_epoch"] = self._last_bos.n_star
             row["bos_reason"] = self._last_bos.reason
             row["bos_epochs_saved"] = self.decomp_epochs - self._last_bos.n_star
+            # Time accounting: the full-budget decomposition (no-BOS baseline, eval mode only)
+            # and the two pieces of BOS's own cost — fitting the curve GP and generating the
+            # decision table. eval_time_s already includes both, up to n*.
+            if full_eval_time is not None:
+                row["bos_full_eval_time_s"] = full_eval_time
+            row["bos_curve_gp_fit_s"] = self._last_bos.curve_gp_fit_s
+            row["bos_table_gen_s"] = self._last_bos.table_gen_s
         self.rows.append(row)
         # The full loss curve (in eval mode, the ground-truth continuation past n*) plus, for
         # BOS runs, the would-be stop and the curve-GP predicted continuation band — diagnostics
@@ -466,7 +485,8 @@ class BOSS:
             # one continuous, interruptible run (the stateful stopper accumulates a
             # single curve, so restarts would corrupt it -> n_runs = 1)
             stopper = BOSStopper(self.bos, rho=self.threshold, budget=self.decomp_epochs,
-                                 sigma_fn=self._c2_sigma_fn(x, model))
+                                 sigma_fn=self._c2_sigma_fn(x, model),
+                                 curve_model=None)   # BOS uses its own per-run curve GP
             n_runs = 1
         rse, losses = reconstruction_error(
             self.target, adjacency, method=self.decomp_method,
@@ -547,7 +567,8 @@ class BOSS:
         below it (CR is fidelity-independent, so it is shared across the rows)."""
         n_star = self._last_bos.n_star if self._last_bos is not None else len(losses)
         fids, rses, feas = fidelity_observations(
-            losses, n_star, self.decomp_epochs, self.threshold, self.bos.interim_fid_epochs)
+            losses, n_star, self.decomp_epochs, self.threshold, self.bos.interim_fid_epochs,
+            n_random=self.bos.interim_fid_random, rng=self._fid_rng)
         for f, r, z in zip(fids, rses, feas):
             self._fx.append(torch.cat([x, torch.tensor([f], dtype=x.dtype)]))
             self._frse.append(float(r))

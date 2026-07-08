@@ -61,20 +61,31 @@ class FidelityPinnedModel(Model):
 
 
 def fidelity_observations(curve, n_star: int, budget: int, rho: float,
-                          interim_epochs) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                          interim_epochs, n_random: int = 0, rng=None
+                          ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-fidelity observations from one BOS-stopped decomposition curve.
 
-    Returns ``(fids, rses, feasible)`` — one row per recorded fidelity: the verdict
-    at the stop epoch ``n_star``, plus each epoch in ``interim_epochs`` strictly below
-    it. ``fids`` is the epoch fraction (1-indexed epoch number / ``budget``), ``rses``
-    the loss there, ``feasible`` the per-fidelity label ``1{rse <= rho}`` (so a feasible
-    run flips 0->1 at the epoch it crosses rho; an infeasible-killed run is all 0).
-    Feed these — paired with the shared ``x`` and (fidelity-independent) CR — to the
-    fidelity-augmented surrogate.
+    Returns ``(fids, rses, feasible)`` — one row per recorded fidelity: the verdict at
+    the stop epoch ``n_star``, plus the interim epochs strictly below it. ``fids`` is the
+    epoch fraction (1-indexed epoch number / ``budget``), ``rses`` the loss there,
+    ``feasible`` the per-fidelity label ``1{rse <= rho}`` (a feasible run flips 0->1 at
+    the epoch it crosses rho; an infeasible-killed run is all 0).
+
+    Interim epochs: the fixed ``interim_epochs`` (0-indexed), or — when ``n_random > 0``
+    — that many epochs drawn uniformly at random (``rng``) from ``(0, n_star-1)`` per call
+    (epoch 0 excluded; spreads coverage toward the stop). Feed these — with the shared
+    ``x`` and (fidelity-independent) CR — to the fidelity-augmented surrogate.
     """
     curve = np.asarray(curve, dtype=float)
-    idx = np.array(sorted({n_star - 1, *(f for f in interim_epochs if 0 <= f < n_star - 1)}),
-                   dtype=int)
+    if n_random > 0:
+        pool = np.arange(1, max(1, n_star - 1))                 # (0, n_star-1): drop epoch 0 + the stop
+        k = min(int(n_random), len(pool))
+        chosen = (rng.choice(pool, size=k, replace=False) if rng is not None and k > 0
+                  else pool[:k]).tolist()
+        idx = np.array(sorted({n_star - 1, *chosen}), dtype=int)
+    else:
+        idx = np.array(sorted({n_star - 1, *(f for f in interim_epochs if 0 <= f < n_star - 1)}),
+                       dtype=int)
     fids = (idx + 1) / float(budget)            # 1-indexed epoch number / N
     rses = curve[idx]
     feasible = (rses <= rho).astype(float)

@@ -28,12 +28,13 @@ from botorch.models import SingleTaskGP
 from gpytorch.means import ZeroMean
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
+from tnss.algo.bo.surrogates.curve_model import CurveCompleter
 from tnss.kernels.exp_decay_kernel import ExpDecayKernel
 from tnss.kernels.input_warp_kernel import maybe_warp
 from tnss.kernels.picheny_kernel import PichenyTimeKernel
 
 
-class LearningCurveGP:
+class LearningCurveGP(CurveCompleter):
     """Fit-once / sample-many GP over a decomposition loss curve.
 
     Parameters
